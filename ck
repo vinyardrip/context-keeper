@@ -87,21 +87,35 @@ class ContextKeeper:
             return None
 
     def _check_tools(self):
-        """Проверка доступности инструментов."""
+        """Проверка доступности инструментов и версии Python."""
+
+        # Проверка версии Python (возвращает True, если 3.8 или выше)
+        python_version_ok = sys.version_info >= (3, 8)
+
         tools = {
+            "python3.8+": {
+                "status": python_version_ok,
+                "desc": "Python Interpreter 3.8+",
+            },
             "git": {"status": shutil.which("git") is not None, "desc": "Git VCS"},
             "gh": {"status": shutil.which("gh") is not None, "desc": "GitHub CLI"},
             "glab": {"status": shutil.which("glab") is not None, "desc": "GitLab CLI"},
             "fzf": {"status": shutil.which("fzf") is not None, "desc": "Fuzzy Finder"},
             "jq": {"status": shutil.which("jq") is not None, "desc": "JSON Processor"},
         }
+
+        # Выведем предупреждение в консоль, если Python слишком старый
+        if not python_version_ok:
+            v = sys.version_info
+            print(
+                f"⚠️  Warning: Python {v.major}.{v.minor} detected. Python 3.8+ is required for stable work."
+            )
+
         return {name: info["status"] for name, info in tools.items()}
 
     def _is_git_repo(self):
         """Проверка, находимся ли мы в Git-репозитории."""
-        res = self._exec(
-            ["git", "rev-parse", "--is-inside-work-tree"], silent=True
-        )
+        res = self._exec(["git", "rev-parse", "--is-inside-work-tree"], silent=True)
         return res is not None
 
     def _get_recent_history(self, count=3):
@@ -120,13 +134,15 @@ class ContextKeeper:
         arch = self.ck_path / f"HISTORY_{ts}.md.bak"
 
         content = self.history_file.read_text()
-        last_entry_start = content.rfind('### ')
+        last_entry_start = content.rfind("### ")
         last_entry = content[last_entry_start:] if last_entry_start != -1 else ""
 
         self.history_file.rename(arch)
         header = f"# История {self.root.name}\nАрхив: {arch.name}\n\n"
         self.history_file.write_text(header + last_entry)
-        print(f"🗄 История достигла лимита ({HISTORY_LIMIT} записей) и была архивирована. Контекст сохранен.")
+        print(
+            f"🗄 История достигла лимита ({HISTORY_LIMIT} записей) и была архивирована. Контекст сохранен."
+        )
 
     def init(self):
         """Инициализация проекта Context Keeper."""
@@ -181,7 +197,9 @@ class ContextKeeper:
                 tools = state_data.get("tools", {})
             if tools.get("gh"):
                 if (
-                    input("🌐 Remote не найден. Создать на GitHub через gh? (y/N): ").lower()
+                    input(
+                        "🌐 Remote не найден. Создать на GitHub через gh? (y/N): "
+                    ).lower()
                     == "y"
                 ):
                     vis = (
@@ -190,15 +208,33 @@ class ContextKeeper:
                         else "--private"
                     )
                     self._exec(
-                        ["gh", "repo", "create", self.root.name, vis, "--source=.", "--push"]
+                        [
+                            "gh",
+                            "repo",
+                            "create",
+                            self.root.name,
+                            vis,
+                            "--source=.",
+                            "--push",
+                        ]
                     )
                 else:
                     self._remote_declined = True
 
         print("\nТип изменений:")
-        print("1: feat  (новый функционал)\n2: fix   (исправление)\n3: chore (рутина)\n4: docs  (документация)")
-        choice = input("Выберите (1-4, по умолчанию 1): ")
-        prefix = {"2": "fix", "3": "chore", "4": "docs"}.get(choice, "feat")
+        print(
+            "1: feat  (новый функционал)\n2: fix   (исправление)\n3: chore (рутина)\n4: docs  (документация)\n5: custom (свой вариант)"
+        )
+        choice = input("Выберите (1-5, по умолчанию 1): ")
+
+        if choice == "5":
+            prefix = (
+                input("Введите свой префикс (например, refactor): ").strip().lower()
+            )
+            if not prefix:
+                prefix = "feat"
+        else:
+            prefix = {"2": "fix", "3": "chore", "4": "docs"}.get(choice, "feat")
 
         if input(f"🚀 Выполнить коммит '{prefix}: ...' и Push? (y/N): ").lower() == "y":
             commit_msg = f"{prefix}: [{task}] {comment}"
@@ -245,7 +281,7 @@ class ContextKeeper:
 
         # ПРОВЕРКА ЛИМИТА ПО ЗАПИСЯМ (###) И РОТАЦИЯ
         if self.history_file.exists():
-            if self.history_file.read_text().count('### ') > HISTORY_LIMIT:
+            if self.history_file.read_text().count("### ") > HISTORY_LIMIT:
                 self._rotate()
 
     def status(self):
@@ -260,9 +296,7 @@ class ContextKeeper:
         print(f" 🎯 ТЕКУЩИЙ ШАГ: {self._get_current_task()}")
 
         if self._is_git_repo():
-            br = self._exec(
-                ["git", "branch", "--show-current"], silent=True
-            )
+            br = self._exec(["git", "branch", "--show-current"], silent=True)
             print(f" 🌿 ВЕТКА: {br or 'unknown'}")
 
         tools = [t for t, status in s.get("tools", {}).items() if status]
