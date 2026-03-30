@@ -1,0 +1,29 @@
+# === Context Keeper (Core) ===
+.ck/*.bak
+.ck/state.json
+.ck/config.local.json
+
+# === Project Artifacts ===
+ck_test/
+test.txt
+
+# === AI & Context ===
+# Оставляем prompt.md, но скрываем тяжелые логи
+GEMINI.md
+CLAUDE.md
+.cursorrules
+
+# === Python Environment ===
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+env/
+
+# === System & IDE ===
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
