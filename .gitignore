@@ -1,29 +1,84 @@
-# === Context Keeper (Core) ===
+# =================================================================
+# DPX Project Specific
+# =================================================================
+# Игнорируем локальный конфиг, чтобы не "утекли" личные пути и пароли!
+# (В репозитории лучше держать файл config/dpx.conf.example)
+#config/dpx.conf
+*.log
+
+# =================================================================
+# Context Keeper & User Tests
+# =================================================================
 .ck/*.bak
 .ck/state.json
 .ck/config.local.json
-
-# === Project Artifacts ===
 ck_test/
 test.txt
+test_temp/
 
-# === AI & Context ===
-# Оставляем prompt.md, но скрываем тяжелые логи
+# =================================================================
+# AI & LLM Assistants (Скрываем мусор от нейросетей)
+# =================================================================
+# Оставляем prompt.md (не добавляем сюда), но скрываем всё остальное:
 GEMINI.md
 CLAUDE.md
 .cursorrules
+cursorrules
+.clinerules
+.roorules
+.windsurfrules
+AI_INSTRUCTIONS.md
+PROMPTS.md
+.github/copilot-instructions.md
 
-# === Python Environment ===
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.venv/
-env/
+# Кэш, история и сессии ИИ-агентов
+.aider*
+.aider.chat.history.md
+.aider.input.history
+.aider.tags.cache.*.sqlite
+.claude/
+.gemini/
+.cursor/
+.continue/
+.cline/
+.roo/
+.ai-cache/
+.llm-cache/
+ai_session/
+__ai_context__/
+chat_history.md
+context_dump.md
+*.ai.log
+*.llm.cache
 
-# === System & IDE ===
+# =================================================================
+# System & OS Files
+# =================================================================
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# =================================================================
+# IDEs & Editors
+# =================================================================
 .idea/
 .vscode/
 *.swp
+*.swo
 *~
+*.bak
+*.tmp
+
+# =================================================================
+# Python Environment (если используются скрипты/тесты)
+# =================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
