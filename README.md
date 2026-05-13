@@ -1,5 +1,5 @@
 # Context Keeper (ck) 🧠
-Minimalist Unix-way "external memory" for developers  
+Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
 [![version](https://img.shields.io/badge/version-0.0.9-blue)]()
@@ -36,25 +36,25 @@ Context Keeper (ck) acts as a bridge between your brain, AI agents, and Git, per
 ---
 
 ## ✨ Features
-- Plain Text Storage: All data stored in human-readable Markdown files — no databases, no lock-in  
-- Git Integration: Native support for gh and glab CLI tools for remote repository management  
-- Auto-Archiving: Automatic rotation of history files when reaching the configurable HISTORY_LIMIT  
-- Strict Parsing: Enforced formatting standards (- [] / - [x]) to prevent "dirty" markup  
-- AI-Ready: Optimized context preservation for AI workflows  
-- Self-Contained: Templates embedded in script  
-- Self-Installer: ck install / ck uninstall  
-- Self-Updater: ck update  
-- CLI Task Management: ck add <text>  
-- Full Plan View: ck st --all  
+- Plain Text Storage: All data stored in human-readable Markdown files — no databases, no lock-in
+- Git Integration: Native support for gh and glab CLI tools for remote repository management
+- Auto-Archiving: Automatic rotation of history files when reaching the configurable HISTORY_LIMIT
+- Strict Parsing: Enforced formatting standards (- [] / - [x]) to prevent "dirty" markup
+- AI-Ready: Optimized context preservation for AI workflows
+- Self-Contained: Templates embedded in script
+- Self-Installer: ck install / ck uninstall
+- Self-Updater: ck update
+- CLI Task Management: ck add <text>
+- Full Plan View: ck st --all
 
 ---
 
 ## 📋 Requirements
-- Python 3.8+  
-- Git  
-- fzf  
-- jq  
-- gh or glab  
+- Python 3.8+
+- Git
+- fzf
+- jq
+- gh or glab
 
 ---
 
@@ -112,11 +112,11 @@ ck -v    # → ck version 0.0.9
 ---
 
 ## ck save Workflow
-- Display current active task  
-- Enter commit description + optional log  
-- Select type (feat, fix, chore, docs, custom)  
-- Optional push  
-- Auto-archive when limit reached  
+- Display current active task
+- Enter commit description + optional log
+- Select type (feat, fix, chore, docs, custom)
+- Optional push
+- Auto-archive when limit reached
 
 ---
 
@@ -140,15 +140,17 @@ All templates embedded in binary
 ---
 
 ## 🗺 Roadmap
-- Global Config  
-- Archive Management  
-- Context Injection  
-- Self-installer  
-- Snapshot Mode  
-- Global Observer  
-- Update System  
-- CLI Task Add  
-- Full Plan View  
+-  **Core Analytics**: Progress tracking (%), task counters, and skip detection logic
+- **Smart Rendering**: "Triad" view (Next/Current/Previous) with 120-char log truncation
+- **Object Parsing**: Entity-based block processing (Task + Log + ID) instead of flat lines
+- **Snapshot Mode**: Preventive state backups and data integrity checks ("safety first" mode)
+- **Context Injection**: Mechanism to inject project context into external AI prompts and tools
+- **Archive Management**: Advanced history control and search across HISTORY.md.bak files
+- **Global Config & Observer**: Centralized settings (~/.ckrc) and cross-project dashboard
+- **Interactive Workflow**: ID-based task completion and real-time plan updates during `ck save`
+- **Instant Brain Dump**: `ck add <text>` with automatic `- []` formatting and positioning
+- **CLI Improvements**: Bulk management (`ck done <range>`), and `ck st --all` view
+- **Self-System**: Robust self-installer, uninstaller, and automatic update mechanism
 
 ---
 
@@ -179,20 +181,20 @@ Context Keeper (ck) служит мостом между вашим разумо
 ---
 
 ## ✨ Возможности
-- Хранение в тексте  
-- Интеграция с Git  
-- Авто-архивация  
-- Строгий парсинг  
-- Поддержка AI  
+- Хранение в тексте
+- Интеграция с Git
+- Авто-архивация
+- Строгий парсинг
+- Поддержка AI
 
 ---
 
 ## 📋 Требования
-- Python 3.8+  
-- Git  
-- fzf  
-- jq  
-- gh или glab  
+- Python 3.8+
+- Git
+- fzf
+- jq
+- gh или glab
 
 ---
 
@@ -223,22 +225,30 @@ chmod +x ck
 ---
 
 ## Сценарий работы ck save
-- Отображение задачи  
-- Ввод коммита  
-- Выбор типа  
-- Push  
-- Авто-архивация  
+- Отображение задачи
+- Ввод коммита
+- Выбор типа
+- Push
+- Авто-архивация
 
 ---
 
 ## 🔧 Механика работы
-- Строгий формат: `- []`  
-- Ротация истории  
-- Интеграция с Git  
+- Строгий формат: `- []`
+- Ротация истории
+- Интеграция с Git
 
 ---
 
 ## 🗺 Roadmap
-- Глобальный конфиг  
-- Snapshot Mode  
-- Обновления  
+- **Аналитика и Статистика**: Расчет прогресса (%), счетчик задач и детектор пропусков
+- **Умный вывод (Триада)**: Отображение (Будущее/Текущее/Прошлое) с обрезкой логов (120 симв.)
+- **Объектный парсинг**: Обработка блоков (Задача + Лог + ID) вместо простых строк
+- **Snapshot Mode**: Превентивные бэкапы состояния и проверка целостности («режим страховки»)
+- **Context Injection**: Механизм внедрения контекста в сторонние инструменты и ИИ-запросы
+- **Archive Management**: Расширенное управление архивами и поиск по HISTORY.md.bak
+- **Global Config & Observer**: Централизованные настройки (~/.ckrc) и панель мониторинга проектов
+- **Interactive Workflow**: Выбор ID выполненной задачи и правка плана прямо во время `ck save`
+- **Мгновенный Brain Dump**: Команда `ck add <текст>` с авто-разметкой `- []` и позиционированием
+- **CLI Improvements**: Массовое управление (`ck done <range>`) и режим просмотра `ck st --all`
+- **Self-System**: Надежный установщик, деинсталлятор и система автоматического обновления
