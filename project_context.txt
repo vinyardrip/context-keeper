@@ -1,0 +1,550 @@
+=== FILE: ck ===
+#!/usr/bin/env python3
+"""Context Keeper CLI entry point.
+
+Thin wrapper that delegates to the modular package ``cklib/``.
+Run as:
+
+    ./ck <command>
+    python ck <command>
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+_HERE = Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+
+from cklib.cli import main  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(main())
+
+=== FILE: tests/test_registry.py ===
+"""Tests for the global project registry.
+
+``Path.home()`` is redirected to an isolated tmp directory in
+``tests/conftest.py``, so these tests never touch the user's real
+``~/.config/ck/projects.json``.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from cklib import config as ckconfig
+from cklib import registry
+
+
+@pytest.fixture
+def isolated_home(tmp_path: Path, monkeypatch):
+    """Each test gets its own fake ``$HOME`` and registry file.
+
+    Patches the path constants on both ``cklib.config`` and
+    ``cklib.registry`` modules so that ``register_project``,
+    ``list_projects`` etc. write into a per-test tmp directory.
+    """
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    new_global_dir = fake_home / ".config" / "ck"
+    new_registry_file = new_global_dir / "projects.json"
+    new_legacy = fake_home / ".ckrc"
+
+    monkeypatch.setattr(ckconfig, "GLOBAL_CONFIG_DIR", new_global_dir)
+    monkeypatch.setattr(ckconfig, "GLOBAL_REGISTRY_FILE", new_registry_file)
+    monkeypatch.setattr(ckconfig, "LEGACY_GLOBAL_CONFIG_FILE", new_legacy)
+    monkeypatch.setattr(registry, "GLOBAL_CONFIG_DIR", new_global_dir)
+    monkeypatch.setattr(registry, "GLOBAL_REGISTRY_FILE", new_registry_file)
+    monkeypatch.setattr(registry, "LEGACY_GLOBAL_CONFIG_FILE", new_legacy)
+    return fake_home
+
+
+def _project(tmp_path: Path, name: str = "demo") -> Path:
+    p = tmp_path / name
+    p.mkdir()
+    return p
+
+
+def test_register_creates_file_and_entry(tmp_path: Path, isolated_home):
+    p = _project(tmp_path, "alpha")
+    entry = registry.register_project(p, name="alpha")
+    assert entry.name == "alpha"
+    assert entry.path == str(p.resolve())
+
+    data = json.loads(ckconfig.GLOBAL_REGISTRY_FILE.read_text())
+    assert len(data["projects"]) == 1
+    assert data["projects"][0]["name"] == "alpha"
+
+
+def test_register_idempotent_updates_last_seen(tmp_path: Path, isolated_home):
+    p = _project(tmp_path, "beta")
+    e1 = registry.register_project(p)
+    first_seen = e1.last_seen
+
+    e2 = registry.register_project(p)
+    assert e2.last_seen >= first_seen
+    assert e1.name == e2.name and e1.path == e2.path
+
+    # Only one entry exists, not duplicated
+    data = json.loads(ckconfig.GLOBAL_REGISTRY_FILE.read_text())
+    assert len(data["projects"]) == 1
+
+
+def test_list_returns_newest_first(tmp_path: Path, isolated_home):
+    a = _project(tmp_path, "a")
+    b = _project(tmp_path, "b")
+    registry.register_project(a)
+    registry.register_project(b)
+    projects = registry.list_projects()
+    assert projects[0].name == "b"
+    assert projects[1].name == "a"
+
+
+def test_update_active_task(tmp_path: Path, isolated_home):
+    p = _project(tmp_path)
+    registry.register_project(p)
+    registry.update_active_task(p, task_id=7, task_title="hello")
+    entries = registry.list_projects()
+    assert entries[0].active_task_id == 7
+    assert entries[0].active_task_title == "hello"
+
+
+def test_remove_project(tmp_path: Path, isolated_home):
+    p = _project(tmp_path)
+    registry.register_project(p)
+    assert len(registry.list_projects()) == 1
+
+    removed = registry.remove_project(p)
+    assert removed is True
+    assert registry.list_projects() == []
+
+    # Removing again returns False
+    assert registry.remove_project(p) is False
+
+
+def test_legacy_migration(tmp_path: Path, isolated_home):
+    """Legacy ~/.ckrc with JSON content must migrate to ~/.config/ck/projects.json."""
+    legacy = isolated_home / ".ckrc"
+    legacy.write_text(json.dumps({
+        "projects": [
+            {"name": "legacy1", "path": "/some/where",
+             "registered_at": "2024-01-01T00:00:00", "last_seen": ""},
+        ]
+    }), encoding="utf-8")
+    projects = registry.list_projects()
+    assert len(projects) == 1
+    assert projects[0].name == "legacy1"
+    assert projects[0].path == "/some/where"
+
+
+def test_atomic_write_does_not_corrupt(tmp_path: Path, isolated_home):
+    """Atomic write: file must exist and be valid JSON after save."""
+    p = _project(tmp_path)
+    registry.register_project(p)
+    raw = ckconfig.GLOBAL_REGISTRY_FILE.read_text()
+    # Must round-trip as JSON
+    json.loads(raw)
+    # tmp leftovers must be cleaned
+    leftovers = list(ckconfig.GLOBAL_REGISTRY_FILE.parent.glob(".ck-registry-*.tmp"))
+    assert leftovers == []
+
+=== FILE: tests/test_gitignore.py ===
+"""Tests for the .gitignore modifier."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from cklib.core import ContextKeeper
+
+
+def test_creates_gitignore_if_missing(tmp_path: Path):
+    gi = tmp_path / ".gitignore"
+    assert not gi.exists()
+
+    added = ContextKeeper._ensure_root_gitignore(tmp_path)
+    assert gi.exists()
+    assert ".ck/*.bak" in added
+    assert ".ck/state.json" in added
+    text = gi.read_text()
+    assert ".ck/*.bak" in text
+    assert ".ck/state.json" in text
+
+
+def test_appends_only_missing_entries(tmp_path: Path):
+    gi = tmp_path / ".gitignore"
+    gi.write_text("# Pre-existing\nnode_modules\n", encoding="utf-8")
+
+    added = ContextKeeper._ensure_root_gitignore(tmp_path)
+    assert ".ck/*.bak" in added
+    assert ".ck/state.json" in added
+
+    # Calling again must be idempotent
+    added_again = ContextKeeper._ensure_root_gitignore(tmp_path)
+    assert added_again == []
+
+    text = gi.read_text()
+    assert "node_modules" in text
+    assert "Context Keeper" in text
+
+
+def test_does_not_remove_tracked_entries(tmp_path: Path):
+    """The modifier must never delete PLAN.md, prompt.md, README.md from tracking."""
+    gi = tmp_path / ".gitignore"
+    gi.write_text(".ck/*.bak\n", encoding="utf-8")
+
+    ContextKeeper._ensure_root_gitignore(tmp_path)
+    text = gi.read_text()
+    assert ".ck/PLAN.md" not in text, "tracked files must not be excluded"
+    assert ".ck/prompt.md" not in text
+    assert ".ck/README.md" not in text
+
+
+def test_ck_gitignore_created_with_defaults(tmp_path: Path):
+    ck_dir = tmp_path / ".ck"
+    ck_dir.mkdir()
+    ContextKeeper._ensure_ck_gitignore(ck_dir)
+    gi = ck_dir / ".gitignore"
+    assert gi.exists()
+    text = gi.read_text()
+    assert "*.bak" in text
+    assert "state.json" in text
+
+
+def test_ck_gitignore_idempotent(tmp_path: Path):
+    ck_dir = tmp_path / ".ck"
+    ck_dir.mkdir()
+    ContextKeeper._ensure_ck_gitignore(ck_dir)
+    original = (ck_dir / ".gitignore").read_text()
+    ContextKeeper._ensure_ck_gitignore(ck_dir)
+    after = (ck_dir / ".gitignore").read_text()
+    assert original == after
+
+=== FILE: tests/test_save_flow.py ===
+"""Tests for the save flow (two-step Notes + local commit)."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from cklib import config as ckconfig
+from cklib import registry as ckregistry
+from cklib.core import ContextKeeper
+from cklib.models import TaskStatus
+from cklib.parser import parse_plan_file
+
+
+@pytest.fixture(autouse=True)
+def isolated_home(tmp_path: Path, monkeypatch):
+    """Redirect the global registry to a per-test tmp directory."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    new_global_dir = fake_home / ".config" / "ck"
+    new_registry_file = new_global_dir / "projects.json"
+    new_legacy = fake_home / ".ckrc"
+    monkeypatch.setattr(ckconfig, "GLOBAL_CONFIG_DIR", new_global_dir)
+    monkeypatch.setattr(ckconfig, "GLOBAL_REGISTRY_FILE", new_registry_file)
+    monkeypatch.setattr(ckconfig, "LEGACY_GLOBAL_CONFIG_FILE", new_legacy)
+    monkeypatch.setattr(ckregistry, "GLOBAL_CONFIG_DIR", new_global_dir)
+    monkeypatch.setattr(ckregistry, "GLOBAL_REGISTRY_FILE", new_registry_file)
+    monkeypatch.setattr(ckregistry, "LEGACY_GLOBAL_CONFIG_FILE", new_legacy)
+
+
+@pytest.fixture
+def project(tmp_path: Path, monkeypatch) -> ContextKeeper:
+    """Set up a fully initialized project at ``tmp_path``."""
+    monkeypatch.chdir(tmp_path)
+    ck = ContextKeeper(root=tmp_path)
+    ck.init()
+    # Add a few tasks
+    ck.add_task("alpha")
+    ck.add_task("beta")
+    ck.add_task("gamma")
+    return ck
+
+
+def test_save_records_note_and_commits_locally(project: ContextKeeper, tmp_path):
+    ck = project
+    inputs = iter([
+        "s",                    # Step 1: skip inline editor
+        "implemented the thing",
+        "feat: implement alpha",
+        "n",                    # Decline "git init" (no git repo in tmp)
+        "y",                    # confirm commit
+    ])
+
+    def fake_input(prompt: str = "") -> str:
+        return next(inputs)
+
+    import cklib.git as gith_mod
+    orig_local_commit = gith_mod.local_commit
+    gith_mod.local_commit = lambda msg, path=None: True
+    try:
+        ck.save(input_fn=fake_input)
+    finally:
+        gith_mod.local_commit = orig_local_commit
+
+    # History must contain the new note
+    history = ck.history_file.read_text(encoding="utf-8")
+    assert "implemented the thing" in history
+    assert "###" in history
+
+
+def test_save_skips_note_when_user_skips(project: ContextKeeper):
+    ck = project
+    inputs = iter([
+        "s",        # Step 1: skip
+        "chore: update",  # short summary
+        "n",        # decline git init
+        "",         # accept default commit message
+        "n",        # decline commit
+    ])
+    def fake_input(prompt: str = "") -> str:
+        return next(inputs)
+
+    import cklib.git as gith_mod
+    orig = gith_mod.local_commit
+    gith_mod.local_commit = lambda msg, path=None: True
+    try:
+        result = ck.save(input_fn=fake_input)
+    finally:
+        gith_mod.local_commit = orig
+    # No commit, but history still gets the marker
+    assert result is None
+    assert ck.history_file.exists()
+
+
+def test_save_aborts_without_init(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    ck = ContextKeeper(root=tmp_path)
+    # No init() called → state.json absent
+    result = ck.save(input_fn=lambda p="": "n")
+    assert result is None
+
+
+def test_active_task_is_focused_after_start(project: ContextKeeper):
+    ck = project
+    res = ck.start(2)
+    assert res.task_id == 2
+    tl = parse_plan_file(ck.plan_file)
+    assert tl.focused[0].id == 2
+    assert tl.by_id(1).status == TaskStatus.OPEN
+
+
+def test_done_marks_single_and_ranges(project: ContextKeeper):
+    ck = project
+    ck.done("1")
+    ck.done("2-3")
+    ck.done("4")
+    tl = parse_plan_file(ck.plan_file)
+    assert all(t.status == TaskStatus.DONE for t in tl.tasks)
+
+
+def test_done_with_invalid_id_raises(project: ContextKeeper):
+    ck = project
+    with pytest.raises(KeyError):
+        ck.done("999")
+
+
+def test_add_inserts_before_completed(project: ContextKeeper):
+    ck = project
+    new_id = ck.add_task("delta")
+    text = ck.plan_file.read_text(encoding="utf-8")
+    assert "- [] delta" in text
+    assert text.index("- [] delta") < text.index("## Completed")
+    # IDs continue from previous
+    tl = parse_plan_file(ck.plan_file)
+    assert new_id == len(tl.tasks)
+
+=== FILE: tests/conftest.py ===
+"""Test configuration: make ``cklib`` importable from tests/.
+
+Provides an ``isolated_home`` fixture that redirects the global registry
+to a per-test tmp directory by patching the path constants in
+``cklib.config`` before any test runs.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+=== FILE: tests/test_parser.py ===
+"""Tests for the PLAN.md AST parser."""
+
+from __future__ import annotations
+
+import pytest
+
+from cklib.models import TaskStatus
+from cklib.parser import (
+    insert_task_before_completed,
+    parse_plan,
+    render_plan,
+    update_task_in_text,
+)
+
+
+SAMPLE = """# Project
+
+## Current Sprint
+- [] first task
+- [>] second focused
+- [x] third done
+
+## Done section
+- [x] old done
+"""
+
+
+def test_parses_all_three_statuses():
+    tl = parse_plan(SAMPLE)
+    assert tl.total == 4
+    assert [t.status for t in tl.tasks] == [
+        TaskStatus.OPEN,
+        TaskStatus.FOCUSED,
+        TaskStatus.DONE,
+        TaskStatus.DONE,
+    ]
+
+
+def test_assigns_ids_in_order():
+    tl = parse_plan(SAMPLE)
+    assert [t.id for t in tl.tasks] == [1, 2, 3, 4]
+
+
+def test_preserves_line_numbers():
+    tl = parse_plan(SAMPLE)
+    # SAMPLE layout:
+    #   1: # Project
+    #   2: (blank)
+    #   3: ## Current Sprint
+    #   4: - [] first task
+    #   5: - [>] second focused
+    #   6: - [x] third done
+    #   7: (blank)
+    #   8: ## Done section
+    #   9: - [x] old done
+    assert [t.line_number for t in tl.tasks] == [4, 5, 6, 9]
+
+
+def test_section_assignment():
+    tl = parse_plan(SAMPLE)
+    assert tl.tasks[0].section == "Current Sprint"
+    assert tl.tasks[3].section == "Done section"
+
+
+def test_titles_stripped():
+    tl = parse_plan(SAMPLE)
+    assert tl.tasks[0].title == "first task"
+    assert tl.tasks[1].title == "second focused"
+
+
+def test_only_one_focus_normalized():
+    """Multiple [>] entries must be collapsed to one."""
+    text = "- [>] a\n- [>] b\n- [>] c\n"
+    tl = parse_plan(text)
+    statuses = [t.status for t in tl.tasks]
+    assert statuses.count(TaskStatus.FOCUSED) == 1
+    assert tl.tasks[0].status == TaskStatus.FOCUSED
+    assert tl.tasks[1].status == TaskStatus.OPEN
+    assert tl.tasks[2].status == TaskStatus.OPEN
+
+
+def test_strict_marker_rejects_space_inside_brackets():
+    """The strict format is `[]`, not `[ ]`. The parser must not pick up `[ ]`."""
+    text = "- [ ] spaced\n- [] strict\n"
+    tl = parse_plan(text)
+    assert tl.total == 1
+    assert tl.tasks[0].title == "strict"
+
+
+def test_blank_lines_and_headers_ignored():
+    """Off-by-one safety: blank lines and headers must not break parsing."""
+    text = "\n\n# Title\n\n## Sub\n\n- [] real\n\n\n"
+    tl = parse_plan(text)
+    assert tl.total == 1
+    assert tl.tasks[0].title == "real"
+    assert tl.tasks[0].section == "Sub"
+
+
+def test_completion_pct_and_counts():
+    tl = parse_plan(SAMPLE)
+    assert tl.completion_pct == 50.0
+    assert len(tl.done) == 2
+    assert len(tl.open) == 1
+    assert len(tl.focused) == 1
+
+
+def test_gap_detection():
+    """Open tasks appearing after a done task are gaps."""
+    text = "- [x] done\n- [] gap1\n- [] ok\n"
+    tl = parse_plan(text)
+    assert tl.gap_ids() == [2, 3]
+
+
+def test_no_gaps_when_all_open_before_done():
+    text = "- [] a\n- [] b\n- [x] c\n"
+    tl = parse_plan(text)
+    assert tl.gap_ids() == []
+
+
+def test_active_returns_focus_first_then_open():
+    tl = parse_plan(SAMPLE)
+    assert tl.active().id == 2
+
+    no_focus = parse_plan("- [] a\n- [] b\n")
+    assert no_focus.active().id == 1
+
+
+def test_unknown_marker_skipped():
+    text = "- [?] weird\n- [] normal\n"
+    tl = parse_plan(text)
+    assert tl.total == 1
+    assert tl.tasks[0].title == "normal"
+
+
+def test_insert_before_completed_when_present():
+    text = "# P\n\n## Current\n- [] a\n\n## Completed\n- [x] b\n"
+    out = insert_task_before_completed(text, "new")
+    assert "- [] new" in out
+    assert out.index("- [] new") < out.index("## Completed")
+
+
+def test_insert_appends_when_no_completed_header():
+    text = "# P\n\n## Current\n- [] a\n"
+    out = insert_task_before_completed(text, "new")
+    assert out.rstrip().endswith("- [] new")
+
+
+def test_update_task_in_text_changes_status():
+    text = "- [] a\n- [] b\n"
+    out = update_task_in_text(text, 1, TaskStatus.FOCUSED)
+    assert "- [>] a" in out
+    assert "- [] b" in out
+
+
+def test_update_task_in_text_raises_for_unknown_id():
+    with pytest.raises(KeyError):
+        update_task_in_text("- [] a\n", 99, TaskStatus.DONE)
+
+
+def test_render_plan_round_trip_preserves_lines():
+    tl = parse_plan(SAMPLE)
+    out = render_plan(tl)
+    # All task markers should be preserved
+    assert "- [] first task" in out
+    assert "- [>] second focused" in out
+    assert "- [x] third done" in out
+
