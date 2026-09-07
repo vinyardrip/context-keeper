@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.0.9-blue)]()
+[![version](https://img.shields.io/badge/version-0.1.0-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -37,44 +37,50 @@ Context Keeper (ck) acts as a bridge between your brain, AI agents, and Git, per
 
 ## ✨ Features
 - Plain Text Storage: All data stored in human-readable Markdown files — no databases, no lock-in
-- Git Integration: Native support for gh and glab CLI tools for remote repository management
+- Git Integration: Local commits only — `ck` never pushes, clones, or touches remotes without an explicit `ck update` (fast-forward pull)
 - Auto-Archiving: Automatic rotation of history files when reaching the configurable HISTORY_LIMIT
-- Strict Parsing: Enforced formatting standards (- [] / - [x]) to prevent "dirty" markup
+- Strict Parsing: Task statuses `- [ ]` / `- [>]` / `- [x]` (legacy `- []` input is accepted and canonicalized on write)
 - AI-Ready: Optimized context preservation for AI workflows
-- Self-Contained: Templates embedded in script
-- Self-Installer: ck install / ck uninstall
-- Self-Updater: ck update
-- CLI Task Management: ck add <text>
+- Self-Contained: Templates embedded in the package
+- Self-Installer: ck install / ck uninstall (user-level symlink, no sudo)
+- Self-Updater: ck update (git fetch + `pull --ff-only`, refuses on dirty work tree)
+- CLI Task Management: ck add <text>, ck start <ID>, ck done <ID|range|list>
+- Global Registry: Cross-project dashboard (ck dashboard) backed by `~/.config/ck/projects.json`
+- Fail-Closed Locking: Cross-process file locking guards registry, PLAN.md, HISTORY.md and state.json writes
 - Full Plan View: ck st --all
 
 ---
 
 ## 📋 Requirements
 - Python 3.8+
-- Git
-- fzf
-- jq
-- gh or glab
+- Git (optional — ck save gracefully skips commits without it)
+- fzf, jq (optional integrations)
 
 ---
 
 ## 📦 Installation
 
-### Option 1 — One-liner (recommended)
+### Option 1 — Clone (recommended)
 ```bash
-curl -sSL https://raw.githubusercontent.com/vinyardrip/context-keeper/main/ck -o ck && chmod +x ck && sudo mv ck /usr/local/bin/ck
+git clone https://github.com/vinyardrip/context-keeper.git
+cd context-keeper
+./ck init      # optional: try it out
+./install.sh   # symlinks ck into ~/.local/bin (no sudo)
 ```
 
 ### Option 2 — Built-in installer
 ```bash
-curl -sSL https://raw.githubusercontent.com/vinyardrip/context-keeper/main/ck -o ck
+git clone https://github.com/vinyardrip/context-keeper.git
+cd context-keeper
 chmod +x ck
 ./ck install
 ```
 
+> Note: `ck` is a thin wrapper over the `cklib/` package — install from the repository (or via `pip install .`), not as a standalone single file.
+
 ### Verify
 ```bash
-ck -v    # → ck version 0.0.9
+ck -v    # → ck version 0.1.0
 ```
 
 ---
@@ -86,6 +92,7 @@ ck -v    # → ck version 0.0.9
 ├── PLAN.md
 ├── HISTORY.md
 ├── prompt.md
+├── README.md
 ├── .gitignore
 └── HISTORY_*.md.bak
 ```
@@ -96,16 +103,24 @@ ck -v    # → ck version 0.0.9
 
 | COMMAND | DESCRIPTION |
 |--------|------------|
-| ck init | Initialize project |
-| ck edit | Open PLAN.md |
-| ck save | Task completion workflow |
+| ck init | Initialize project (.ck/ structure, registry, gitignore rules) |
+| ck add \<text\> | Add a new open task (inserted before `## Completed`) |
+| ck start \<ID\> | Focus a task (`- [>]`) |
+| ck done \<ID\|range\|list\> | Mark task(s) done (`- [x]`), e.g. `3`, `2-4`, `1,3,5` |
+| ck edit | Open PLAN.md in $EDITOR |
+| ck save | Task completion workflow: optional note + optional **local** commit |
+| ck log | Open HISTORY.md in $EDITOR |
 | ck st | Status overview |
-| ck st --all | Full status |
-| ck add | Add task |
-| ck log | View history |
-| ck install | Install |
-| ck uninstall | Remove |
-| ck update | Update |
+| ck st --all | Full status incl. full PLAN.md |
+| ck st --global / ck dashboard | Cross-project dashboard table |
+| ck list / ck list -g | List registered projects (same as dashboard) |
+| ck register [-n NAME] [--path PATH] | Add a project to the global registry |
+| ck unregister [--path PATH \| NAME] | Remove a project from the registry |
+| ck prune | Drop registry entries whose folders no longer exist |
+| ck info | Installation diagnostics (version, branch, paths) |
+| ck install | Symlink ck to ~/.local/bin (no sudo) |
+| ck uninstall | Remove the ~/.local/bin symlink |
+| ck update | Self-update via git fetch + pull --ff-only (refuses if dirty) |
 | ck -h | Help |
 | ck -v | Version |
 
@@ -113,44 +128,43 @@ ck -v    # → ck version 0.0.9
 
 ## ck save Workflow
 - Display current active task
-- Enter commit description + optional log
-- Select type (feat, fix, chore, docs, custom)
-- Optional push
-- Auto-archive when limit reached
+- Enter commit description + optional note (inline or via $EDITOR)
+- Optional **local** Git commit (never pushes; skips gracefully if Git is unavailable or declined)
+- Auto-archive HISTORY.md when limit reached (gapless rotation, original preserved as .bak)
 
 ---
 
 ## 🔧 Core Mechanics
 
-### Strict Parsing
-Active tasks must use:
+### Task Syntax
+The parser accepts both canonical CommonMark and the legacy no-space form; the writer always emits canonical:
+
 ```
-- []
+- [ ] open task      (canonical, accepted)
+- [] open task       (legacy input — canonicalized to `- [ ]` on write)
+- [>] focused task  (exactly one focus is enforced on write)
+- [x] done task
 ```
 
 ### Auto-Archive
-When HISTORY.md reaches limit → rotates to .bak
+When HISTORY.md reaches limit → rotates to `HISTORY_*.md.bak` (rotation is crash-safe: the new content is staged before the old file is renamed).
+
+### Data Integrity & Concurrency
+- All writes are atomic (temp file + rename) — readers never see torn files
+- Registry, PLAN.md, HISTORY.md and state.json mutations serialize on `*.lock` files via `fcntl.flock`
+- Locking is **fail-closed**: if a lock cannot be acquired within 5s the operation aborts with a clear error instead of proceeding without protection
+- A corrupt registry (`projects.json`) is never silently wiped: it is moved to a timestamped `.bak` before a fresh registry is created
+- The renderer never overwrites non-task lines (headers/prose are preserved on every mutation)
 
 ### VCS Integration
-Supports gh and glab
-
-### Self-Contained Templates
-All templates embedded in binary
+Local commits only. `ck save` commits if you confirm; `ck` never pushes. `ck update` fast-forwards the installation itself only when the work tree is clean.
 
 ---
 
 ## 🗺 Roadmap
--  **Core Analytics**: Progress tracking (%), task counters, and skip detection logic
-- **Smart Rendering**: "Triad" view (Next/Current/Previous) with 120-char log truncation
-- **Object Parsing**: Entity-based block processing (Task + Log + ID) instead of flat lines
-- **Snapshot Mode**: Preventive state backups and data integrity checks ("safety first" mode)
 - **Context Injection**: Mechanism to inject project context into external AI prompts and tools
 - **Archive Management**: Advanced history control and search across HISTORY.md.bak files
-- **Global Config & Observer**: Centralized settings (~/.ckrc) and cross-project dashboard
-- **Interactive Workflow**: ID-based task completion and real-time plan updates during `ck save`
-- **Instant Brain Dump**: `ck add <text>` with automatic `- []` formatting and positioning
-- **CLI Improvements**: Bulk management (`ck done <range>`), and `ck st --all` view
-- **Self-System**: Robust self-installer, uninstaller, and automatic update mechanism
+- **Interactive Workflow**: Real-time plan updates during `ck save`
 
 ---
 
@@ -182,25 +196,26 @@ Context Keeper (ck) служит мостом между вашим разумо
 
 ## ✨ Возможности
 - Хранение в тексте
-- Интеграция с Git
+- Интеграция с Git (только локальные коммиты, без push)
 - Авто-архивация
-- Строгий парсинг
+- Парсинг `- [ ]` / `- [>]` / `- [x]` (устаревший `- []` нормализуется)
 - Поддержка AI
+- Глобальный реестр проектов и панель мониторинга
+- Fail-closed блокировка файлов, атомарная запись
 
 ---
 
 ## 📋 Требования
 - Python 3.8+
-- Git
-- fzf
-- jq
-- gh или glab
+- Git (опционально — ck save корректно пропустит коммит без него)
+- fzf, jq (опционально)
 
 ---
 
 ## 📦 Установка
 ```bash
-curl -sSL https://raw.githubusercontent.com/vinyardrip/context-keeper/main/ck -o ck
+git clone https://github.com/vinyardrip/context-keeper.git
+cd context-keeper
 chmod +x ck
 ./ck install
 ```
@@ -214,6 +229,8 @@ chmod +x ck
 ├── PLAN.md
 ├── HISTORY.md
 ├── prompt.md
+├── README.md
+├── .gitignore
 └── HISTORY_*.md.bak
 ```
 
@@ -226,29 +243,21 @@ chmod +x ck
 
 ## Сценарий работы ck save
 - Отображение задачи
-- Ввод коммита
-- Выбор типа
-- Push
+- Ввод коммита и опциональной заметки
+- Локальный коммит (push не выполняется никогда)
 - Авто-архивация
 
 ---
 
 ## 🔧 Механика работы
-- Строгий формат: `- []`
-- Ротация истории
-- Интеграция с Git
+- Формат задач: `- [ ]` / `- [>]` / `- [x]` (устаревший `- []` принимается и нормализуется)
+- Ротация истории (безопасная при сбоях)
+- Локальные коммиты Git (без push)
+- Fail-closed блокировка файлов и атомарная запись
 
 ---
 
 ## 🗺 Roadmap
-- **Аналитика и Статистика**: Расчет прогресса (%), счетчик задач и детектор пропусков
-- **Умный вывод (Триада)**: Отображение (Будущее/Текущее/Прошлое) с обрезкой логов (120 симв.)
-- **Объектный парсинг**: Обработка блоков (Задача + Лог + ID) вместо простых строк
-- **Snapshot Mode**: Превентивные бэкапы состояния и проверка целостности («режим страховки»)
 - **Context Injection**: Механизм внедрения контекста в сторонние инструменты и ИИ-запросы
 - **Archive Management**: Расширенное управление архивами и поиск по HISTORY.md.bak
-- **Global Config & Observer**: Централизованные настройки (~/.ckrc) и панель мониторинга проектов
-- **Interactive Workflow**: Выбор ID выполненной задачи и правка плана прямо во время `ck save`
-- **Мгновенный Brain Dump**: Команда `ck add <текст>` с авто-разметкой `- []` и позиционированием
-- **CLI Improvements**: Массовое управление (`ck done <range>`) и режим просмотра `ck st --all`
-- **Self-System**: Надежный установщик, деинсталлятор и система автоматического обновления
+- **Interactive Workflow**: Правка плана прямо во время `ck save`
