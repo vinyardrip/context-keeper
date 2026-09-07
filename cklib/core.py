@@ -146,7 +146,9 @@ class ContextKeeper:
     def _write_if_missing(self, path: Path, content: str, label: str,
                           *, echo: bool = True, printer=print) -> bool:
         if not path.exists():
-            path.write_text(content, encoding="utf-8")
+            # Atomic even on first creation so a crash mid-init can
+            # never leave a torn template file.
+            _atomic_write_text(path, content)
             if echo:
                 printer(f"\U0001f4dd Created: {label}")
             return True
@@ -194,12 +196,21 @@ class ContextKeeper:
             new_text = header + last_entry
             # Write the replacement content to a temp file first so
             # there is never a window where HISTORY.md is absent.
+            # fsync before the renames so a crash cannot leave an
+            # empty renamed file.
             fd, tmp_name = tempfile.mkstemp(
                 dir=str(self.ck_path), prefix=".ck-history-", suffix=".tmp"
             )
             try:
-                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                try:
+                    mode = os.stat(self.history_file).st_mode & 0o777
+                except OSError:
+                    mode = 0o644
+                with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
                     fh.write(new_text)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.chmod(tmp_name, mode)
                 self.history_file.rename(archive)
                 os.replace(tmp_name, self.history_file)
             except Exception:
@@ -340,6 +351,9 @@ class ContextKeeper:
         # ``## Completed`` header (or at EOF if none). We don't need
         # to manipulate line numbers manually.
         self._commit_plan(tl)
+        # Adding the first task to an empty plan changes the active
+        # task — keep the registry pointer consistent.
+        self._sync_active_task(tl)
         return new_task.id
 
     def start(self, task_id: int) -> FocusResult:
@@ -347,9 +361,7 @@ class ContextKeeper:
         tl = self._load_plan()
         target = tl.focus(task_id)
         self._commit_plan(tl)
-        registry.update_active_task(
-            self.root, task_id=target.id, task_title=target.title
-        )
+        self._sync_active_task(tl)
         return FocusResult(task_id=target.id, title=target.title, path=self.plan_file)
 
     def done(self, spec: str) -> list[int]:
@@ -366,13 +378,53 @@ class ContextKeeper:
         transitioned = tl.toggle_done(ids)
         if transitioned:
             self._commit_plan(tl)
+            # Completing the focused task changes which task is
+            # active; the registry pointer must follow (task IDs are
+            # positional and can shift, so re-derive from the AST).
+            self._sync_active_task(tl)
         return transitioned
 
+    def _sync_active_task(self, tl: TaskList) -> None:
+        """Reconcile the registry's active-task pointer with the AST.
+
+        Task IDs are positional: they shift when tasks are removed,
+        completed, or the file is edited externally. A stale
+        ``active_task_id`` in the registry would then point at the
+        WRONG task. Re-derive the active task from the AST (focused
+        first, else first open) and update the registry whenever it
+        differs from what is stored.
+        """
+        active = tl.active()
+        registry.update_active_task(
+            self.root,
+            task_id=active.id if active is not None else None,
+            task_title=active.title if active is not None else "",
+        )
+
     def edit_note(self, task_id: int, note: str) -> None:
-        """Append a note string to a task's AST node."""
+        """Append a note to HISTORY.md for ``task_id``.
+
+        The note is durably persisted to HISTORY.md (as a dated
+        entry) rather than mutating an in-memory AST that was
+        silently discarded — the old behaviour was a no-op that
+        lost the caller's data.
+        """
         tl = self._load_plan()
-        tl.edit_note(task_id, note)
-        # Notes are in-memory only; PLAN.md is unaffected.
+        target = tl.by_id(task_id)
+        if target is None:
+            raise KeyError(f"No task with id {task_id}")
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+        entry = Notes(
+            task_id=task_id,
+            task_title=target.title,
+            timestamp=ts,
+            comment=note,
+            body="",
+        )
+        self._ensure_ck_dir()
+        with file_lock(self.history_file):
+            with self.history_file.open("a", encoding="utf-8") as fh:
+                fh.write(entry.render())
 
     # ------------------------------------------------------------------ #
     # COMMAND: init
@@ -791,28 +843,43 @@ def _write_global_state_timestamp(key: str,
                                   *, now: Optional[datetime] = None) -> None:
     """Write a single timestamp key to ``~/.config/ck/state.json``.
 
-    Atomic-replace; creates the parent directory if needed.
+    Atomic-replace; creates the parent directory if needed. Data is
+    fsync'ed before rename; existing permissions are preserved; a
+    symlinked state file is resolved so the link survives.
     """
     if now is None:
         now = datetime.now().astimezone()
-    GLOBAL_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    real = GLOBAL_STATE_FILE
+    try:
+        if GLOBAL_STATE_FILE.is_symlink():
+            real = GLOBAL_STATE_FILE.resolve()
+    except OSError:
+        real = GLOBAL_STATE_FILE
+    real.parent.mkdir(parents=True, exist_ok=True)
     state: dict = {}
-    if GLOBAL_STATE_FILE.exists():
+    if real.exists():
         try:
-            state = json.loads(GLOBAL_STATE_FILE.read_text(encoding="utf-8"))
+            state = json.loads(real.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             state = {}
     if not isinstance(state, dict):
         state = {}
     state[key] = now.isoformat()
-    import tempfile as _tempfile  # noqa: F401 — kept for backwards compat
+    # Atomic write
     fd, tmp = tempfile.mkstemp(
-        dir=str(GLOBAL_STATE_FILE.parent), prefix=".ck-state-", suffix=".tmp"
+        dir=str(real.parent), prefix=".ck-state-", suffix=".tmp"
     )
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        try:
+            mode = os.stat(real).st_mode & 0o777
+        except OSError:
+            mode = 0o644
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
             json.dump(state, fh, indent=2, ensure_ascii=False)
-        os.replace(tmp, GLOBAL_STATE_FILE)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, real)
     except Exception:
         try:
             os.unlink(tmp)
@@ -823,21 +890,54 @@ def _write_global_state_timestamp(key: str,
 
 def _default_remote_head_check(repo_dir: Path
                                ) -> Optional[Tuple[str, str]]:
-    """Read-only check: compare local HEAD with ``origin/<branch>``.
+    """Read-only check: compare local HEAD with its tracked upstream.
 
-    Uses ``git rev-parse`` for the local SHA and ``git ls-remote``
-    for the remote SHA. Returns ``(local, remote)`` or ``None`` on
-    any failure.
+    Resolves the CURRENT branch's upstream (``@{upstream}``) rather
+    than assuming ``origin/main`` — fork/feature-branch installs no
+    longer produce perpetual false "update available" notices. Falls
+    back to ``origin/<current-branch>`` when no upstream is tracked.
+
+    The network call is capped at a short deadline so a slow network
+    cannot stall interactive commands for the full 5s.
     """
     local = gith.head_sha(repo_dir)
     if not local:
         return None
+    branch = gith.current_branch(repo_dir)
+    if not branch or branch.startswith("-"):
+        return None
     if not shutil.which("git"):
         return None
+
+    # Prefer the branch's configured upstream (e.g. fork/feature).
+    remote_ref: Optional[str] = None
     try:
         result = subprocess.run(
-            ["git", "ls-remote", "origin", DEFAULT_REPO_BRANCH],
+            ["git", "rev-parse", "--symbolic-full-name",
+             f"{branch}@{{upstream}}"],
             capture_output=True, text=True, timeout=5.0, check=False,
+            cwd=str(repo_dir),
+        )
+        if result.returncode == 0:
+            remote_ref = result.stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        remote_ref = None
+    if not remote_ref or remote_ref.startswith("-"):
+        remote_ref = f"refs/remotes/origin/{branch}"
+
+    # Map the tracking ref to (remote, branch) for ls-remote. The
+    # tracking ref looks like refs/remotes/<remote>/<branch>.
+    remote_name, ls_branch = "origin", branch
+    if remote_ref.startswith("refs/remotes/"):
+        parts = remote_ref[len("refs/remotes/"):].split("/", 1)
+        if len(parts) == 2 and parts[0] and not parts[0].startswith("-") \
+                and parts[1] and not parts[1].startswith("-"):
+            remote_name, ls_branch = parts[0], parts[1]
+
+    try:
+        result = subprocess.run(
+            ["git", "ls-remote", remote_name, ls_branch],
+            capture_output=True, text=True, timeout=2.0, check=False,
             cwd=str(repo_dir),
         )
     except (OSError, subprocess.TimeoutExpired):

@@ -296,30 +296,44 @@ def update_active_task(path: Path, task_id: int | None, task_title: str) -> None
 def remove_project(path: Path) -> bool:
     """Remove a project from the registry by absolute path.
 
-    Returns True if the path was present in the registry before the
-    removal. Missing-disk-path is fine — we only mutate the registry.
+    Returns True if the path was present (i.e. actually removed).
+    Missing-disk-path is fine — we only mutate the registry. The
+    presence check and the removal happen in a SINGLE locked
+    read-modify-write pass (no TOCTOU between check and mutation,
+    no second lock acquisition).
     """
     abs_path = str(Path(path).resolve())
-    before = list_projects()
-    was_present = any(p.path == abs_path for p in before)
+    result = {"was_present": False}
 
     def mutate(reg: Registry) -> None:
+        before = [p.path for p in reg.projects]
+        if abs_path in before:
+            result["was_present"] = True
         reg.projects = [p for p in reg.projects if p.path != abs_path]
 
     _locked_modify(GLOBAL_REGISTRY_FILE, mutate)
-    return was_present
+    return result["was_present"]
 
 
 def remove_project_by_name(name: str) -> bool:
-    """Remove a registered project by display name. Returns True if removed."""
-    matches = [p for p in list_projects() if p.name == name]
-    if not matches:
-        return False
-    removed_any = False
-    for entry in matches:
-        if remove_project(Path(entry.path)):
-            removed_any = True
-    return removed_any
+    """Remove registered project(s) by display name in one locked pass.
+
+    Returns True if anything was removed. The name match and the
+    removal happen in a SINGLE locked read-modify-write pass —
+    previously this listed (lock #1) then removed each match one
+    by one (lock #2..N), a TOCTOU window in which a concurrent
+    registration could be silently dropped.
+    """
+    result = {"removed_any": False}
+
+    def mutate(reg: Registry) -> None:
+        kept = [p for p in reg.projects if p.name != name]
+        if len(kept) != len(reg.projects):
+            result["removed_any"] = True
+        reg.projects = kept
+
+    _locked_modify(GLOBAL_REGISTRY_FILE, mutate)
+    return result["removed_any"]
 
 
 def list_projects() -> List[ProjectEntry]:
@@ -340,22 +354,43 @@ def prune_missing() -> list[str]:
     """Remove entries whose paths no longer exist on disk.
 
     Returns the list of paths that were pruned.
+
+    Disk ``stat`` calls happen OUTSIDE the lock (they can be slow on
+    network filesystems and would widen the lock-contention window
+    for every other ``ck`` process); only the in-memory reconcile
+    against the freshly loaded registry runs under the lock. A path
+    that vanishes between the stat and the locked pass is simply
+    re-detected on the next prune.
     """
     ensure_global_dir()
+
+    # Phase 1 (unlocked): gather candidates whose paths are missing.
+    reg_snapshot = Registry.load()
+    missing: set[str] = set()
+    for entry in reg_snapshot.projects:
+        try:
+            if not Path(entry.path).exists():
+                missing.add(entry.path)
+        except OSError:
+            # Treat any OS error on stat as "missing" — be safe.
+            missing.add(entry.path)
+
+    if not missing:
+        return []
+
+    # Phase 2 (locked): pure in-memory reconcile — remove entries that
+    # are BOTH still present in the registry AND known-missing on
+    # disk. No disk I/O inside the critical section.
     pruned: list[str] = []
 
     def mutate(reg: Registry) -> None:
         nonlocal pruned
         kept: list[ProjectEntry] = []
         for entry in reg.projects:
-            try:
-                if Path(entry.path).exists():
-                    kept.append(entry)
-                else:
-                    pruned.append(entry.path)
-            except OSError:
-                # Treat any OS error on stat as "missing" — be safe.
+            if entry.path in missing:
                 pruned.append(entry.path)
+                continue
+            kept.append(entry)
         reg.projects = kept
 
     _locked_modify(GLOBAL_REGISTRY_FILE, mutate)
@@ -373,15 +408,35 @@ def all_paths() -> Iterable[Path]:
 
 
 def _atomic_write_json(path: Path, payload: dict) -> None:
-    """Atomic JSON write: tmp file + rename."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+    """Durable atomic JSON write: tmp + fsync + rename.
+
+    - Target symlinks are resolved first (the link survives).
+    - The original file's permissions are preserved (mkstemp's 0600
+      would otherwise demode the registry on every write).
+    - Data is flushed and fsync'ed before the rename so a crash
+      cannot leave a renamed-but-empty registry.
+    """
+    real = path
+    try:
+        if path.is_symlink():
+            real = path.resolve()
+    except OSError:
+        real = path
+    real.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        mode = os.stat(real).st_mode & 0o777
+    except OSError:
+        mode = 0o644
     fd, tmp_name = tempfile.mkstemp(
-        dir=str(path.parent), prefix=".ck-registry-", suffix=".tmp"
+        dir=str(real.parent), prefix=".ck-registry-", suffix=".tmp"
     )
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
             json.dump(payload, fh, indent=2, ensure_ascii=False)
-        os.replace(tmp_name, path)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp_name, mode)
+        os.replace(tmp_name, real)
     except Exception:
         try:
             os.unlink(tmp_name)

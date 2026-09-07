@@ -74,11 +74,21 @@ def parse_plan(text: str) -> TaskList:
     markers, does not perform any I/O. The returned ``TaskList`` is
     a faithful representation of what's on disk, including any
     duplicate ``[>]`` markers and any legacy ``[]`` open tasks.
+
+    The ORIGINAL line endings (CRLF vs LF) are recorded on the
+    TaskList (``newline``) so ``render_plan`` can emit a byte-ident
+    document instead of silently rewriting a CRLF file to LF.
     """
     tasks: list[Task] = []
     sections: list[Section] = []
     current_section = ""
     next_id = 1
+
+    # Detect the dominant line ending so the renderer can preserve
+    # the file's existing format (M-4 fidelity).
+    crlf = text.count("\r\n")
+    lf_only = text.count("\n") - crlf
+    newline = "\r\n" if crlf > lf_only else "\n"
 
     for idx, raw in enumerate(text.splitlines(), start=1):
         line = raw.rstrip()
@@ -126,7 +136,9 @@ def parse_plan(text: str) -> TaskList:
             next_id += 1
             continue
 
-    return TaskList(tasks=tasks, sections=sections, source_text=text)
+    return TaskList(
+        tasks=tasks, sections=sections, source_text=text, newline=newline
+    )
 
 
 def _make_task(task_id, status, title, line_number, marker_raw,
@@ -143,11 +155,19 @@ def _make_task(task_id, status, title, line_number, marker_raw,
 
 
 def parse_plan_file(path: Path | str) -> TaskList:
-    """Read ``path`` and parse it. Returns an empty TaskList if missing."""
+    """Read ``path`` and parse it. Returns an empty TaskList if missing.
+
+    The file is opened with ``newline=""`` so the ORIGINAL line
+    endings (CRLF vs LF) reach the parser intact — the default
+    text-mode read would translate CRLF to LF and the renderer
+    would then silently rewrite the whole file to LF.
+    """
     p = Path(path)
     if not p.exists():
         return TaskList()
-    return parse_plan(p.read_text(encoding="utf-8"))
+    with open(p, "r", encoding="utf-8", newline="") as fh:
+        text = fh.read()
+    return parse_plan(text)
 
 
 # ---------------------------------------------------------------------------
@@ -206,12 +226,14 @@ def render_plan(task_list: TaskList) -> str:
 def _emit_flat(tl: TaskList) -> str:
     if not tl.tasks:
         return ""
-    return "\n".join(t.to_line() for t in tl.tasks) + "\n"
+    nl = getattr(tl, "newline", "\n") or "\n"
+    return nl.join(t.to_line() for t in tl.tasks) + nl
 
 
 def _emit_with_source(tl: TaskList) -> str:
     src_lines = tl.source_text.splitlines()
     max_src_line = len(src_lines)
+    nl = getattr(tl, "newline", "\n") or "\n"
 
     # Collision guard: two AST nodes sharing a source line_number
     # would silently overwrite each other during substitution.
@@ -237,6 +259,8 @@ def _emit_with_source(tl: TaskList) -> str:
     # line is itself a task line. This guarantees a task node can
     # never overwrite a header, prose, or blank line — non-task
     # source lines are structurally out of bounds for substitution.
+    # Non-task lines are preserved VERBATIM (including any trailing
+    # whitespace) so the render never reflows the user's document.
     for t in tl.tasks:
         if 1 <= t.line_number <= max_src_line:
             original = out[t.line_number - 1]
@@ -258,9 +282,9 @@ def _emit_with_source(tl: TaskList) -> str:
             out.insert(insert_at, t.to_line())
             insert_at += 1
 
-    rendered = "\n".join(out)
-    if not rendered.endswith("\n"):
-        rendered += "\n"
+    rendered = nl.join(out)
+    if not rendered.endswith(nl):
+        rendered += nl
     return rendered
 
 
@@ -300,15 +324,46 @@ def write_plan(path: Path | str, task_list: TaskList) -> None:
     _atomic_write_text(p, text)
 
 
+def _resolve_symlink_target(path: Path) -> Path:
+    """If ``path`` is a symlink, return its (absolute) target.
+
+    Atomic replace on a symlink path would swap the *link* for a
+    regular file, silently breaking dotfile-managed setups. Writing
+    to the resolved target keeps the user's link intact.
+    """
+    try:
+        if path.is_symlink():
+            return path.resolve()
+    except OSError:
+        pass
+    return path
+
+
 def _atomic_write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    """Durable atomic write: tmp file + fsync + rename.
+
+    - Target symlinks are resolved first (the link survives).
+    - The original file's permissions are preserved (mkstemp's 0600
+      would otherwise demote e.g. 0644 files on every write).
+    - Data is flushed and fsync'ed before the rename so a crash
+      cannot leave a renamed-but-empty file.
+    """
+    real = _resolve_symlink_target(path)
+    real.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        mode = os.stat(real).st_mode & 0o777
+    except OSError:
+        mode = 0o644
     fd, tmp_name = tempfile.mkstemp(
-        dir=str(path.parent), prefix=".ck-plan-", suffix=".tmp"
+        dir=str(real.parent), prefix=".ck-plan-", suffix=".tmp"
     )
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
             fh.write(text)
-        os.replace(tmp_name, path)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp_name, mode)
+        os.replace(tmp_name, real)
     except Exception:
         try:
             os.unlink(tmp_name)

@@ -120,11 +120,17 @@ class TaskList:
 
     The model is fully mutable (mutations operate on these nodes) and
     rendering is deterministic — see :func:`cklib.parser.render_plan`.
+
+    ``newline`` records the source document's dominant line ending
+    (``"\\r\\n"`` or ``"\\n"``) so the renderer can preserve the
+    file's existing format. Empty string means "unspecified" (the
+    renderer falls back to ``"\\n"``).
     """
 
     tasks: list[Task] = field(default_factory=list)
     sections: list[Section] = field(default_factory=list)
     source_text: str = ""
+    newline: str = ""
 
     # ---- lookup ----
 

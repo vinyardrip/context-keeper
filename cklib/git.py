@@ -21,11 +21,6 @@ import subprocess
 from pathlib import Path
 from typing import Optional, Tuple
 
-# Tokens that MUST NEVER appear in a Git command we run. The
-# "update" path uses ``fetch`` and ``pull --ff-only`` explicitly,
-# so those are not in this set. ``push`` is always forbidden.
-_FORBIDDEN_TOKENS = frozenset({"push", "clone"})
-
 
 def _resolve_git() -> Optional[str]:
     return shutil.which("git")
@@ -76,8 +71,11 @@ def has_remote(path: Path | None = None, name: str = "origin") -> bool:
     """Return True if the named remote is configured."""
     if not _resolve_git():
         return False
+    if name.startswith("-"):
+        # Option-injection guard.
+        return False
     cwd = str(path) if path else None
-    result = _run(["remote", "get-url", name], cwd=cwd, timeout=5.0)
+    result = _run(["remote", "get-url", "--", name], cwd=cwd, timeout=5.0)
     return result.returncode == 0 and bool(result.stdout.strip())
 
 
@@ -96,8 +94,13 @@ def remote_sha(path: Path | None, remote: str, branch: str) -> Optional[str]:
     """Return the SHA of ``remote/branch`` from local refs."""
     if not _resolve_git():
         return None
+    if remote.startswith("-") or branch.startswith("-"):
+        # Option-injection guard: a refspec like "--exec=..." would be
+        # parsed by git as an option, not a revision.
+        return None
     cwd = str(path) if path else None
-    result = _run(["rev-parse", f"{remote}/{branch}"], cwd=cwd, timeout=5.0)
+    result = _run(["rev-parse", f"refs/remotes/{remote}/{branch}"],
+                  cwd=cwd, timeout=5.0)
     if result.returncode != 0:
         return None
     return result.stdout.strip() or None
@@ -199,24 +202,16 @@ def pull_ff_only(remote: str, branch: str,
 def _assert_safe_remote_write(remote: str, branch: str) -> None:
     """Hard guard. ``git fetch`` and ``git pull --ff-only`` are the
     only network-touching commands this module is allowed to run.
+
+    Rejects leading ``-`` (option injection: a "remote" such as
+    ``--upload-pack=...`` would be parsed by git as an option, not a
+    refspec) in addition to shell metacharacters.
     """
     if not remote or not branch:
         raise ValueError("remote and branch must be non-empty")
+    if remote.startswith("-") or branch.startswith("-"):
+        raise ValueError(f"unsafe remote/branch (option-like): {remote!r}/{branch!r}")
     if any(c in remote for c in (";", "&", "|", "`", "$", "\n")):
         raise ValueError(f"unsafe remote name: {remote!r}")
     if any(c in branch for c in (";", "&", "|", "`", "$", "\n", " ")):
         raise ValueError(f"unsafe branch name: {branch!r}")
-
-
-# ---------------------------------------------------------------------------
-# Defensive token check (kept for compatibility)
-# ---------------------------------------------------------------------------
-
-
-def assert_no_remote_writes(cmd: list[str]) -> None:
-    """Hard guard. Raises ``RuntimeError`` if a forbidden token is in ``cmd``."""
-    for token in _FORBIDDEN_TOKENS:
-        if token in cmd:
-            raise RuntimeError(
-                f"Refusing to execute network-writing git command: {cmd!r}"
-            )

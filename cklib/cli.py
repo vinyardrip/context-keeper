@@ -438,6 +438,19 @@ def _install_user() -> None:
         if target.is_symlink() and target.resolve() == source:
             print(f"\u2705 Already installed: {target} \u2192 {source}")
             return
+        if not target.is_symlink():
+            # Refuse to clobber a REAL file the user placed there
+            # (their own wrapper/binary). Never delete user data
+            # silently — this matches the uninstall guard.
+            print(
+                f"\u26a0\ufe0f  {target} exists and is not a symlink. "
+                "Refusing to overwrite it."
+            )
+            print(
+                "       Remove it manually first if you want ck to "
+                "own this path."
+            )
+            return
         try:
             target.unlink()
         except OSError as e:
