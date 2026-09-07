@@ -2,14 +2,20 @@
 
 Concurrent safety: every read/write is wrapped in
 :func:`cklib.config.file_lock` so concurrent processes and threads
-serialise on a sibling ``.lock`` file. The atomic-replace writer
-already guarantees a torn-free single critical section, so the lock
-adds inter-process ordering without changing file semantics.
+serialise on a sibling ``.lock`` file. The lock is FAIL-CLOSED: if it
+cannot be acquired within the timeout the operation aborts with
+:class:`cklib.config.LockTimeoutError` instead of proceeding without
+mutual exclusion (which would turn a read-modify-write into a lost
+update).
 
 Notes from prior security reviews:
 
 - Legacy ``~/.ckrc`` is migrated **once** and **unlinked** immediately
   to eliminate per-load I/O overhead.
+- A ``projects.json`` that fails JSON parsing is **never** silently
+  reset: the corrupt file is quarantined to a timestamped ``.bak``
+  before a fresh registry is initialized, and if the quarantine fails
+  the operation aborts (see :class:`RegistryCorruptError`).
 - Timestamps use microsecond precision and include the local
   timezone offset for unambiguous ordering.
 - ``list_projects()`` sorts by ``last_seen`` (descending), with a
@@ -21,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -33,6 +40,36 @@ from .config import (
     LEGACY_GLOBAL_CONFIG_FILE,
     file_lock,
 )
+
+
+class RegistryCorruptError(RuntimeError):
+    """Raised when the registry file is corrupt AND cannot be
+    quarantined. Mutations must abort rather than risk overwriting
+    user data with an empty registry."""
+
+
+def _quarantine_corrupt(target: Path) -> None:
+    """Move a corrupt registry file aside (timestamped backup).
+
+    Preserves the user's data for manual recovery and lets the next
+    write start from a clean slate. Raises
+    :class:`RegistryCorruptError` if the file cannot be moved so the
+    caller aborts instead of overwriting it.
+    """
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    backup = target.with_name(f"{target.name}.corrupt-{ts}.bak")
+    try:
+        os.replace(target, backup)
+    except OSError as e:
+        raise RegistryCorruptError(
+            f"Registry file {target} is corrupt and could not be "
+            f"backed up ({e}); aborting to avoid data loss"
+        ) from e
+    print(
+        f"\u26a0\ufe0f  Corrupt registry detected; original moved to "
+        f"{backup}",
+        file=sys.stderr,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -118,11 +155,23 @@ class Registry:
                 return cls()
             try:
                 data = json.loads(target.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
+            except json.JSONDecodeError:
+                # Never silently wipe a corrupt registry: quarantine
+                # it (timestamped backup) and start from empty. If
+                # quarantining fails, abort loudly.
+                _quarantine_corrupt(target)
+                return cls()
+            except OSError:
                 return cls()
             if not isinstance(data, dict):
+                # Structurally invalid (e.g. a JSON list): same
+                # quarantine path as unparsable content.
+                _quarantine_corrupt(target)
                 return cls()
             projects_raw = data.get("projects", [])
+            if not isinstance(projects_raw, list):
+                _quarantine_corrupt(target)
+                return cls()
             return cls(projects=[
                 _entry_from_dict(item) for item in projects_raw
                 if isinstance(item, dict)
@@ -344,6 +393,7 @@ def _atomic_write_json(path: Path, payload: dict) -> None:
 __all__ = [
     "ProjectEntry",
     "Registry",
+    "RegistryCorruptError",
     "ensure_global_dir",
     "register_project",
     "update_active_task",

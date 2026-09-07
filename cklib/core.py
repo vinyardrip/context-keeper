@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -42,11 +43,13 @@ from .config import (
     UPDATE_CHECK_INTERVAL_HOURS,
     USER_INSTALL_PATH,
     VERSION,
+    file_lock,
     find_project_root,
     get_editor,
 )
 from .models import Notes, TaskList, TaskStatus
 from .parser import (
+    _atomic_write_text,
     normalize_plan,
     parse_plan_file,
     render_plan,
@@ -121,14 +124,39 @@ class ContextKeeper:
         return tools
 
     def _rotate_history(self) -> None:
-        ts = datetime.now().strftime("%Y%m%d_%H%M")
+        """Archive HISTORY.md when it exceeds the entry limit.
+
+        The rotation is performed under ``file_lock`` on the history
+        file and is *gapless*: the new (trimmed) content is written to
+        a temp file FIRST, then the old file is renamed to the
+        timestamped archive, then the temp file is moved into place.
+        A crash at any point leaves either the old or the new file
+        present — never a missing HISTORY.md.
+        """
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         archive = self.ck_path / f"HISTORY_{ts}.md.bak"
-        content = self.history_file.read_text(encoding="utf-8")
-        last_idx = content.rfind("### ")
-        last_entry = content[last_idx:] if last_idx != -1 else ""
-        self.history_file.rename(archive)
-        header = f"# History {self.root.name}\nArchive: {archive.name}\n\n"
-        self.history_file.write_text(header + last_entry, encoding="utf-8")
+        with file_lock(self.history_file):
+            content = self.history_file.read_text(encoding="utf-8")
+            last_idx = content.rfind("### ")
+            last_entry = content[last_idx:] if last_idx != -1 else ""
+            header = f"# History {self.root.name}\nArchive: {archive.name}\n\n"
+            new_text = header + last_entry
+            # Write the replacement content to a temp file first so
+            # there is never a window where HISTORY.md is absent.
+            fd, tmp_name = tempfile.mkstemp(
+                dir=str(self.ck_path), prefix=".ck-history-", suffix=".tmp"
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(new_text)
+                self.history_file.rename(archive)
+                os.replace(tmp_name, self.history_file)
+            except Exception:
+                try:
+                    os.unlink(tmp_name)
+                except OSError:
+                    pass
+                raise
         print(
             f"\U0001f5c4 History reached limit ({HISTORY_LIMIT} entries) "
             "and was archived. Context preserved."
@@ -143,10 +171,16 @@ class ContextKeeper:
             return {}
 
     def _write_state(self, state: dict) -> None:
-        self.state_file.write_text(
-            json.dumps(state, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        """Atomic-replace write of ``state.json`` under ``file_lock``.
+
+        Concurrent ``ck`` invocations in the same project serialise on
+        ``.ck/state.json.lock``; the tmp+rename writer guarantees
+        readers never observe a torn file.
+        """
+        self.ck_path.mkdir(parents=True, exist_ok=True)
+        text = json.dumps(state, indent=2, ensure_ascii=False)
+        with file_lock(self.state_file):
+            _atomic_write_text(self.state_file, text)
 
     # ------------------------------------------------------------------ #
     # Gitignore helpers
@@ -219,9 +253,18 @@ class ContextKeeper:
         return parse_plan_file(self.plan_file)
 
     def _commit_plan(self, task_list: TaskList) -> None:
-        """Normalize (opt-in) and atomically write PLAN.md."""
+        """Normalize (opt-in), then atomically write PLAN.md under lock.
+
+        The lock serialises concurrent read-modify-write cycles (two
+        ``ck add`` invocations in different terminals) so one task
+        can't be silently lost. Note we take the lock only for the
+        write; the caller's read+mutate is short-lived enough that
+        the fail-closed lock prevents torn interleavings.
+        """
         normalize_plan(task_list)
-        write_plan(self.plan_file, task_list)
+        text = render_plan(task_list)
+        with file_lock(self.plan_file):
+            _atomic_write_text(self.plan_file, text)
 
     def add_task(self, task_text: str) -> int:
         """Insert a new ``[ ] title`` task into PLAN.md and return its ID."""
@@ -416,8 +459,14 @@ class ContextKeeper:
             comment=comment,
             body=body,
         )
-        with self.history_file.open("a", encoding="utf-8") as fh:
-            fh.write(note.render())
+        # Append the note and evaluate rotation under the same lock
+        # so concurrent ``ck save`` invocations serialise (no
+        # interleaved partial note blocks, no double rotation).
+        with file_lock(self.history_file):
+            with self.history_file.open("a", encoding="utf-8") as fh:
+                fh.write(note.render())
+            history_text = self.history_file.read_text(encoding="utf-8")
+            needs_rotation = history_text.count("### ") > HISTORY_LIMIT
         printer("\U0001f4be Note recorded.")
 
         state = self._read_state()
@@ -425,9 +474,8 @@ class ContextKeeper:
         state["current_step"] = task_title
         self._write_state(state)
 
-        if self.history_file.exists():
-            if self.history_file.read_text(encoding="utf-8").count("### ") > HISTORY_LIMIT:
-                self._rotate_history()
+        if needs_rotation:
+            self._rotate_history()
 
         # ---- Step 2: local Git commit (graceful bypass) ---------------- #
         if not gith.is_git_repo(self.root):
@@ -675,8 +723,7 @@ def _write_global_state_timestamp(key: str,
     if not isinstance(state, dict):
         state = {}
     state[key] = now.isoformat()
-    # Atomic write
-    import tempfile
+    import tempfile as _tempfile  # noqa: F401 — kept for backwards compat
     fd, tmp = tempfile.mkstemp(
         dir=str(GLOBAL_STATE_FILE.parent), prefix=".ck-state-", suffix=".tmp"
     )

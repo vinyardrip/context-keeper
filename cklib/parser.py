@@ -187,12 +187,12 @@ def render_plan(task_list: TaskList) -> str:
     1. If the AST has no source and no tasks → ``""``.
     2. If the AST has tasks but no source → flat list.
     3. Otherwise: walk the original source line by line, substituting
-       freshly-rendered task lines where ``line_number`` matches a
-       task node, and keeping all other lines (headers, blanks,
-       prose) intact. New tasks whose ``line_number`` falls past the
-       original EOF are appended under the last non-completed
-       section. New tasks whose ``line_number`` falls inside the
-       ``## Completed`` section are placed just before its header.
+       freshly-rendered task lines **only where the original source
+       line is itself a task line** (headers, prose and blanks are
+       never overwritten). New tasks whose ``line_number`` falls past
+       the original EOF are appended just before the ``## Completed``
+       header (or at EOF). Duplicate ``line_number`` claims raise
+       ``ValueError`` instead of silently dropping a task.
     """
     if not task_list.source_text and not task_list.tasks:
         return ""
@@ -212,41 +212,65 @@ def _emit_flat(tl: TaskList) -> str:
 def _emit_with_source(tl: TaskList) -> str:
     src_lines = tl.source_text.splitlines()
     max_src_line = len(src_lines)
-    by_line: dict[int, Task] = {t.line_number: t for t in tl.tasks}
 
-    # Categorize tasks: those whose line_number is inside source, and
-    # those that landed past EOF (these need to be placed somewhere
-    # reasonable).
+    # Collision guard: two AST nodes sharing a source line_number
+    # would silently overwrite each other during substitution.
+    # This is a structural invariant violation — refuse to render a
+    # lossy document.
+    seen_lines: set[int] = set()
+    for t in tl.tasks:
+        if 1 <= t.line_number <= max_src_line:
+            if t.line_number in seen_lines:
+                raise ValueError(
+                    f"Two tasks share line_number {t.line_number}; "
+                    "refusing to render (would silently drop one)"
+                )
+            seen_lines.add(t.line_number)
+
     out: list[str] = list(src_lines)
     pending_append: list[Task] = []
     for t in tl.tasks:
         if t.line_number > max_src_line:
             pending_append.append(t)
 
-    # First pass: substitute in-place where line numbers exist.
+    # First pass: substitute IN-PLACE only where the ORIGINAL source
+    # line is itself a task line. This guarantees a task node can
+    # never overwrite a header, prose, or blank line — non-task
+    # source lines are structurally out of bounds for substitution.
     for t in tl.tasks:
         if 1 <= t.line_number <= max_src_line:
+            original = out[t.line_number - 1]
+            if not _is_task_line(original):
+                raise ValueError(
+                    f"Task {t.id!r} claims line {t.line_number} but the "
+                    f"source line is not a task ({original!r}); refusing "
+                    "to overwrite non-task content"
+                )
             out[t.line_number - 1] = t.to_line()
 
-    # Second pass: tasks beyond EOF. Try to land them just before the
-    # "## Completed" header; if no such header exists, append at end.
+    # Second pass: tasks beyond EOF. Insert them just before the
+    # "## Completed" header (or at EOF), never replacing content.
     if pending_append:
-        completed_idx = _find_completed_line(out)
-        insert_at = completed_idx if completed_idx is not None else len(out)
+        insert_at = _find_completed_line(out)
+        if insert_at is None:
+            insert_at = len(out)
         for t in pending_append:
             out.insert(insert_at, t.to_line())
             insert_at += 1
-            # If we inserted before "## Completed", also insert a
-            # blank line for readability.
-            if completed_idx is not None and insert_at <= len(out):
-                # Skip the just-inserted line; the next position is
-                # where subsequent tasks should also land.
-                pass
 
     rendered = "\n".join(out)
     if not rendered.endswith("\n"):
         rendered += "\n"
     return rendered
+
+
+def _is_task_line(line: str) -> bool:
+    """True if ``line`` parses as a task bullet in any accepted syntax."""
+    return bool(
+        _CANONICAL_TASK_RE.match(line)
+        or _LEGACY_OPEN_RE.match(line)
+        or _LEGACY_FOCUSED_DONE_RE.match(line)
+    )
 
 
 def _find_completed_line(lines: list[str]) -> int | None:

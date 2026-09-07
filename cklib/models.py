@@ -186,10 +186,30 @@ class TaskList:
 
     def add(self, title: str, status: TaskStatus = TaskStatus.OPEN,
             section: str = "", line_number: int | None = None) -> Task:
-        """Append a new task node and return it."""
+        """Append a new task node and return it.
+
+        New nodes are placed **past the end of the source document**
+        so the renderer inserts them (never substitutes an existing
+        source line such as a header or prose). Explicit
+        ``line_number`` values that would collide with an existing
+        task are rejected to guarantee the render is lossless.
+        """
         new_id = (max((t.id for t in self.tasks), default=0)) + 1
         if line_number is None:
-            line_number = (max((t.line_number for t in self.tasks), default=0)) + 1
+            # Past EOF by construction: strictly greater than every
+            # task's source line AND the total source length, so the
+            # renderer routes it through the *insert* path instead of
+            # overwriting an arbitrary source line.
+            source_len = len(self.source_text.splitlines()) if self.source_text else 0
+            line_number = max(
+                max((t.line_number for t in self.tasks), default=0),
+                source_len,
+            ) + 1
+        elif any(t.line_number == line_number for t in self.tasks):
+            raise ValueError(
+                f"line_number {line_number} already used by an "
+                "existing task; refusing to create a render collision"
+            )
         task = Task(
             id=new_id,
             status=status,

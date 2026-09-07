@@ -15,11 +15,13 @@ from .config import (
     GLOBAL_STATE_FILE,
     INSTALL_PATH,
     LEGACY_GLOBAL_CONFIG_FILE,
+    LockTimeoutError,
     USER_INSTALL_PATH,
     VERSION,
 )
 from .core import ContextKeeper, UpdateResult
 from . import git as gith
+from .registry import RegistryCorruptError
 
 
 HELP_TEXT = f"""Context Keeper CLI [v{VERSION}]
@@ -230,6 +232,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     except ValueError as e:
         print(f"\u274c {e}")
         return 2
+    except (LockTimeoutError, RegistryCorruptError) as e:
+        # Fail-closed concurrency / data-integrity guards: surface a
+        # clean diagnostic instead of an unlocked write or a wipe.
+        print(f"\u274c {e}")
+        return 3
 
 
 def _maybe_notify(ck: ContextKeeper) -> None:
@@ -367,6 +374,9 @@ def _legacy_dispatch(raw: List[str]) -> int:
     except ValueError as e:
         print(f"\u274c {e}")
         return 2
+    except (LockTimeoutError, RegistryCorruptError) as e:
+        print(f"\u274c {e}")
+        return 3
 
 
 # ---------------------------------------------------------------------- #

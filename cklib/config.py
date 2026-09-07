@@ -125,26 +125,35 @@ def parse_version(ver_str: str) -> tuple[int, ...]:
 # ---------------------------------------------------------------------------
 
 import contextlib
-import fcntl  # POSIX only — falls back to a no-op on platforms without it.
 import os
 import time
 from typing import Iterator
 
 
+class LockTimeoutError(RuntimeError):
+    """Raised when a file lock cannot be acquired within ``timeout``.
+
+    The lock is *fail-closed*: mutating operations must abort rather
+    than proceed without mutual exclusion (a silent unlock would turn
+    a read-modify-write into a lost update).
+    """
+
+
 @contextlib.contextmanager
 def file_lock(path: Path | str, *, timeout: float = 5.0,
-               poll: float = 0.05) -> Iterator[None]:
+              poll: float = 0.05) -> Iterator[None]:
     """Acquire an advisory exclusive lock on ``path``.
 
     ``path`` is typically the *target* of the operation (e.g. the
     registry file). The lock is acquired on a sibling ``.lock`` file so
     concurrent processes (or threads) serialise on the same lockfile.
 
-    - Uses POSIX ``fcntl.flock`` when available.
-    - Falls back to a no-op (single-process semantics) on platforms
-      without ``fcntl`` so the import never fails.
-    - ``timeout`` controls how long to wait for the lock to be
-      released; after that the lock acquisition is skipped silently.
+    - Uses POSIX ``fcntl.flock`` when available. The import is guarded
+      and performed lazily so platforms without ``fcntl`` (e.g.
+      Windows) can still import this module.
+    - FAIL-CLOSED: if the lock cannot be acquired within ``timeout``
+      (or the lock file cannot be opened at all), raises
+      :class:`LockTimeoutError` instead of proceeding unlocked.
     - The lock is always released on exit, even if the body raises.
 
     Usage::
@@ -155,42 +164,47 @@ def file_lock(path: Path | str, *, timeout: float = 5.0,
             registry_path.write_text(json.dumps(data))
     """
     p = Path(path)
-    lock_path = p.with_suffix(p.suffix + ".lock") if p.suffix else p.with_name(p.name + ".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = p.with_name(p.name + ".lock")
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise LockTimeoutError(
+            f"cannot create lock directory for {lock_path}: {e}"
+        ) from e
 
-    # On non-POSIX platforms fcntl may not be available; the lock
-    # becomes a no-op (still yields) so the calling code stays
-    # portable.
+    # Import fcntl lazily and defensively: on non-POSIX platforms
+    # ``fcntl`` may not exist. In that case we cannot guarantee
+    # cross-process mutual exclusion, so single-process semantics are
+    # the best we can offer — the context manager still yields (and
+    # still serialises threads via a process-wide mutex).
     try:
         import fcntl as _fcntl
     except ImportError:
-        yield
-        return
+        _fcntl = None
 
     deadline = time.monotonic() + timeout
     fd: int | None = None
     try:
-        try:
-            fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
-        except OSError:
-            fd = None
+        if _fcntl is not None:
+            try:
+                fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
+            except OSError as e:
+                raise LockTimeoutError(
+                    f"cannot open lock file {lock_path}: {e}"
+                ) from e
 
-        if fd is not None:
-            acquired = False
             while True:
                 try:
                     _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
-                    acquired = True
                     break
                 except (BlockingIOError, OSError):
                     if time.monotonic() > deadline:
-                        break
+                        raise LockTimeoutError(
+                            f"could not acquire lock on {lock_path} "
+                            f"within {timeout}s (held by another "
+                            "process?)"
+                        )
                     time.sleep(poll)
-            # If we didn't acquire the lock in time we still proceed —
-            # the body will run without serialization, but callers
-            # shouldn't observe a torn write inside a single critical
-            # section anyway because the JSON write is atomic-replace.
-            _ = acquired
         yield
     finally:
         if fd is not None:
