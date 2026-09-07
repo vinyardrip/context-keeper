@@ -58,10 +58,6 @@ _LEGACY_FOCUSED_DONE_RE = re.compile(
 _HEADER_RE = re.compile(r"^(?P<level>#{1,6})\s+(?P<title>.+?)\s*$")
 
 
-class ParseError(ValueError):
-    """Raised when PLAN.md cannot be tokenized at all."""
-
-
 # ---------------------------------------------------------------------------
 # Pure parser
 # ---------------------------------------------------------------------------
@@ -373,7 +369,6 @@ def _atomic_write_text(path: Path, text: str) -> None:
 
 
 __all__ = [
-    "ParseError",
     "parse_plan",
     "parse_plan_file",
     "normalize_plan",

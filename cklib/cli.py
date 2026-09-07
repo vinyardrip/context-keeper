@@ -134,6 +134,61 @@ _LEGACY_CHOICES = (
     "list", "register", "unregister", "prune", "info",
 )
 
+# Flags each legacy command accepts. Anything else starting with "-"
+# is reported as an error instead of being silently swallowed into
+# task text / ignored.
+_LEGACY_FLAGS: dict[str, frozenset] = {
+    "init": frozenset(),
+    "st": frozenset({"--global", "--all"}),
+    "dashboard": frozenset(),
+    "list": frozenset({"-g", "--global"}),
+    "start": frozenset(),
+    "done": frozenset(),
+    "add": frozenset(),
+    "save": frozenset(),
+    "edit": frozenset(),
+    "log": frozenset(),
+    "info": frozenset(),
+    "register": frozenset({"-n", "--name", "--path"}),
+    "unregister": frozenset({"--path"}),
+    "prune": frozenset(),
+    "install": frozenset(),
+    "uninstall": frozenset(),
+    "update": frozenset(),
+    "help": frozenset(),
+}
+
+
+def _reject_unknown_flags(cmd: str, rest: List[str]) -> Optional[List[str]]:
+    """Validate legacy flags for ``cmd``.
+
+    Returns the argument list with the ``--`` escape marker removed,
+    or None (after printing an error) when an unknown flag appears.
+    A literal ``--`` marks everything after it as positional text —
+    e.g. ``ck add -- --not-a-flag``.
+    """
+    allowed = _LEGACY_FLAGS.get(cmd, frozenset())
+    out: list[str] = []
+    positional_only = False
+    for tok in rest:
+        if positional_only:
+            out.append(tok)
+            continue
+        if tok == "--":
+            positional_only = True
+            continue
+        if tok.startswith("-") and tok != "-":
+            if tok not in allowed:
+                print(
+                    f"\u274c Unknown flag for `ck {cmd}`: {tok}\n"
+                    f"   Run `ck --help` for usage."
+                )
+                return None
+            out.append(tok)
+        else:
+            out.append(tok)
+    return out
+
 
 def main(argv: Optional[List[str]] = None) -> int:
     """CLI entry point. Returns a process exit code."""
@@ -273,6 +328,10 @@ def _print_full_plan(ck: ContextKeeper) -> None:
 def _legacy_dispatch(raw: List[str]) -> int:
     """Dispatch legacy positional invocations (preserves old UX)."""
     cmd, rest = raw[0], raw[1:]
+    validated = _reject_unknown_flags(cmd, rest)
+    if validated is None:
+        return 2
+    rest = validated
     ck = ContextKeeper()
     notifiable = cmd in _NOTIFIER_COMMANDS
     try:

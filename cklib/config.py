@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
+import tempfile
 from pathlib import Path
 
 VERSION = "0.1.0"
@@ -92,10 +94,60 @@ config.local.json
 """
 
 
+def _is_sensitive_root(path: Path) -> bool:
+    """True if ``path`` is a filesystem boundary where a ``.ck/``
+    project is almost certainly a mistake (home dir, /tmp, /, ...)."""
+    try:
+        home = Path.home().resolve()
+    except (OSError, RuntimeError):
+        home = None
+    if home is not None and path == home:
+        return True
+    if path == path.parent:  # filesystem root ("/" or drive root)
+        return True
+    return path in _SENSITIVE_TMP_ROOTS
+
+
+_SENSITIVE_TMP_ROOTS: tuple[Path, ...] = (
+    Path("/tmp"),
+    Path("/var/tmp"),
+    Path("/usr/tmp"),
+    Path(tempfile.gettempdir()),
+)
+
+
+def warn_if_sensitive_root(root: Path) -> bool:
+    """Emit a stderr warning when ``root`` is a filesystem boundary.
+
+    Returns True when a warning was emitted (caller may want to
+    reflect it in UX). Never raises.
+    """
+    try:
+        root = root.resolve()
+        sensitive = _is_sensitive_root(root)
+    except (OSError, RuntimeError):
+        return False
+    if sensitive:
+        try:
+            print(
+                f"\u26a0\ufe0f  Warning: initializing a Context Keeper project "
+                f"in {root} is unusual — this affects every command run "
+                f"from anywhere beneath it. Consider using a dedicated "
+                f"project directory instead.",
+                file=sys.stderr,
+            )
+        except OSError:
+            pass
+        return True
+    return False
+
+
 def find_project_root(start: Path | None = None) -> Path:
     """Walk up from ``start`` (default: cwd) until ``.ck/`` is found.
 
-    If no ``.ck/`` exists, returns ``start`` (or cwd).
+    If no ``.ck/`` exists, returns ``start`` (or cwd). The caller can
+    pass the result through :func:`warn_if_sensitive_root` when a
+    NEW project is about to be created there (``ck init``).
     """
     curr = (start or Path.cwd()).resolve()
     for parent in [curr, *curr.parents]:

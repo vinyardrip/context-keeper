@@ -30,7 +30,7 @@ import os
 import sys
 import tempfile
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, List, Optional
 
@@ -78,19 +78,33 @@ def _quarantine_corrupt(target: Path) -> None:
 
 
 def _now_iso() -> str:
-    """ISO-8601 timestamp with microsecond precision + tz offset."""
-    return datetime.now().astimezone().isoformat()
+    """ISO-8601 **UTC** timestamp with microsecond precision + offset.
+
+    Always timezone-aware so sorting keys are machine-independent
+    (previously the local-offset form produced correct epochs, but
+    naive strings written by hand or older tools were interpreted
+    against the READING machine's timezone, skewing sort order).
+    """
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _ts_key(iso: str) -> int:
-    """Convert an ISO timestamp to a comparable integer (epoch ns)."""
+    """Convert an ISO timestamp to a comparable integer (epoch ns).
+
+    Timezone-aware inputs map to their true epoch. Naive inputs
+    (hand-edited registry, legacy data) are deterministically
+    interpreted as UTC — NOT the reading machine's local zone — so
+    the sort order is stable regardless of where ``ck`` runs.
+    """
     if not iso:
         return 0
     try:
         dt = datetime.fromisoformat(iso)
-        return int(dt.timestamp() * 1_000_000_000)
     except (ValueError, TypeError):
         return 0
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp() * 1_000_000_000)
 
 
 # ---------------------------------------------------------------------------

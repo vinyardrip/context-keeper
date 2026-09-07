@@ -15,7 +15,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
@@ -46,6 +46,7 @@ from .config import (
     file_lock,
     find_project_root,
     get_editor,
+    warn_if_sensitive_root,
 )
 from .models import Notes, TaskList, TaskStatus
 from .parser import (
@@ -53,7 +54,6 @@ from .parser import (
     normalize_plan,
     parse_plan_file,
     render_plan,
-    write_plan,
 )
 
 
@@ -268,6 +268,11 @@ class ContextKeeper:
         rule (``*``, ``.``, ``?*``), this method *additionally*
         appends ``!``-negations for tracked Context Keeper files
         (PLAN.md, prompt.md, README.md) so they remain visible to Git.
+
+        Existing entries are detected by EXACT LINE match — a
+        substring check would false-suppress when the entry text
+        merely appears inside a comment (e.g. ``# .ck/state.json``)
+        or as part of a longer pattern.
         """
         gi = root / ".gitignore"
         additions: list[str] = []
@@ -277,8 +282,12 @@ class ContextKeeper:
             current = ""
             gi.touch()
 
+        # Exact-line set: strip trailing whitespace only (gitignore
+        # semantics), keep the line content verbatim.
+        existing_lines = {ln.rstrip() for ln in current.splitlines()}
+
         for entry in LOCAL_GITIGNORE_ENTRIES:
-            if entry not in current:
+            if entry not in existing_lines:
                 additions.append(entry)
 
         # Negations: required when a blanket ignore rule is present.
@@ -287,7 +296,7 @@ class ContextKeeper:
         if blanket:
             for tracked in TRACKED_GITIGNORE_PROTECTIONS:
                 negation = f"!{tracked}"
-                if negation not in current:
+                if negation not in existing_lines:
                     negations.append(negation)
 
         if additions or negations:
@@ -432,6 +441,10 @@ class ContextKeeper:
 
     def init(self) -> None:
         """Initialize the project structure, registry, and gitignore rules."""
+        # Boundary guard: initializing in $HOME, /tmp, or the
+        # filesystem root affects every command run beneath it.
+        if not self.ck_path.exists():
+            warn_if_sensitive_root(self.root)
         self._ensure_ck_dir()
 
         state = self._read_state()
@@ -763,7 +776,7 @@ class ContextKeeper:
         current ``sys.stderr`` at call time (lazy).
         """
         if now is None:
-            now = datetime.now().astimezone()
+            now = datetime.now(timezone.utc)
         if stderr is None:
             stderr = sys.stderr
         state = _read_global_state()
@@ -773,7 +786,7 @@ class ContextKeeper:
             try:
                 last_dt = datetime.fromisoformat(last_iso)
                 if last_dt.tzinfo is None:
-                    last_dt = last_dt.astimezone()
+                    last_dt = last_dt.replace(tzinfo=timezone.utc)
                 due = (now - last_dt) > timedelta(
                     hours=UPDATE_CHECK_INTERVAL_HOURS
                 )
@@ -848,7 +861,7 @@ def _write_global_state_timestamp(key: str,
     symlinked state file is resolved so the link survives.
     """
     if now is None:
-        now = datetime.now().astimezone()
+        now = datetime.now(timezone.utc)
     real = GLOBAL_STATE_FILE
     try:
         if GLOBAL_STATE_FILE.is_symlink():
@@ -1074,9 +1087,9 @@ def _relative_time(iso: str, *, now: Optional[datetime] = None) -> str:
     except (ValueError, TypeError):
         return "unknown"
     if dt.tzinfo is None:
-        # Treat naive as local.
-        dt = dt.astimezone()
-    ref = now or datetime.now().astimezone()
+        # Treat naive as UTC (registry convention).
+        dt = dt.replace(tzinfo=timezone.utc)
+    ref = now or datetime.now(timezone.utc)
     delta = ref - dt
     secs = int(delta.total_seconds())
     if secs < 0:

@@ -17,11 +17,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CK_TARGET="${HOME}/.local/bin/ck"
 CK_BIN_SRC="${SCRIPT_DIR}/ck"
 
-# Fallback: if the entry script is elsewhere, look up the source.
-if [[ ! -f "${CK_BIN_SRC}" ]]; then
-    CK_BIN_SRC="${SCRIPT_DIR}/ck.py"
-fi
-
 log()  { printf '%s\n' "$*"; }
 ok()   { printf '  \033[32m\u2713\033[0m %s\n' "$*"; }
 warn() { printf '  \033[33m!\033[0m %s\n' "$*"; }
