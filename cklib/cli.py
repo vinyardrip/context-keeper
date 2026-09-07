@@ -237,6 +237,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         # clean diagnostic instead of an unlocked write or a wipe.
         print(f"\u274c {e}")
         return 3
+    except EOFError:
+        # Non-interactive stdin (piped / /dev/null / Ctrl-D) on an
+        # interactive prompt — abort cleanly instead of a traceback.
+        print("\u274c Non-interactive input: command aborted.")
+        return 4
+    except UnicodeDecodeError as e:
+        # Non-UTF-8 PLAN.md / HISTORY.md / registry reads.
+        print(f"\u274c Cannot decode file contents as UTF-8: {e}")
+        return 4
+    except OSError as e:
+        # Unreadable files, permission errors, missing editors, …
+        print(f"\u274c I/O error: {e}")
+        return 4
 
 
 def _maybe_notify(ck: ContextKeeper) -> None:
@@ -377,6 +390,17 @@ def _legacy_dispatch(raw: List[str]) -> int:
     except (LockTimeoutError, RegistryCorruptError) as e:
         print(f"\u274c {e}")
         return 3
+    except EOFError:
+        # Non-interactive stdin (piped / /dev/null / Ctrl-D) on an
+        # interactive prompt — abort cleanly instead of a traceback.
+        print("\u274c Non-interactive input: command aborted.")
+        return 4
+    except UnicodeDecodeError as e:
+        print(f"\u274c Cannot decode file contents as UTF-8: {e}")
+        return 4
+    except OSError as e:
+        print(f"\u274c I/O error: {e}")
+        return 4
 
 
 # ---------------------------------------------------------------------- #

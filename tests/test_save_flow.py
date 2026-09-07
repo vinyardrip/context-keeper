@@ -129,9 +129,12 @@ class TestSaveGracefulDecline(IsolatedHomeMixin, unittest.TestCase):
             orig_is_repo = gith_mod.is_git_repo
             orig_local = gith_mod.local_commit
             gith_mod.is_git_repo = lambda path=None: True
-            gith_mod.local_commit = lambda msg, path=None: (
-                commit_calls.append(msg) or True
-            )
+
+            def fake_local_commit(msg, path=None, stage=None):
+                commit_calls.append((msg, stage))
+                return True
+
+            gith_mod.local_commit = fake_local_commit
             try:
                 result = ck.save(input_fn=fake_input)
             finally:
@@ -140,6 +143,17 @@ class TestSaveGracefulDecline(IsolatedHomeMixin, unittest.TestCase):
 
             self.assertIsNotNone(result)
             self.assertEqual(len(commit_calls), 1)
+            # H-1: the commit must stage ONLY the explicit .ck
+            # context files — never ``git add .`` and never the raw
+            # .ck directory (which would include *.lock files).
+            msg, stage = commit_calls[0]
+            self.assertEqual(stage, [
+                ".ck/PLAN.md",
+                ".ck/HISTORY.md",
+                ".ck/prompt.md",
+                ".ck/README.md",
+                ".ck/.gitignore",
+            ])
 
 
 class TestAddTaskIsAstBased(IsolatedHomeMixin, unittest.TestCase):

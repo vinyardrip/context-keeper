@@ -286,7 +286,15 @@ class Notes:
             header = f"### {self.timestamp} | {self.task_title}"
         out = f"\n{header}\n- {self.comment}\n"
         if self.body:
-            out += f"\n```text\n{self.body}\n```\n"
+            # The body is wrapped in a single fence by this renderer.
+            # Strip any fence markers the user included so the emitted
+            # markdown cannot nest/break fences (broken nesting would
+            # also defeat the fenced-body entry counting in HISTORY.md
+            # rotation).
+            body = self.body
+            for fence in ("```text", "```", "~~~"):
+                body = body.replace(fence, "")
+            out += f"\n```text\n{body}\n```\n"
         return out
 
 

@@ -67,6 +67,53 @@ _BLANKET_IGNORE_PATTERNS = (
     re.compile(r"^\s*\.ck/?\s*$"),              # ".ck" or ".ck/" → blanket on .ck
 )
 
+# A HISTORY.md *entry heading* is exactly a column-0 "### " followed
+# by an ISO date prefix (e.g. "### 2026-09-07 16:04 | [3] task").
+# Note bodies (which may contain arbitrary "### " text) are always
+# wrapped in ``` fences by ``Notes.render``; the date anchor plus
+# fence-state tracking excludes those false matches.
+_HISTORY_ENTRY_RE = re.compile(r"^### \d{4}-\d{2}-\d{2}.*$")
+
+
+def _iter_history_lines(content: str):
+    """Yield ``(is_entry_heading, line_with_ends)`` per line.
+
+    Lines inside ```/~~~ code fences are never entry headings. Fence
+    state toggles on each fence marker, matching CommonMark behaviour
+    closely enough for HISTORY.md (fences written by ``Notes.render``
+    and ordinary hand edits).
+    """
+    in_fence = False
+    for line in content.splitlines(keepends=True):
+        stripped = line.lstrip()[:3]
+        if stripped in ("```", "~~~"):
+            in_fence = not in_fence
+            yield False, line
+            continue
+        yield (not in_fence and bool(_HISTORY_ENTRY_RE.match(line))), line
+
+
+def _count_history_entries(content: str) -> int:
+    """Count real history entries (anchored headings, not body text)."""
+    return sum(1 for is_entry, _ in _iter_history_lines(content) if is_entry)
+
+
+def _last_history_entry(content: str) -> str:
+    """Return the text from the last anchored entry heading to EOF.
+
+    Falls back to "" when no anchored entry exists. This is stricter
+    than ``content.rfind("### ")`` which could land inside a note
+    body or code fence.
+    """
+    lines = list(_iter_history_lines(content))
+    last_idx = -1
+    for i, (is_entry, _) in enumerate(lines):
+        if is_entry:
+            last_idx = i
+    if last_idx == -1:
+        return ""
+    return "".join(line for _, line in lines[last_idx:])
+
 
 @dataclass
 class FocusResult:
@@ -132,13 +179,17 @@ class ContextKeeper:
         timestamped archive, then the temp file is moved into place.
         A crash at any point leaves either the old or the new file
         present — never a missing HISTORY.md.
+
+        Entry counting and tail extraction match only column-0
+        ``### <date>`` headings, so ``###`` text inside note bodies
+        or code fences can never trigger a false rotation or corrupt
+        the preserved tail.
         """
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         archive = self.ck_path / f"HISTORY_{ts}.md.bak"
         with file_lock(self.history_file):
             content = self.history_file.read_text(encoding="utf-8")
-            last_idx = content.rfind("### ")
-            last_entry = content[last_idx:] if last_idx != -1 else ""
+            last_entry = _last_history_entry(content)
             header = f"# History {self.root.name}\nArchive: {archive.name}\n\n"
             new_text = header + last_entry
             # Write the replacement content to a temp file first so
@@ -446,58 +497,89 @@ class ContextKeeper:
         task_id, task_title = active.id, active.title
         printer(f"\U0001f4cd Active task: [{task_id}] {task_title}")
 
-        # ---- Step 1: Notes --------------------------------------------- #
-        body = self._prompt_note(input_fn, printer)
+        note_recorded = False
+        try:
+            # ---- Step 1: Notes ----------------------------------------- #
+            body = self._prompt_note(input_fn, printer)
 
-        comment = input_fn("Short summary (commit subject): ").strip() or "update"
+            comment = input_fn("Short summary (commit subject): ").strip() or "update"
 
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-        note = Notes(
-            task_id=task_id,
-            task_title=task_title,
-            timestamp=ts,
-            comment=comment,
-            body=body,
-        )
-        # Append the note and evaluate rotation under the same lock
-        # so concurrent ``ck save`` invocations serialise (no
-        # interleaved partial note blocks, no double rotation).
-        with file_lock(self.history_file):
-            with self.history_file.open("a", encoding="utf-8") as fh:
-                fh.write(note.render())
-            history_text = self.history_file.read_text(encoding="utf-8")
-            needs_rotation = history_text.count("### ") > HISTORY_LIMIT
-        printer("\U0001f4be Note recorded.")
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+            note = Notes(
+                task_id=task_id,
+                task_title=task_title,
+                timestamp=ts,
+                comment=comment,
+                body=body,
+            )
+            # Append the note and evaluate rotation under the same lock
+            # so concurrent ``ck save`` invocations serialise (no
+            # interleaved partial note blocks, no double rotation).
+            # Entry counting matches only anchored "### <date>" headings —
+            # "### " inside note bodies/code fences is not an entry.
+            with file_lock(self.history_file):
+                with self.history_file.open("a", encoding="utf-8") as fh:
+                    fh.write(note.render())
+                history_text = self.history_file.read_text(encoding="utf-8")
+                needs_rotation = (
+                    _count_history_entries(history_text) > HISTORY_LIMIT
+                )
+            note_recorded = True
+            printer("\U0001f4be Note recorded.")
 
-        state = self._read_state()
-        state["last_update"] = datetime.now().isoformat()
-        state["current_step"] = task_title
-        self._write_state(state)
+            state = self._read_state()
+            state["last_update"] = datetime.now().isoformat()
+            state["current_step"] = task_title
+            self._write_state(state)
 
-        if needs_rotation:
-            self._rotate_history()
+            if needs_rotation:
+                self._rotate_history()
 
-        # ---- Step 2: local Git commit (graceful bypass) ---------------- #
-        if not gith.is_git_repo(self.root):
-            ans = input_fn("\u2049\ufe0f  Not a Git repo. Initialize? (y/N): ").strip().lower()
-            if ans != "y":
-                printer("\u2139\ufe0f  No commit created (no Git repo).")
+            # ---- Step 2: local Git commit (graceful bypass) ---------- #
+            if not gith.is_git_repo(self.root):
+                ans = input_fn("\u2049\ufe0f  Not a Git repo. Initialize? (y/N): ").strip().lower()
+                if ans != "y":
+                    printer("\u2139\ufe0f  No commit created (no Git repo).")
+                    return None
+                if not gith.init_repo(self.root):
+                    printer("\u274c Git init failed; skipping commit.")
+                    return None
+
+            default_msg = f"{task_title}: {comment}".strip(": ")
+            custom = input_fn(
+                "\U0001f680 Commit message [Enter=accept / type custom]: "
+            ).strip()
+            msg = custom or default_msg
+
+            if input_fn(f"\u2705 Create local commit \"{msg}\"? (y/N): ").strip().lower() != "y":
+                printer("\u2139\ufe0f  No commit created.")
                 return None
-            if not gith.init_repo(self.root):
-                printer("\u274c Git init failed; skipping commit.")
-                return None
-
-        default_msg = f"{task_title}: {comment}".strip(": ")
-        custom = input_fn(
-            "\U0001f680 Commit message [Enter=accept / type custom]: "
-        ).strip()
-        msg = custom or default_msg
-
-        if input_fn(f"\u2705 Create local commit \"{msg}\"? (y/N): ").strip().lower() != "y":
-            printer("\u2139\ufe0f  No commit created.")
+        except EOFError:
+            # Non-interactive stdin ran out mid-flow. Abort cleanly:
+            # whatever was durably written (note) stays; the commit
+            # phase simply never runs.
+            if note_recorded:
+                printer("\u274c Input closed \u2014 note saved, no commit created.")
+            else:
+                printer("\u274c Input closed \u2014 save aborted (nothing written).")
             return None
 
-        if gith.local_commit(msg, path=self.root):
+        # Stage ONLY the Context Keeper artifacts (PLAN.md, HISTORY.md,
+        # prompt.md, README.md, .ck/.gitignore). Never ``git add .`` —
+        # that would sweep unrelated untracked files (potentially
+        # secrets) into the commit — and never stage the whole .ck/
+        # directory, which would include transient *.lock files.
+        # Pathspecs are cwd-relative, so they resolve correctly even
+        # when the Git work tree root is a parent of the project.
+        ck_artifacts = [
+            f"{CK_DIR_NAME}/{PLAN_FILENAME}",
+            f"{CK_DIR_NAME}/{HISTORY_FILENAME}",
+            f"{CK_DIR_NAME}/{PROMPT_FILENAME}",
+            f"{CK_DIR_NAME}/{README_FILENAME}",
+            f"{CK_DIR_NAME}/{GITIGNORE_FILENAME}",
+        ]
+        stage = [p for p in ck_artifacts if (self.root / p).exists()]
+        if gith.local_commit(msg, path=self.root, stage=stage):
             printer("\U0001f4e4 Local commit created (no push).")
             return msg
         printer("\u26a0\ufe0f  Commit failed.")

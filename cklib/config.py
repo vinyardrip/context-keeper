@@ -84,6 +84,9 @@ DEFAULT_CK_GITIGNORE = """# Context Keeper - Auto-generated
 # Dynamic state (regenerated automatically)
 state.json
 
+# Transient cross-process lock files
+*.lock
+
 # Local config overrides
 config.local.json
 """

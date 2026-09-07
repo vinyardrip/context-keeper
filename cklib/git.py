@@ -107,15 +107,22 @@ def is_dirty(path: Path | None = None) -> bool:
     """Return True if the work tree has uncommitted or untracked changes.
 
     Uses ``git status --porcelain`` so we ignore colour codes.
-    Returns False for non-Git directories (caller should check
-    ``is_git_repo`` first).
+
+    FAIL-CLOSED: any error state (git missing, command failure,
+    timeout, non-repo) returns True ("assume dirty") so callers such
+    as the ``ck update`` flow never fast-forward over a work tree
+    whose state could not be verified. Use :func:`is_git_repo` first
+    to distinguish "not a repo" from "repo status unknown".
     """
     if not _resolve_git():
-        return False
+        # Cannot verify → assume dirty.
+        return True
     cwd = str(path) if path else None
     result = _run(["status", "--porcelain"], cwd=cwd, timeout=5.0)
     if result.returncode != 0:
-        return False
+        # git failed (timeout, lock contention, corrupt index,
+        # dubious ownership, …) — cannot prove the tree is clean.
+        return True
     return bool(result.stdout.strip())
 
 
@@ -133,17 +140,26 @@ def init_repo(path: Path | None = None) -> bool:
     return result.returncode == 0
 
 
-def local_commit(message: str, path: Path | None = None) -> bool:
-    """Stage everything and commit locally with ``message``.
+def local_commit(message: str, path: Path | None = None,
+                 stage: Optional[list[str]] = None) -> bool:
+    """Commit locally with ``message``, staging only explicit paths.
+
+    ``stage`` is a list of *repo-relative* paths (e.g. ``[".ck"]``)
+    that are added before committing. When ``stage`` is empty or
+    None, nothing is staged — only already-staged changes are
+    committed. This deliberately avoids ``git add .`` which would
+    sweep unrelated untracked files (potentially secrets) into the
+    commit.
 
     Returns True if a commit was created. NEVER pushes.
     """
     if not _resolve_git():
         return False
     cwd = str(path) if path else None
-    add = _run(["add", "."], cwd=cwd, timeout=15.0)
-    if add.returncode != 0:
-        return False
+    if stage:
+        add = _run(["add", "--", *stage], cwd=cwd, timeout=15.0)
+        if add.returncode != 0:
+            return False
     result = _run(["commit", "-m", message], cwd=cwd, timeout=15.0)
     return result.returncode == 0
 
