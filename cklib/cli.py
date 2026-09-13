@@ -43,7 +43,9 @@ Local (current project):
 
 Global (all registered projects):
   st --global                Cross-project dashboard
-  dashboard                  Cross-project dashboard table
+  dashboard                  Cross-project dashboard (compact table)
+  dashboard -v, --verbose    Detailed block view: full PREV/FOCUS/NEXT
+                             triad context per project
   list -g, --global          Global view: same as `ck dashboard`
   register   [-n NAME] [--path PATH]  Add a project to the global registry
   unregister [--path PATH | NAME]     Remove a project from the registry
@@ -97,7 +99,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_st.add_argument("--global", dest="global_dash", action="store_true",
                       help="Show global dashboard instead")
 
-    sub.add_parser("dashboard", help="Cross-project dashboard table")
+    p_dash = sub.add_parser(
+        "dashboard",
+        help="Cross-project dashboard (compact table; -v for block view)",
+    )
+    p_dash.add_argument("-v", "--verbose", dest="verbose", action="store_true",
+                        help="Block view: full triad context per project")
 
     p_list = sub.add_parser("list", help="Local task list; with -g/--global: dashboard")
     p_list.add_argument("-g", "--global", dest="global_dash", action="store_true",
@@ -159,7 +166,7 @@ _LEGACY_CHOICES = (
 _LEGACY_FLAGS: dict[str, frozenset] = {
     "init": frozenset(),
     "st": frozenset({"--global", "--all"}),
-    "dashboard": frozenset(),
+    "dashboard": frozenset({"-v", "--verbose"}),
     "list": frozenset({"-g", "--global"}),
     "tasks": frozenset(),
     "start": frozenset(),
@@ -218,7 +225,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not raw or "-h" in raw or "--help" in raw or (raw and raw[0] == "help"):
         print(HELP_TEXT)
         return 0
-    if "-v" in raw or "--version" in raw:
+    # Version only when the FLAG LEADS the invocation: subcommands
+    # own their flags (``ck dashboard -v`` is the verbose block view,
+    # not a version query).
+    if raw and (raw[0] == "-v" or raw[0] == "--version"):
         print(f"ck version {VERSION}")
         return 0
 
@@ -254,7 +264,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(ck.status())
         elif args.command == "dashboard":
             _maybe_notify(ck)
-            print(ck.dashboard())
+            print(ck.dashboard(verbose=getattr(args, "verbose", False)))
         elif args.command == "list":
             if getattr(args, "global_dash", False):
                 _maybe_notify(ck)
@@ -383,7 +393,8 @@ def _legacy_dispatch(raw: List[str]) -> int:
         ):
             if notifiable:
                 _maybe_notify(ck)
-            print(ck.dashboard())
+            verbose = cmd == "dashboard" and ("-v" in rest or "--verbose" in rest)
+            print(ck.dashboard(verbose=verbose))
         elif cmd == "list":
             if notifiable:
                 _maybe_notify(ck)
