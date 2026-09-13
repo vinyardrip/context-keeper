@@ -60,6 +60,9 @@ System commands:
   uninstall                  Remove the {USER_INSTALL_PATH} symlink
   update                     git fetch + git pull --ff-only origin main
 
+Dev mode (ck-dev / CK_SANDBOX=1):
+  dev clean                  Remove the .sandbox/ directory (same as ck-clean)
+
 Options:
   -v, --version              Show version
   -h, --help                 Show this help
@@ -134,6 +137,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("update", help="Self-update via git pull --ff-only")
     sub.add_parser("help", help="Show this help")
 
+    p_dev = sub.add_parser("dev", help="Dev-mode sandbox utilities")
+    dev_sub = p_dev.add_subparsers(dest="dev_command", metavar="<action>")
+    dev_sub.add_parser("clean", help="Remove the .sandbox/ directory")
+
     return parser
 
 
@@ -143,6 +150,7 @@ _LEGACY_CHOICES = (
     "init", "st", "dashboard", "start", "done", "add", "save",
     "edit", "log", "install", "uninstall", "update", "help",
     "list", "tasks", "register", "unregister", "prune", "info",
+    "dev", "ck-clean",
 )
 
 # Flags each legacy command accepts. Anything else starting with "-"
@@ -168,6 +176,8 @@ _LEGACY_FLAGS: dict[str, frozenset] = {
     "uninstall": frozenset(),
     "update": frozenset(),
     "help": frozenset(),
+    "dev": frozenset(),
+    "ck-clean": frozenset(),
 }
 
 
@@ -299,6 +309,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             _uninstall_user()
         elif args.command == "update":
             return _do_update(ck)
+        elif args.command == "dev":
+            return _run_dev_command(getattr(args, "dev_command", None))
         return 0
     except KeyError as e:
         print(f"\u274c {e}")
@@ -459,6 +471,10 @@ def _legacy_dispatch(raw: List[str]) -> int:
             _uninstall_user()
         elif cmd == "update":
             return _do_update(ck)
+        elif cmd in ("dev", "ck-clean"):
+            # `ck dev clean`, bare `ck dev` (hint), `ck ck-clean`.
+            return _run_dev_command(rest[0] if cmd == "dev" and rest else
+                                    ("clean" if cmd == "ck-clean" else None))
         elif cmd == "help":
             print(HELP_TEXT)
         else:
@@ -485,6 +501,33 @@ def _legacy_dispatch(raw: List[str]) -> int:
     except OSError as e:
         print(f"\u274c I/O error: {e}")
         return 4
+
+
+# ---------------------------------------------------------------------- #
+# Dev-mode sandbox utilities (ck dev clean / ck-clean)
+# ---------------------------------------------------------------------- #
+
+def _run_dev_command(action: Optional[str]) -> int:
+    """Dispatch ``ck dev <action>`` / ``ck-clean`` subcommands.
+
+    Returns a process exit code. Unknown or missing actions print a
+    usage hint to stdout and return 2 (no tracebacks, no side
+    effects).
+    """
+    from .sandbox import clean_sandbox
+
+    if action == "clean":
+        return 0 if clean_sandbox() else 1
+    if action is None:
+        print("Usage: ck dev clean")
+        return 2
+    print(f"Unknown dev action: {action!r}. Usage: ck dev clean")
+    return 2
+
+
+def clean_sandbox_entrypoint() -> int:
+    """Console-script entrypoint for ``ck-clean`` (pyproject)."""
+    return _run_dev_command("clean")
 
 
 # ---------------------------------------------------------------------- #

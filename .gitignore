@@ -16,6 +16,10 @@ ck_test/
 test.txt
 test_temp/
 
+# Isolated sandbox for dev-mode (ck-dev): intercepted writes,
+# pseudo-configs, logs and overflow live ONLY under .sandbox/.
+.sandbox/
+
 # =================================================================
 # AI & LLM Assistants (Скрываем мусор от нейросетей)
 # =================================================================

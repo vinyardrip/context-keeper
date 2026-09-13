@@ -1,0 +1,21 @@
+#!/usr/bin/env python3
+"""ck-clean — remove the Context Keeper dev sandbox (``.sandbox/``).
+
+Thin wrapper over :func:`cklib.sandbox.clean_sandbox`. Run as:
+
+    ./ck-clean
+    python ck-clean
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+_HERE = Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+
+from cklib.sandbox import clean_sandbox  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(0 if clean_sandbox() else 1)
