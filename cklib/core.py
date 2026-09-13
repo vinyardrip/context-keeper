@@ -579,7 +579,7 @@ class ContextKeeper:
     def status(self) -> str:
         """Return the single-project status block as a string."""
         tl = parse_plan_file(self.plan_file)
-        return _render_local_status(self, tl, gith)
+        return _render_local_status(self, tl)
 
     def tasks(self) -> str:
         """Return the current project's task list for STDOUT.
@@ -1229,50 +1229,98 @@ def _sprint_insert_line(tl: TaskList) -> Optional[int]:
 # Presentation helpers
 # ---------------------------------------------------------------------- #
 
-def _render_local_status(ck: ContextKeeper, tl: TaskList,
-                         gith_mod) -> str:
+def _status_triad(tl: TaskList):
+    """Resolve the PREV / FOCUS / NEXT task triad for ``ck st``.
+
+    - PREV: nearest completed ``[x]`` task prior to the FOCUS task
+      (last done overall when no focus is set).
+    - FOCUS: the explicitly focused ``[>]`` task — NO fallback to
+      the first open task (the hint line directs the user to set a
+      focus instead).
+    - NEXT: first open ``[ ]`` task after the FOCUS task (first
+      open overall when no focus is set).
+    """
+    focus = tl.focused[0] if tl.focused else None
+
+    prev = None
+    if focus is not None:
+        for t in tl.tasks:
+            if t.id == focus.id:
+                break
+            if t.status == TaskStatus.DONE:
+                prev = t
+    elif tl.done:
+        prev = tl.done[-1]
+
+    nxt = None
+    start = 0
+    if focus is not None:
+        for i, t in enumerate(tl.tasks):
+            if t.id == focus.id:
+                start = i + 1
+                break
+    for t in tl.tasks[start:]:
+        if t.status == TaskStatus.OPEN:
+            nxt = t
+            break
+
+    return prev, focus, nxt
+
+
+def _render_local_status(ck: ContextKeeper, tl: TaskList) -> str:
+    """Render the compact single-project status block.
+
+    Structure (spec-exact):
+
+    ::
+
+        ═════════════════════════════════════════════════════════════
+         🚀 <project_name> [v<version>]
+         📊 Прогресс: <done>/<total> задач сделано (<pct>%)
+
+         🎯 КОНТЕКСТ РАБОТЫ:
+            ⏮️  [<id>] <prev_text> [x]
+            👉 [<id>] [>] <focus_text>
+            ⏭️  [<id>] <next_text> [ ]
+        ═════════════════════════════════════════════════════════════
+
+    Gap IDs fold into the progress line (``(gaps: 3-8)``) and are
+    omitted entirely when there are none.
+    """
+    bar = "═" * 61
     lines: list[str] = []
-    bar = "\u2550" * 45
-    lines.append("")
     lines.append(bar)
-    lines.append(f" \U0001f680 PROJECT: {ck.root.name} [v{VERSION}]")
+    lines.append(f" \U0001f680 {ck.root.name} [v{VERSION}]")
 
-    # Tri-state task view: Previous / Focus / Next.
-    _append_tri_state(lines, tl)
-
-    if gith_mod.is_git_repo(ck.root):
-        br = gith_mod.current_branch(ck.root) or "unknown"
-        lines.append(f" \U0001f33f BRANCH: {br}")
-
+    done_count = len(tl.done)
+    total = tl.total
     pct = tl.completion_pct
-    total, done_count = tl.total, len(tl.done)
-    left = total - done_count
-    lines.append(
-        f" \U0001f4ca PROGRESS: {done_count}/{total} done "
-        f"({pct}%) - left: {left}"
-    )
-
+    progress = f" \U0001f4ca Прогресс: {done_count}/{total} задач сделано ({pct}%)"
     gap_ids = tl.gap_ids()
     if gap_ids:
-        lines.append(
-            f" \u26a0\ufe0f  GAPS detected: {_collapse_ids(gap_ids)}"
-        )
+        progress += f" (gaps: {_collapse_ids(gap_ids)})"
+    lines.append(progress)
 
-    tools = [t for t, ok in (ck._check_tools()).items() if ok]
-    if tools:
-        lines.append(f" \U0001f6e0\ufe0f  TOOLS: {', '.join(tools)}")
+    lines.append("")
+    lines.append(" \U0001f3af КОНТЕКСТ РАБОТЫ:")
+
+    prev, focus, nxt = _status_triad(tl)
+    if prev is not None:
+        lines.append(f"    \u23ee\ufe0f  [{prev.id}] {prev.title} [x]")
+    else:
+        lines.append("    \u23ee\ufe0f  (нет завершенных)")
+    if focus is not None:
+        lines.append(f"    \U0001f449 [{focus.id}] [>] {focus.title}")
+    else:
+        lines.append(
+            "    \U0001f449 (фокус не выбран — используйте 'ck start <id>')"
+        )
+    if nxt is not None:
+        lines.append(f"    \u23ed\ufe0f  [{nxt.id}] {nxt.title} [ ]")
+    else:
+        lines.append("    \u23ed\ufe0f  (нет открытых задач)")
 
     lines.append(bar)
-
-    if ck.history_file.exists():
-        recent = _recent_history(ck.history_file, count=3)
-        if recent:
-            lines.append("")
-            lines.append(" \U0001f4dc RECENT NOTES:")
-            for entry in recent:
-                lines.extend(_format_history_entry(entry))
-
-    lines.append("\u2550" * 25 + " [end] " + "\u2550" * 11 + "\n")
     return "\n".join(lines)
 
 
@@ -1306,41 +1354,6 @@ def _render_tasks_listing(tl: TaskList) -> str:
         marker = t.status.canonical_marker
         lines.append(f"[{marker}] {t.id}. {t.title}")
     return "\n".join(lines)
-
-
-def _append_tri_state(lines: list, tl: TaskList) -> None:
-    """Previous / Focus / Next tri-state view of the task list.
-
-    - PREVIOUS: the most recently completed task (last ``[x]``).
-    - FOCUS: the focused task (``[>]``), else the first open task.
-    - NEXT: the first open task that follows the FOCUS task.
-    """
-    previous = tl.done[-1] if tl.done else None
-    focus = tl.active()
-    next_task = None
-    if focus is not None:
-        for i, t in enumerate(tl.tasks):
-            if t.id == focus.id:
-                next_task = next(
-                    (u for u in tl.tasks[i + 1:]
-                     if u.status == TaskStatus.OPEN),
-                    None,
-                )
-                break
-
-    if previous is not None:
-        lines.append(f" \u25c0 PREVIOUS: [{previous.id}] {previous.title}")
-    else:
-        lines.append(" \u25c0 PREVIOUS: --")
-    if focus is not None:
-        marker = "[>] " if focus.status == TaskStatus.FOCUSED else ""
-        lines.append(f" \U0001f3af FOCUS:    [{focus.id}] {marker}{focus.title}")
-    else:
-        lines.append(" \U0001f3af FOCUS:    --")
-    if next_task is not None:
-        lines.append(f" \u25b6 NEXT:      [{next_task.id}] {next_task.title}")
-    else:
-        lines.append(" \u25b6 NEXT:      --")
 
 
 def _collapse_ids(ids: list) -> str:
@@ -1571,35 +1584,6 @@ def _render_dashboard(ck: Optional[ContextKeeper], *, list_projects,
         )))
     out.append(_hr())
     return "\n".join(out)
-
-
-def _recent_history(path: Path, *, count: int) -> list[str]:
-    content = path.read_text(encoding="utf-8")
-    parts = re.split(r"\n(?=### )", content)
-    if parts and not parts[0].strip().startswith("###"):
-        parts.pop(0)
-    return [p.strip() for p in parts[-count:]]
-
-
-def _format_history_entry(entry: str) -> list[str]:
-    out: list[str] = []
-    lines = entry.splitlines()
-    if not lines:
-        return out
-    out.append(f"  {lines[0].replace('### ', '\U0001f539 ')}")
-    in_code = False
-    for line in lines[1:]:
-        clean = line.strip()
-        if clean.startswith("```"):
-            in_code = not in_code
-            out.append(f"    {'\u250c' if in_code else '\u2514'}{'\u2500' * 40}")
-            continue
-        if in_code:
-            out.append(f"    \u2502 {clean}")
-        elif clean:
-            out.append(f"    {clean}")
-    out.append("")
-    return out
 
 
 # ---------------------------------------------------------------------- #

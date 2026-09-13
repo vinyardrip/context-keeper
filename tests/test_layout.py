@@ -114,25 +114,42 @@ class TestGapDisplay(_IsolatedHome, unittest.TestCase):
             tl = parse_plan(ck.plan_file.read_text(encoding="utf-8"))
             gaps = tl.gap_ids()
             self.assertEqual(gaps, [4, 5, 6, 7, 8, 9])
-            out = _render_local_status(ck, tl, _FakeGit())
-            self.assertIn("GAPS detected: 4-9", out)
-            self.assertNotIn("GAPS detected: 4, 5, 6, 7, 8, 9", out)
+            out = _render_local_status(ck, tl)
+            # Gaps fold compactly into the progress line.
+            self.assertIn("(gaps: 4-9)", out)
+            self.assertNotIn("GAPS detected", out)
+            self.assertNotIn("4, 5, 6, 7, 8, 9", out)
 
-    def test_status_no_gaps_line_when_clean(self):
+    def test_status_no_gaps_when_clean(self):
         plan = "# P\n## Current Sprint\n- [ ] a\n- [x] b\n"
         with tempfile.TemporaryDirectory() as td:
             ck = self._ck(Path(td), plan)
             tl = parse_plan(ck.plan_file.read_text(encoding="utf-8"))
-            out = _render_local_status(ck, tl, _FakeGit())
-            self.assertNotIn("GAPS", out)
+            out = _render_local_status(ck, tl)
+            self.assertNotIn("gaps", out)
 
+    def test_status_structure_and_clutter_free(self):
+        """Spec-exact structure: 61-char bars, Russian progress
+        line, vertical triad, and NO TOOLS/BRANCH/RECENT NOTES."""
+        plan = "# P\n## Current Sprint\n- [ ] a\n"
+        with tempfile.TemporaryDirectory() as td:
+            ck = self._ck(Path(td), plan)
+            tl = parse_plan(ck.plan_file.read_text(encoding="utf-8"))
+            out = _render_local_status(ck, tl)
 
-class _FakeGit:
-    """Stub git module for status rendering tests."""
-
-    @staticmethod
-    def is_git_repo(path=None):
-        return False
+        lines = out.splitlines()
+        bar = "═" * 61
+        self.assertEqual(lines[0], bar)
+        self.assertEqual(lines[-1], bar)
+        # Header shows the project ROOT dir name, not the plan title.
+        self.assertTrue(lines[1].startswith(" 🚀 project [v"),
+                        f"unexpected header: {lines[1]!r}")
+        self.assertIn("задач сделано", lines[2])
+        # No clutter blocks.
+        self.assertNotIn("TOOLS", out)
+        self.assertNotIn("BRANCH", out)
+        self.assertNotIn("RECENT NOTES", out)
+        self.assertNotIn("[end]", out)
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +257,7 @@ class TestTruncateEllipsis(unittest.TestCase):
 
 
 class TestTriStateView(_IsolatedHome, unittest.TestCase):
-    """``ck st`` shows PREVIOUS / FOCUS / NEXT."""
+    """``ck st`` renders the vertical КОНТЕКСТ РАБОТЫ triad."""
 
     def _ck(self, tmp: Path, plan: str) -> ContextKeeper:
         root = tmp / "project"
@@ -254,9 +271,9 @@ class TestTriStateView(_IsolatedHome, unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             ck = self._ck(Path(td), plan)
             tl = parse_plan(ck.plan_file.read_text(encoding="utf-8"))
-            return _render_local_status(ck, tl, _FakeGit())
+            return _render_local_status(ck, tl)
 
-    def test_full_tri_state(self):
+    def test_full_vertical_triad(self):
         plan = (
             "# P\n## Current Sprint\n"
             "- [x] finished first\n"
@@ -264,37 +281,83 @@ class TestTriStateView(_IsolatedHome, unittest.TestCase):
             "- [ ] next up\n"
         )
         out = self._status(plan)
-        self.assertIn("PREVIOUS: [1] finished first", out)
-        self.assertIn("FOCUS:    [2] [>] focused task", out)
-        self.assertIn("NEXT:      [3] next up", out)
+        self.assertIn("🎯 КОНТЕКСТ РАБОТЫ:", out)
+        # Vertical order: PREV line above FOCUS line above NEXT line.
+        idx_prev = out.index("⏮️  [1] finished first [x]")
+        idx_focus = out.index("👉 [2] [>] focused task")
+        idx_next = out.index("⏭️  [3] next up [ ]")
+        self.assertLess(idx_prev, idx_focus)
+        self.assertLess(idx_focus, idx_next)
 
-    def test_focus_falls_back_to_first_open(self):
-        plan = "# P\n- [ ] only open task\n"
+    def test_prev_is_nearest_done_before_focus(self):
+        plan = "# P\n- [x] old\n- [x] nearer\n- [>] cur\n- [x] after\n"
         out = self._status(plan)
-        self.assertIn("FOCUS:    [1] only open task", out)
-        self.assertIn("NEXT:      --", out)
+        # Nearest [x] PRIOR to focus — not the last done overall.
+        self.assertIn("⏮️  [2] nearer [x]", out)
+        self.assertNotIn("[3] cur [x]", out)
 
-    def test_no_tasks_all_dashes(self):
+    def test_no_prev_hint(self):
+        out = self._status("# P\n- [>] only focus\n")
+        self.assertIn("⏮️  (нет завершенных)", out)
+
+    def test_no_focus_hint(self):
+        """Without an explicit [>], show the usage hint (no fallback
+        to the first open task)."""
+        out = self._status("# P\n- [ ] only open task\n")
+        self.assertIn("👉 (фокус не выбран — используйте 'ck start <id>')", out)
+        self.assertNotIn("👉 [1]", out)
+
+    def test_no_next_hint(self):
+        out = self._status("# P\n- [>] all done after\n- [x] done\n")
+        self.assertIn("⏭️  (нет открытых задач)", out)
+
+    def test_no_tasks_all_hints(self):
         out = self._status("# P\n")
-        self.assertIn("PREVIOUS: --", out)
-        self.assertIn("FOCUS:    --", out)
-        self.assertIn("NEXT:      --", out)
+        self.assertIn("⏮️  (нет завершенных)", out)
+        self.assertIn("фокус не выбран", out)
+        self.assertIn("⏭️  (нет открытых задач)", out)
 
     def test_next_skips_done_tasks(self):
         plan = "# P\n- [>] f\n- [x] d\n- [ ] future\n"
         out = self._status(plan)
-        self.assertIn("NEXT:      [3] future", out)
+        self.assertIn("⏭️  [3] future [ ]", out)
 
-    def test_previous_is_last_done(self):
+    def test_next_falls_back_to_first_open_without_focus(self):
+        """No [>] set: NEXT still shows the first open task."""
+        plan = "# P\n- [x] d\n- [ ] first open\n- [ ] second\n"
+        out = self._status(plan)
+        self.assertIn("⏭️  [2] first open [ ]", out)
+
+    def test_prev_without_focus_is_last_done(self):
         plan = "# P\n- [x] old\n- [x] newer\n- [ ] cur\n"
         out = self._status(plan)
-        self.assertIn("PREVIOUS: [2] newer", out)
+        self.assertIn("⏮️  [2] newer [x]", out)
 
-    def test_no_done_no_previous(self):
-        plan = "# P\n- [ ] a\n"
+    def test_exact_spec_layout(self):
+        """Byte-exact rendering of the spec structure (gap-free plan
+        so the progress line stays compact)."""
+        from cklib.config import VERSION
+        plan = (
+            "# Demo\n"
+            "- [x] prev task\n"
+            "- [>] focus task\n"
+            "- [ ] next task\n"
+            "- [x] later done\n"
+        )
         out = self._status(plan)
-        self.assertIn("PREVIOUS: --", out)
-        self.assertIn("FOCUS:    [1] a", out)
+        bar = "═" * 61
+        expected = "\n".join([
+            bar,
+            f" 🚀 project [v{VERSION}]",
+            " 📊 Прогресс: 2/4 задач сделано (50.0%)",
+            "",
+            " 🎯 КОНТЕКСТ РАБОТЫ:",
+            "    ⏮️  [1] prev task [x]",
+            "    👉 [2] [>] focus task",
+            "    ⏭️  [3] next task [ ]",
+            bar,
+        ])
+        self.assertEqual(out, expected)
 
 
 if __name__ == "__main__":
