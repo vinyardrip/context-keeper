@@ -1,0 +1,35 @@
+#!/usr/bin/env python3
+"""ck-dev — run Context Keeper in isolated sandbox mode.
+
+Every write is redirected into ``<repo_root>/.sandbox/`` — the real
+project files and ``~/.config/ck/`` remain strictly read-only. Reads
+still come from the real state, so dashboards and status reflect
+production while mutations land in the sandbox.
+
+Thin wrapper: sets ``CK_SANDBOX=1`` and delegates to the regular CLI
+runner. Run as:
+
+    ./ck-dev <command>
+    python ck-dev <command>
+
+Cleanup: ``ck-clean`` or ``ck dev clean`` removes ``.sandbox/``.
+"""
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+_HERE = Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+
+# Sandbox mode is the whole point of this entrypoint. (Detection also
+# recognises the argv[0] name, but the env var makes the intent
+# explicit and survives nested interpreter re-invocations.)
+os.environ["CK_SANDBOX"] = "1"
+
+from cklib.cli import main  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(main())

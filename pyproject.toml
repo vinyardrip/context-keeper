@@ -16,3 +16,4 @@ packages = ["cklib"]
 [project.scripts]
 ck = "cklib.cli:main"
 ck-clean = "cklib.cli:clean_sandbox_entrypoint"
+ck-dev = "cklib.cli:main"

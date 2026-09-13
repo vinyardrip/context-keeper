@@ -55,7 +55,17 @@ def _quarantine_corrupt(target: Path) -> None:
     write start from a clean slate. Raises
     :class:`RegistryCorruptError` if the file cannot be moved so the
     caller aborts instead of overwriting it.
+
+    DEV MODE: the quarantine moves the SANDBOXED copy (the file a
+    dev-mode session would have been reading/writing), never the
+    real registry.
     """
+    try:
+        from .sandbox import is_dev_mode, resolve_write_path
+        if is_dev_mode():
+            target = resolve_write_path(target)
+    except Exception:
+        pass  # interception is best-effort; quarantine must still work
     ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     backup = target.with_name(f"{target.name}.corrupt-{ts}.bak")
     try:
@@ -244,7 +254,20 @@ def _entry_from_dict(d: dict) -> ProjectEntry:
 
 
 def ensure_global_dir() -> Path:
-    """Ensure ``~/.config/ck/`` exists. Returns the directory."""
+    """Ensure ``~/.config/ck/`` exists. Returns the directory.
+
+    DEV MODE: the SANDBOXED config dir is ensured instead; the real
+    global config directory is never created/mutated by a dev
+    session.
+    """
+    try:
+        from .sandbox import is_dev_mode, resolve_write_path
+        if is_dev_mode():
+            d = resolve_write_path(GLOBAL_CONFIG_DIR)
+            d.mkdir(parents=True, exist_ok=True)
+            return d
+    except Exception:
+        pass
     GLOBAL_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     return GLOBAL_CONFIG_DIR
 
@@ -424,6 +447,10 @@ def all_paths() -> Iterable[Path]:
 def _atomic_write_json(path: Path, payload: dict) -> None:
     """Durable atomic JSON write: tmp + fsync + rename.
 
+    - DEV MODE: ``path`` passes through the sandbox interceptor
+      first, so registry writes (``projects.json``) land under
+      ``.sandbox/config/`` while the real ``~/.config/ck/`` stays
+      immutable.
     - Target symlinks are resolved first (the link survives).
     - The original file's permissions are preserved (mkstemp's 0600
       would otherwise demode the registry on every write).
@@ -432,10 +459,16 @@ def _atomic_write_json(path: Path, payload: dict) -> None:
     """
     real = path
     try:
-        if path.is_symlink():
-            real = path.resolve()
+        from .sandbox import is_dev_mode, resolve_write_path
+        if is_dev_mode():
+            real = resolve_write_path(path)
+    except Exception:
+        real = path  # interception must never break a real write
+    try:
+        if real.is_symlink():
+            real = real.resolve()
     except OSError:
-        real = path
+        pass
     real.parent.mkdir(parents=True, exist_ok=True)
     try:
         mode = os.stat(real).st_mode & 0o777

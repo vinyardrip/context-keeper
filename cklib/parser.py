@@ -567,13 +567,24 @@ def _resolve_symlink_target(path: Path) -> Path:
 def _atomic_write_text(path: Path, text: str) -> None:
     """Durable atomic write: tmp file + fsync + rename.
 
+    - DEV MODE: ``path`` is first passed through the sandbox
+      interceptor (``resolve_write_path``) so PLAN.md / .ck/ writes
+      land under ``.sandbox/`` while production stays immutable.
+      Reads are NOT affected — only this write path is redirected.
     - Target symlinks are resolved first (the link survives).
     - The original file's permissions are preserved (mkstemp's 0600
       would otherwise demote e.g. 0644 files on every write).
     - Data is flushed and fsync'ed before the rename so a crash
       cannot leave a renamed-but-empty file.
     """
-    real = _resolve_symlink_target(path)
+    target = path
+    try:
+        from .sandbox import is_dev_mode, resolve_write_path
+        if is_dev_mode():
+            target = resolve_write_path(path)
+    except Exception:
+        target = path  # interception must never break a real write
+    real = _resolve_symlink_target(target)
     real.parent.mkdir(parents=True, exist_ok=True)
     try:
         mode = os.stat(real).st_mode & 0o777

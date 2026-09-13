@@ -21,6 +21,11 @@ from typing import Callable, Optional, Tuple
 
 from . import git as gith
 from . import registry
+from .sandbox import (
+    is_dev_mode,
+    resolve_write_path,
+    sandbox_project_dir,
+)
 from .config import (
     CK_DIR_NAME,
     DEFAULT_CK_GITIGNORE,
@@ -145,7 +150,34 @@ class ContextKeeper:
     # ------------------------------------------------------------------ #
 
     def _ensure_ck_dir(self) -> None:
-        self.ck_path.mkdir(parents=True, exist_ok=True)
+        # DEV MODE: the .ck/ tree is created inside the sandbox copy
+        # for this project, never in the real project directory.
+        if is_dev_mode():
+            resolve_write_path(self.ck_path).mkdir(parents=True, exist_ok=True)
+        else:
+            self.ck_path.mkdir(parents=True, exist_ok=True)
+
+    def _open_history_append(self):
+        """Return (fh, real_path_untouched) for HISTORY.md appends.
+
+        Production path: opens the real file in append mode.
+        DEV MODE: appends go to the SANDBOXED copy — seeded from the
+        original on first append so the dev session starts from the
+        real history instead of a blank slate (entries are never
+        lost, and the real file is never modified).
+        """
+        if not is_dev_mode():
+            return self.history_file.open("a", encoding="utf-8")
+        sandboxed = resolve_write_path(self.history_file)
+        if not sandboxed.exists():
+            if self.history_file.exists():
+                sandboxed.write_text(
+                    self.history_file.read_text(encoding="utf-8"),
+                    encoding="utf-8",
+                )
+            else:
+                sandboxed.write_text("", encoding="utf-8")
+        return sandboxed.open("a", encoding="utf-8")
 
     def _write_if_missing(self, path: Path, content: str, label: str,
                           *, echo: bool = True, printer=print) -> bool:
@@ -194,16 +226,24 @@ class ContextKeeper:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         archive = self.ck_path / f"HISTORY_{ts}.md.bak"
         with file_lock(self.history_file):
+            # DEV MODE: rotation is a WRITE flow — operate entirely on
+            # the sandboxed copies (archive + replacement) while
+            # reading the ORIGINAL history for the preserved tail.
             content = self.history_file.read_text(encoding="utf-8")
             last_entry = _last_history_entry(content)
             header = f"# History {self.root.name}\nArchive: {archive.name}\n\n"
             new_text = header + last_entry
+            target_dir = (
+                resolve_write_path(self.ck_path) if is_dev_mode()
+                else self.ck_path
+            )
+            archive = target_dir / f"HISTORY_{ts}.md.bak"
             # Write the replacement content to a temp file first so
             # there is never a window where HISTORY.md is absent.
             # fsync before the renames so a crash cannot leave an
             # empty renamed file.
             fd, tmp_name = tempfile.mkstemp(
-                dir=str(self.ck_path), prefix=".ck-history-", suffix=".tmp"
+                dir=str(target_dir), prefix=".ck-history-", suffix=".tmp"
             )
             try:
                 try:
@@ -215,8 +255,13 @@ class ContextKeeper:
                     fh.flush()
                     os.fsync(fh.fileno())
                 os.chmod(tmp_name, mode)
-                self.history_file.rename(archive)
-                os.replace(tmp_name, self.history_file)
+                # In dev mode the REAL history file is never renamed:
+                # the sandbox copy takes the rotation instead.
+                rotated = resolve_write_path(self.history_file) \
+                    if is_dev_mode() else self.history_file
+                if rotated.exists():
+                    rotated.rename(archive)
+                os.replace(tmp_name, rotated)
             except Exception:
                 try:
                     os.unlink(tmp_name)
@@ -241,9 +286,14 @@ class ContextKeeper:
 
         Concurrent ``ck`` invocations in the same project serialise on
         ``.ck/state.json.lock``; the tmp+rename writer guarantees
-        readers never observe a torn file.
+        readers never observe a torn file. DEV MODE: both the mkdir
+        and the atomic write are redirected into the sandbox (the
+        atomic writer intercepts itself; the lock too).
         """
-        self.ck_path.mkdir(parents=True, exist_ok=True)
+        if is_dev_mode():
+            resolve_write_path(self.ck_path).mkdir(parents=True, exist_ok=True)
+        else:
+            self.ck_path.mkdir(parents=True, exist_ok=True)
         text = json.dumps(state, indent=2, ensure_ascii=False)
         with file_lock(self.state_file):
             _atomic_write_text(self.state_file, text)
@@ -284,7 +334,6 @@ class ContextKeeper:
             current = gi.read_text(encoding="utf-8")
         else:
             current = ""
-            gi.touch()
 
         # Exact-line set: strip trailing whitespace only (gitignore
         # semantics), keep the line content verbatim.
@@ -308,6 +357,10 @@ class ContextKeeper:
             block_lines.extend(additions)
             block_lines.extend(negations)
             block = "\n".join(block_lines) + "\n"
+            # DEV MODE: appends go to the sandboxed project copy; the
+            # real project .gitignore stays untouched.
+            if is_dev_mode():
+                gi = sandbox_project_dir(root) / ".gitignore"
             with gi.open("a", encoding="utf-8") as fh:
                 fh.write(block)
         return additions + negations
@@ -317,6 +370,8 @@ class ContextKeeper:
         """Ensure ``.ck/.gitignore`` exists with the default content."""
         gi = ck_path / GITIGNORE_FILENAME
         if not gi.exists():
+            # DEV MODE: template writes land in the sandbox copy.
+            gi = resolve_write_path(gi)
             gi.write_text(DEFAULT_CK_GITIGNORE, encoding="utf-8")
 
     # ------------------------------------------------------------------ #
@@ -329,10 +384,22 @@ class ContextKeeper:
         Corrupted content (pasted ANSI noise, orphaned control
         sequences) is cleaned out and atomically persisted back to
         disk on load — every mutating command self-heals the file as
-        part of its read-modify-write pass. Returns an empty
-        TaskList if the file is missing.
+        part of its read-modify-write pass. Returns an empty TaskList
+        if the file is missing.
+
+        DEV MODE read-your-writes: once a sandboxed PLAN.md copy
+        exists (created by a previous dev-mode mutation), subsequent
+        mutations read THAT copy so chained commands (add → start →
+        done) compose instead of each clobbering the previous
+        sandbox write. With no sandbox copy yet, reads come from the
+        real PLAN.md and the first mutation seeds the sandbox.
         """
-        tl, _repaired = load_repaired_plan(self.plan_file)
+        plan_path = self.plan_file
+        if is_dev_mode():
+            sandboxed = resolve_write_path(plan_path)
+            if sandboxed.exists():
+                plan_path = sandboxed
+        tl, _repaired = load_repaired_plan(plan_path)
         return tl
 
     def _commit_plan(self, task_list: TaskList) -> None:
@@ -455,7 +522,7 @@ class ContextKeeper:
         )
         self._ensure_ck_dir()
         with file_lock(self.history_file):
-            with self.history_file.open("a", encoding="utf-8") as fh:
+            with self._open_history_append() as fh:
                 fh.write(entry.render())
 
     # ------------------------------------------------------------------ #
@@ -595,7 +662,7 @@ class ContextKeeper:
             printer("\u274c Run `ck init` first.")
             return None
 
-        tl = parse_plan_file(self.plan_file)
+        tl = self._load_plan()
         active = tl.active()
         if active is None:
             printer("\u26a0\ufe0f  No active task to save.")
@@ -633,10 +700,17 @@ class ContextKeeper:
             # interleaved partial note blocks, no double rotation).
             # Entry counting matches only anchored "### <date>" headings —
             # "### " inside note bodies/code fences is not an entry.
+            # DEV MODE: the append lands in the sandboxed copy; the
+            # rotation count is then read from that same copy.
             with file_lock(self.history_file):
-                with self.history_file.open("a", encoding="utf-8") as fh:
+                with self._open_history_append() as fh:
                     fh.write(note.render())
-                history_text = self.history_file.read_text(encoding="utf-8")
+                if is_dev_mode():
+                    history_text = resolve_write_path(
+                        self.history_file).read_text(encoding="utf-8")
+                else:
+                    history_text = self.history_file.read_text(
+                        encoding="utf-8")
                 needs_rotation = (
                     _count_history_entries(history_text) > HISTORY_LIMIT
                 )
@@ -660,6 +734,15 @@ class ContextKeeper:
                 "\U0001f4e6 Step 2: Git commit \u2014 optional, "
                 "separate from local history"
             )
+            if is_dev_mode():
+                # Guardrail: a dev-mode session must never create a
+                # real Git commit (or init a repo) in the project.
+                # The sandboxed history entry above is already saved.
+                printer(
+                    f"\U0001f6e1\ufe0f  Dev mode: Git commit skipped "
+                    f"(sandbox). Entry saved in {history_rel}."
+                )
+                return None
             if not gith.is_git_repo(self.root):
                 ans = input_fn(
                     "\u2049\ufe0f  Not a Git repo. Initialize one for "
@@ -737,7 +820,14 @@ class ContextKeeper:
         if skip == "s" or skip == "skip":
             return ""
         if skip == "e" or skip == "editor":
-            tmp = self.ck_path / ".ck_note.tmp"
+            # DEV MODE: the editor scratch file lives in the sandbox
+            # copy of .ck/, never in the real project tree.
+            tmp_dir = (
+                resolve_write_path(self.ck_path) if is_dev_mode()
+                else self.ck_path
+            )
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            tmp = tmp_dir / ".ck_note.tmp"
             tmp.write_text("", encoding="utf-8")
             try:
                 subprocess.run([get_editor(self.root), str(tmp)], check=False)
@@ -762,10 +852,32 @@ class ContextKeeper:
     # ------------------------------------------------------------------ #
 
     def edit_plan(self) -> None:
-        subprocess.run([get_editor(self.root), str(self.plan_file)], check=False)
+        # DEV MODE: the editor edits the SANDBOXED copy; the real
+        # PLAN.md is opened read-only in effect (never handed to the
+        # editor as a write target).
+        target = (
+            resolve_write_path(self.plan_file) if is_dev_mode()
+            else self.plan_file
+        )
+        if is_dev_mode() and not target.exists() and self.plan_file.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                self.plan_file.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+        subprocess.run([get_editor(self.root), str(target)], check=False)
 
     def edit_log(self) -> None:
-        subprocess.run([get_editor(self.root), str(self.history_file)], check=False)
+        target = (
+            resolve_write_path(self.history_file) if is_dev_mode()
+            else self.history_file
+        )
+        if is_dev_mode() and not target.exists() and self.history_file.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                self.history_file.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+        subprocess.run([get_editor(self.root), str(target)], check=False)
 
     # ------------------------------------------------------------------ #
     # COMMAND: update (git pull --ff-only)                                #
@@ -784,7 +896,17 @@ class ContextKeeper:
         Returns an :class:`UpdateResult` describing what happened.
         Never raises for routine update outcomes; only for programmer
         errors (invalid remote/branch).
+
+        DEV MODE: always aborts — a sandboxed session must never
+        fetch from remotes or mutate the installation work tree.
         """
+        if is_dev_mode():
+            return UpdateResult(
+                ok=False,
+                message="Dev mode: self-update disabled in sandbox "
+                        "mode (no remote fetch, no work-tree pull).",
+                action="abort",
+            )
         repo_dir = self.install_dir
         if not gith.is_git_repo(repo_dir):
             return UpdateResult(
@@ -946,11 +1068,16 @@ def _write_global_state_timestamp(key: str,
             real = GLOBAL_STATE_FILE.resolve()
     except OSError:
         real = GLOBAL_STATE_FILE
+    # DEV MODE: reads seed from the original; the write itself is
+    # redirected to the sandboxed state copy.
+    read_from = real
+    if is_dev_mode():
+        real = resolve_write_path(real)
     real.parent.mkdir(parents=True, exist_ok=True)
     state: dict = {}
-    if real.exists():
+    if read_from.exists():
         try:
-            state = json.loads(real.read_text(encoding="utf-8"))
+            state = json.loads(read_from.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             state = {}
     if not isinstance(state, dict):

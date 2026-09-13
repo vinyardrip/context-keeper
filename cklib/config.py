@@ -251,7 +251,7 @@ def file_lock(path: Path | str, *, timeout: float = 5.0,
               poll: float = 0.05) -> Iterator[None]:
     """Acquire an advisory exclusive lock on ``path``.
 
-    ``path`` is typically the *target* of the operation (e.g. the
+    ``path`` is typically the *target* of an operation (e.g. the
     registry file). The lock is acquired on a sibling ``.lock`` file so
     concurrent processes (or threads) serialise on the same lockfile.
 
@@ -262,6 +262,12 @@ def file_lock(path: Path | str, *, timeout: float = 5.0,
       (or the lock file cannot be opened at all), raises
       :class:`LockTimeoutError` instead of proceeding unlocked.
     - The lock is always released on exit, even if the body raises.
+    - DEV MODE: when sandbox interception is active
+      (``ck-dev`` / ``CK_SANDBOX`` / ``--sandbox``), the lock is taken
+      on the SANDBOX sibling of the redirected path so ``*.lock``
+      files are never created inside real production directories
+      (``.ck/`` or ``~/.config/ck/``). The import is lazy to avoid a
+      config <-> sandbox import cycle.
 
     Usage::
 
@@ -271,6 +277,12 @@ def file_lock(path: Path | str, *, timeout: float = 5.0,
             registry_path.write_text(json.dumps(data))
     """
     p = Path(path)
+    try:
+        from .sandbox import is_dev_mode, resolve_write_path
+        if is_dev_mode():
+            p = resolve_write_path(p)
+    except Exception:
+        pass  # interception is best-effort for locks; never block I/O
     lock_path = p.with_name(p.name + ".lock")
     try:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
