@@ -9,7 +9,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-VERSION = "0.1.1"
+VERSION = "0.2.0"
 CK_DIR_NAME = ".ck"
 HISTORY_LIMIT = 5
 

@@ -60,7 +60,7 @@ System commands:
   uninstall                  Remove the {USER_INSTALL_PATH} symlink
   update                     git fetch + git pull --ff-only origin main
 
-Dev mode (ck-dev / CK_SANDBOX=1):
+Dev mode (ck-dev / CK_SANDBOX=1 / --sandbox):
   dev clean                  Remove the .sandbox/ directory (same as ck-clean)
 
 Options:

@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.1.1-blue)]()
+[![version](https://img.shields.io/badge/version-0.2.0-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -26,6 +26,7 @@ CLI bridge between your brain, AI agents, and Git. Persistently saves the curren
 - 🛠 Commands
 - ck save Workflow
 - 🔧 Core Mechanics
+- 🧪 Developer Environment & Isolated Sandbox
 - 🗺 Roadmap
 
 ---
@@ -48,6 +49,7 @@ Context Keeper (ck) acts as a bridge between your brain, AI agents, and Git, per
 - Global Registry: Cross-project dashboard (ck dashboard) backed by `~/.config/ck/projects.json`
 - Fail-Closed Locking: Cross-process file locking guards registry, PLAN.md, HISTORY.md and state.json writes
 - Full Plan View: ck st --all
+- Dev Sandbox: `ck-dev` runs any command against real data read-only, redirecting all writes into a git-ignored `.sandbox/` (`ck-clean` resets it)
 
 ---
 
@@ -80,7 +82,7 @@ chmod +x ck
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.1.1
+ck -v    # → ck version 0.2.0
 ```
 
 ---
@@ -123,6 +125,8 @@ ck -v    # → ck version 0.1.1
 | ck install | Symlink ck to ~/.local/bin (no sudo) |
 | ck uninstall | Remove the ~/.local/bin symlink |
 | ck update | Self-update via git fetch + pull --ff-only (refuses if dirty) |
+| ck-dev \<command\> | Run any command in isolated sandbox mode (writes → `.sandbox/`) |
+| ck-clean / ck dev clean | Purge the `.sandbox/` dev environment |
 | ck -h | Help |
 | ck -v | Version |
 
@@ -191,6 +195,66 @@ Local commits only. `ck save` commits if you confirm; `ck` never pushes. `ck upd
 
 ---
 
+## <a name="developer-environment"></a>🧪 Developer Environment & Isolated Sandbox
+
+`ck` ships with a Zero-Trust development mode: everything you do against real project data is **read-only**, and every write lands in a disposable sandbox. It is impossible for a dev session to corrupt production user data.
+
+### Isolated Sandbox (`.sandbox/`)
+
+`.sandbox/` is a git-ignored directory at the repository root. It safely stores dev-mode artifacts — sandboxed project copies, pseudo-configs, and debug logs — without dirtying the main working tree:
+
+```bash
+.sandbox/
+├── projects/            # redirected per-project writes
+│   └── <name>-<hash>/   # one sandbox dir per real project
+│       └── .ck/         # PLAN.md, HISTORY.md, state.json, locks …
+├── config/              # sandboxed global registry / state copies
+└── dev.log              # debug log (see below)
+```
+
+- Created automatically on the first dev-mode write; never committed (`.gitignore`).
+- Sandbox copies are **seeded from the real state** (e.g. appends to a sandboxed `HISTORY.md` start from the real history), so a dev session mirrors production without mutating it.
+
+### Safe Development Binary (`ck-dev`)
+
+`ck-dev` is the sandbox entrypoint. It activates `CK_SANDBOX=1` (the `--sandbox` flag and `CK_DEV=1` do the same) and then behaves like `ck`, with one crucial difference:
+
+- **Reads are real**: dashboards, status, and task lists reflect your actual projects (`~/.config/context-keeper/projects.json`, real project folders).
+- **Writes are intercepted**: ALL write operations — task mutations (`add` / `start` / `done`), `PLAN.md` edits, `state.json` updates, lock files, backups, registry changes — are redirected strictly into `.sandbox/`.
+
+Production state stays immutable while `IS_DEV` is active: the real `~/.config/context-keeper/` and real `PLAN.md` files are never modified (verified byte-for-byte, including mtime, in the test suite). Two extra guardrails are enforced in dev mode:
+
+- `ck-dev save` records the history entry into the sandbox but **skips the Git commit phase**.
+- `ck-dev update` refuses to fetch/pull the installation.
+
+```bash
+./ck-dev add "experiment safely"     # writes land in .sandbox/
+./ck-dev st                          # status reads the REAL project
+```
+
+### Cleanup Utility (`ck-clean` / `ck dev clean`)
+
+`ck-clean` (or `ck dev clean`) safely and recursively purges `.sandbox/` to reset dev state. Missing directory → graceful no-op. Single-line confirmation on stdout; failures report to stderr with a non-zero exit code.
+
+```bash
+./ck-clean
+# [ck-clean] Sandbox environment cleared successfully.
+```
+
+### Debug Logging (`CK_DEBUG=1` / `-v` / `--verbose`)
+
+Dev-mode write interception can be traced:
+
+```bash
+CK_DEBUG=1 ./ck-dev add "traced"    # or: ./ck-dev -v add "traced"
+# stderr:
+# [DEBUG] Intercepted write -> .sandbox/projects/myproj-<hash>/.ck/PLAN.md (real path untouched: ...)
+```
+
+Logs go **exclusively** to `stderr` and `.sandbox/dev.log` — `stdout` stays completely clean so pipes, terminal UI, and scripts are never polluted. With debugging off, interception is fully silent.
+
+---
+
 ## 🗺 Roadmap
 - **Context Injection**: Mechanism to inject project context into external AI prompts and tools
 - **Archive Management**: Advanced history control and search across HISTORY.md.bak files
@@ -215,6 +279,7 @@ CLI-мост между вашим разумом, ИИ-агентами и Git.
 - 🛠 Команды
 - Сценарий работы ck save
 - 🔧 Механика работы
+- 🧪 Разработка и изолированная песочница
 - 🗺 Roadmap
 
 ---
@@ -232,6 +297,7 @@ Context Keeper (ck) служит мостом между вашим разумо
 - Поддержка AI
 - Глобальный реестр проектов и панель мониторинга
 - Fail-closed блокировка файлов, атомарная запись
+- Дев-режим с песочницей: `ck-dev` выполняет команды в режиме «только чтение» реальных данных, все записи уходят в git-ignored `.sandbox/` (`ck-clean` очищает её)
 
 ---
 
@@ -307,6 +373,66 @@ export EDITOR="nano"  # используется, если VISUAL не зада�
 - Ротация истории (безопасная при сбоях)
 - Локальные коммиты Git (без push)
 - Fail-closed блокировка файлов и атомарная запись
+
+---
+
+## <a name="разработка-и-изолированная-песочница"></a>🧪 Разработка и изолированная песочница
+
+В `ck` встроен режим разработки Zero-Trust: работа с реальными данными проекта ведётся **только на чтение**, а все записи попадают в одноразовую песочницу. Dev-сессия физически не может испортить пользовательские данные.
+
+### Изолированная песочница (`.sandbox/`)
+
+`.sandbox/` — игнорируемый Git каталог в корне репозитория. В нём безопасно хранятся артефакты dev-режима: песочные копии проектов, псевдо-конфиги и отладочные логи — рабочее дерево остаётся чистым:
+
+```bash
+.sandbox/
+├── projects/            # перенаправленные записи проектов
+│   └── <имя>-<hash>/    # своя песочница на каждый реальный проект
+│       └── .ck/         # PLAN.md, HISTORY.md, state.json, lock-файлы …
+├── config/              # песочные копии глобального реестра и state
+└── dev.log              # отладочный лог
+```
+
+- Создаётся автоматически при первой dev-записи; в Git не попадает (`.gitignore`).
+- Песочные копии **наследуют реальное состояние** (например, запись в песочный `HISTORY.md` начинается с реальной истории), поэтому dev-сессия отражает продакшен, не изменяя его.
+
+### Безопасный бинарник разработки (`ck-dev`)
+
+`ck-dev` — точка входа в песочницу. Он устанавливает `CK_SANDBOX=1` (аналогично работают флаг `--sandbox` и `CK_DEV=1`) и ведёт себя как `ck` с одним ключевым отличием:
+
+- **Чтение реальное**: статус, дашборды и списки задач показывают настоящие проекты (`~/.config/context-keeper/projects.json`, реальные каталоги).
+- **Записи перехватываются**: ВСЕ операции записи — мутации задач (`add` / `start` / `done`), правки `PLAN.md`, обновления `state.json`, lock-файлы, бэкапы, изменения реестра — строго перенаправляются в `.sandbox/`.
+
+Пока активен `IS_DEV`, продакшен остаётся неизменным: реальный `~/.config/context-keeper/` и реальные `PLAN.md` не модифицируются (проверяется побайтно, включая mtime, в тестах). Дополнительные защитные барьеры в dev-режиме:
+
+- `ck-dev save` сохраняет запись истории в песочницу, но **пропускает фазу Git-коммита**.
+- `ck-dev update` отказывается от fetch/pull установки.
+
+```bash
+./ck-dev add "безопасный эксперимент"   # запись уйдёт в .sandbox/
+./ck-dev st                             # статус читает РЕАЛЬНЫЙ проект
+```
+
+### Утилита очистки (`ck-clean` / `ck dev clean`)
+
+`ck-clean` (или `ck dev clean`) безопасно и рекурсивно удаляет `.sandbox/`, сбрасывая dev-состояние. Отсутствующий каталог — корректный no-op. Подтверждение — одна строка в stdout; при ошибке — сообщение в stderr и ненулевой код возврата.
+
+```bash
+./ck-clean
+# [ck-clean] Sandbox environment cleared successfully.
+```
+
+### Отладочное логирование (`CK_DEBUG=1` / `-v` / `--verbose`)
+
+Перехват записей в dev-режиме можно трассировать:
+
+```bash
+CK_DEBUG=1 ./ck-dev add "traced"    # или: ./ck-dev -v add "traced"
+# stderr:
+# [DEBUG] Intercepted write -> .sandbox/projects/myproj-<hash>/.ck/PLAN.md (real path untouched: ...)
+```
+
+Логи пишутся **исключительно** в `stderr` и `.sandbox/dev.log` — `stdout` остаётся полностью чистым, поэтому пайпы, терминальный UI и скрипты не загрязняются. При выключенной отладке перехват полностью молчит.
 
 ---
 
