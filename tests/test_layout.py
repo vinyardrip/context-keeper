@@ -2,8 +2,8 @@
 
 1. Gap collapsing in ``ck st`` — consecutive gap IDs render as
    ranges ("3-8"), non-consecutive as "3-4, 8".
-2. Dashboard table width — hard cap at ~85 chars total, Path and
-   Focus Task columns dynamically truncated with ellipsis.
+2. Dashboard table — priority columns (Project | Focus Task |
+   Progress | Last Active) with content-capped widths.
 3. Tri-state view — PREVIOUS / FOCUS / NEXT lines in ``ck st``.
 """
 
@@ -158,7 +158,11 @@ class TestGapDisplay(_IsolatedHome, unittest.TestCase):
 
 
 class TestDashboardWidth(_IsolatedHome, unittest.TestCase):
-    """Dashboard table must stay within ~85 columns."""
+    """Dashboard table columns are content-capped before layout.
+
+    Focus Task titles truncate at ~90 chars (spec band 80-100) and
+    project names at 40, so every column stays naturally bounded.
+    """
 
     def _render_with(self, names: list) -> str:
         with tempfile.TemporaryDirectory() as td:
@@ -172,7 +176,64 @@ class TestDashboardWidth(_IsolatedHome, unittest.TestCase):
                 parse_plan_file=lambda p: None,
             )
 
-    def test_table_width_within_85(self):
+    def test_column_priority_order(self):
+        """Header columns: Project | Focus Task | Progress | Last Active."""
+        out = self._render_with(["p"])
+        header = [l for l in out.splitlines() if l.startswith("| Project")]
+        self.assertEqual(len(header), 1)
+        cells = [c.strip() for c in header[0].strip("|").split("|")]
+        self.assertEqual(
+            cells, ["Project", "Focus Task", "Progress", "Last Active"]
+        )
+
+    def test_focus_column_truncated_at_cap(self):
+        """Extreme focus titles truncate with a middle ellipsis, never
+        blow up the table width."""
+        from cklib.core import _safe_parse_plan
+
+        with tempfile.TemporaryDirectory() as td:
+            # Build a registry entry whose focused-task title is
+            # ~120 chars via a real project on disk.
+            root = Path(td) / "longtitle"
+            root.mkdir()
+            ck = ContextKeeper(root=root)
+            ck.init()
+            ck.add_task("x" * 120)
+            ck.start(2)
+            ck.register(path=root, name="longtitle")
+            out = _render_dashboard(
+                ck,
+                list_projects=ckregistry.list_projects,
+                parse_plan_file=_safe_parse_plan,
+            )
+            # Title capped at 90 chars total for the focus cell.
+            data = [l for l in out.splitlines()
+                    if l.startswith("| longtitle")]
+            self.assertTrue(data)
+            focus_cell = data[0].split("|")[2]
+            self.assertLessEqual(len(focus_cell.strip()), 90)
+            self.assertIn("…", focus_cell)
+
+    def test_long_project_name_truncated(self):
+        out = self._render_with([
+            "a-very-long-project-directory-name-that-keeps-going-on-and-on",
+        ])
+        # Project names cap at 40 chars.
+        data = [l for l in out.splitlines()
+                if l.startswith("| a-very-long")]
+        self.assertTrue(data)
+        project_cell = data[0].split("|")[1]
+        self.assertLessEqual(len(project_cell.strip()), 40)
+        self.assertIn("…", project_cell)
+
+    def test_short_data_fits_without_ellipsis(self):
+        out = self._render_with(["p"])
+        self.assertNotIn("…", out)
+        self.assertIn("| p ", out)
+
+    def test_table_lines_bounded(self):
+        """Every table line stays under a compact bound (~170 chars:
+        90 focus + 40 project + short progress/last + chrome)."""
         out = self._render_with([
             "context-keeper",
             "my-second-project-with-a-very-long-name",
@@ -184,23 +245,9 @@ class TestDashboardWidth(_IsolatedHome, unittest.TestCase):
         self.assertTrue(table_lines)
         for line in table_lines:
             self.assertLessEqual(
-                len(line), 85,
-                f"table line exceeds 85 chars: {len(line)}: {line!r}",
+                len(line), 170,
+                f"table line exceeds 170 chars: {len(line)}: {line!r}",
             )
-        # Path and Focus Task columns still present
-        self.assertIn("Path", out)
-        self.assertIn("Focus Task", out)
-
-    def test_long_path_and_title_truncated_with_ellipsis(self):
-        # Deep nested names produce very long resolved paths that
-        # must be middle-truncated, never shown in full.
-        out = self._render_with([
-            "a-very-long-project-directory-name-that-keeps-going-on-and-on",
-        ])
-        self.assertIn("…", out)
-        for line in out.splitlines():
-            if line.startswith("|") or line.startswith("+"):
-                self.assertLessEqual(len(line), 85)
 
     def test_short_data_fits_without_ellipsis(self):
         out = self._render_with(["p"])

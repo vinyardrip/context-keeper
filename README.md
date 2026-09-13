@@ -116,7 +116,8 @@ ck -v    # → ck version 0.2.0
 | ck st --all | Full status incl. full PLAN.md |
 | ck tasks | Print the local project task list to STDOUT (no editor, pipe-friendly) |
 | ck list | Local view: same as `ck tasks` |
-| ck st --global / ck dashboard | Cross-project dashboard table |
+| ck st --global / ck dashboard | Cross-project dashboard (compact table: Project \| Focus Task \| Progress \| Last Active) |
+| ck dashboard -v / --verbose | Detailed block view: full PREV/FOCUS/NEXT triad context per project |
 | ck list -g / ck list --global | Global view: same as `ck dashboard` |
 | ck register [-n NAME] [--path PATH] | Add a project to the global registry |
 | ck unregister [--path PATH \| NAME] | Remove a project from the registry |

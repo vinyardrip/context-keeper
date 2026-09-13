@@ -205,11 +205,10 @@ class TestDashboardTable(_IsolatedRegistry, unittest.TestCase):
     def setUp(self):
         self._isolate()
 
-    def _render(self, ck):
+    def _render(self, ck, *, verbose=False):
         return _render_dashboard(
-            ck,
-            list_projects=ckregistry.list_projects,
-            parse_plan_file=ContextKeeper.__module__ and _safe_parse,
+            ck, list_projects=ckregistry.list_projects,
+            parse_plan_file=_safe_parse, verbose=verbose,
         )
 
     def test_dashboard_with_no_projects(self):
@@ -225,22 +224,20 @@ class TestDashboardTable(_IsolatedRegistry, unittest.TestCase):
             target = _project_dir(Path(td), "alpha")
             ck = ContextKeeper()
             ck.register(path=target, name="alpha")
-            out = _render_dashboard(
-                ck, list_projects=ckregistry.list_projects,
-                parse_plan_file=_safe_parse,
+            out = self._render(ck)
+            # Exactly the four spec columns, in priority order:
+            # Project | Focus Task | Progress | Last Active.
+            header = [l for l in out.splitlines()
+                      if l.startswith("| Project")]
+            self.assertEqual(len(header), 1, f"no header row in:\n{out}")
+            cells = [c.strip() for c in header[0].strip("|").split("|")]
+            self.assertEqual(
+                cells, ["Project", "Focus Task", "Progress", "Last Active"]
             )
-            # All five headers present
-            for col in ("Project", "Path", "Last Active", "Focus Task", "Status"):
-                self.assertIn(col, out)
             # Project row present
-            self.assertIn("alpha", out)
-            # Path row present. Short tmp paths are middle-truncated
-            # ("…") to honor the ~85-char table width cap; the row
-            # must carry the project folder name tail.
             data_rows = [l for l in out.splitlines()
                          if l.startswith("|") and "alpha" in l]
             self.assertTrue(data_rows, f"no data row for alpha in:\n{out}")
-            self.assertIn("alpha", data_rows[0])
 
     def test_dashboard_active_focus(self):
         with tempfile.TemporaryDirectory() as td:
@@ -250,16 +247,12 @@ class TestDashboardTable(_IsolatedRegistry, unittest.TestCase):
             ck.start(2)
             ck.register(path=target, name="alpha")
 
-            out = _render_dashboard(
-                ck, list_projects=ckregistry.list_projects,
-                parse_plan_file=_safe_parse,
-            )
-            self.assertIn("[>]", out)
-            # The focused title may be middle-truncated ("…") by the
-            # ~85-char width cap; assert on a stable prefix + suffix.
-            self.assertIn("impl", out)
-            self.assertIn("…nt feature X", out)
-            self.assertIn("open,", out)  # status column
+            out = self._render(ck)
+            # Focused task renders as [<id>] [>] <text> in the Focus
+            # Task column.
+            self.assertIn("[2] [>] implement feature X", out)
+            # Progress renders as a compact done/total (pct%) ratio.
+            self.assertIn("0/2 (0.0%)", out)
 
     def test_dashboard_no_focus(self):
         with tempfile.TemporaryDirectory() as td:
@@ -267,22 +260,11 @@ class TestDashboardTable(_IsolatedRegistry, unittest.TestCase):
             ck = ContextKeeper(root=target)
             ck.add_task("first task")
             ck.add_task("second task")
-            # Mark the first as done so there is no focused and no
-            # open task left (default task becomes done).
-            ck.done("1")
-            # Add a new task that becomes the next active.
-            ck.add_task("next thing to do")
             ck.register(path=target, name="no-focus")
 
-            out = _render_dashboard(
-                ck, list_projects=ckregistry.list_projects,
-                parse_plan_file=_safe_parse,
-            )
-            # Should have a Focus Task entry, either focused or active
+            out = self._render(ck)
             self.assertIn("Focus Task", out)
-            # No literal "[>]" — but it may appear if start() was called.
-            # The key invariant: rendering didn't crash.
-            self.assertIn("Status", out)
+            self.assertIn("(no focus)", out)
 
     def test_dashboard_missing_directory(self):
         with tempfile.TemporaryDirectory() as td:
@@ -291,30 +273,20 @@ class TestDashboardTable(_IsolatedRegistry, unittest.TestCase):
             ck = ContextKeeper()
             ck.register(path=target, name="ghost")
             target.rmdir()  # remove the folder
-            out = _render_dashboard(
-                ck, list_projects=ckregistry.list_projects,
-                parse_plan_file=_safe_parse,
-            )
+            out = self._render(ck)
             self.assertIn("missing", out)
             self.assertIn("ghost", out)
 
     def test_dashboard_corrupt_plan(self):
-        """Corrupt PLAN.md must not crash the dashboard."""
+        """A missing/unparseable PLAN.md must not crash the dashboard."""
         with tempfile.TemporaryDirectory() as td:
             target = _project_dir(Path(td), "corrupt")
-            # Overwrite PLAN.md with garbage
-            plan = target / ".ck" / "PLAN.md"
-            plan.write_text("not valid markdown \x00\x01\x02 broken",
-                           encoding="utf-8")
+            # Remove PLAN.md entirely — folder exists, plan missing.
+            (target / ".ck" / "PLAN.md").unlink()
             ck = ContextKeeper()
             ck.register(path=target, name="corrupt")
-            out = _render_dashboard(
-                ck, list_projects=ckregistry.list_projects,
-                parse_plan_file=_safe_parse,
-            )
+            out = self._render(ck)
             self.assertIn("corrupt", out)
-            # The "corrupt" status indicator appears
-            self.assertIn("corrupt", out.lower())
 
     def test_dashboard_empty_plan(self):
         """An empty PLAN.md is also handled gracefully."""
@@ -324,25 +296,138 @@ class TestDashboardTable(_IsolatedRegistry, unittest.TestCase):
             plan.write_text("", encoding="utf-8")
             ck = ContextKeeper()
             ck.register(path=target, name="empty")
-            out = _render_dashboard(
-                ck, list_projects=ckregistry.list_projects,
-                parse_plan_file=_safe_parse,
-            )
-            # Should show 0 open, 0 done
-            self.assertIn("0 open, 0 done", out)
-            self.assertIn("none", out)  # focus = none
+            out = self._render(ck)
+            # Empty plan: 0/0 tasks, no focus.
+            self.assertIn("0/0 (0.0%)", out)
+            self.assertIn("(no focus)", out)
 
     def test_dashboard_active_marker(self):
-        """The current working directory is highlighted."""
+        """The current working directory gets the `*` suffix."""
         with tempfile.TemporaryDirectory() as td:
             target = _project_dir(Path(td), "active")
             ck = ContextKeeper(root=target)
             ck.register(path=target, name="active")
-            out = _render_dashboard(
-                ck, list_projects=ckregistry.list_projects,
-                parse_plan_file=_safe_parse,
+            out = self._render(ck)
+            self.assertIn("active *", out)
+
+
+class TestDashboardVerbose(_IsolatedRegistry, unittest.TestCase):
+    """``ck dashboard -v`` block view: full triad per project."""
+
+    def setUp(self):
+        self._isolate()
+
+    def _render(self, ck):
+        return _render_dashboard(
+            ck, list_projects=ckregistry.list_projects,
+            parse_plan_file=_safe_parse, verbose=True,
+        )
+
+    def test_verbose_header_counts_projects(self):
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            _project_dir(td_path, "alpha")
+            _project_dir(td_path, "beta")
+            ck = ContextKeeper()
+            ck.register(path=td_path / "alpha", name="alpha")
+            ck.register(path=td_path / "beta", name="beta")
+            out = self._render(ck)
+            self.assertIn("📭 МОИ ПРОЕКТЫ (2)", out)
+
+    def test_verbose_block_layout_and_triad(self):
+        """Spec-exact block: header, path, progress, triad, separator."""
+        with tempfile.TemporaryDirectory() as td:
+            target = _project_dir(Path(td), "alpha")
+            ck = ContextKeeper(root=target)
+            # Default plan ships one open task (id 1); add prev ->
+            # done, focus -> focused, next -> open.
+            ck.add_task("prev task")
+            ck.add_task("focus task")
+            ck.add_task("next task")
+            ck.done("2")
+            ck.start(3)
+            ck.register(path=target, name="alpha")
+
+            out = self._render(ck)
+            lines = out.splitlines()
+            self.assertEqual(lines[0], "📭 МОИ ПРОЕКТЫ (1)")
+            # cwd marker: the project block carries [*]
+            self.assertIn("🚀 alpha [*]", out)
+            self.assertIn(f"    📍 {target.resolve()}", out)
+            self.assertIn("    📊 Прогресс: 1/4 (25.0%)", out)
+            self.assertIn("    🎯 Контекст:", out)
+            # Vertical triad order: PREV < FOCUS < NEXT.
+            idx_prev = out.index("⏮️  [2] prev task [x]")
+            idx_focus = out.index("👉 [3] [>] focus task")
+            idx_next = out.index("⏭️  [4] next task [ ]")
+            self.assertLess(idx_prev, idx_focus)
+            self.assertLess(idx_focus, idx_next)
+            # Each block is isolated by a 61-char separator bar.
+            self.assertIn("═" * 61, out)
+            self.assertTrue(out.rstrip().endswith("═" * 61))
+
+    def test_verbose_all_done_project(self):
+        """All-done projects collapse the triad to a single line."""
+        with tempfile.TemporaryDirectory() as td:
+            target = _project_dir(Path(td), "finished")
+            ck = ContextKeeper(root=target)
+            ck.add_task("only task")
+            ck.done("1")
+            ck.done("2")
+            ck.register(path=target, name="finished")
+
+            out = self._render(ck)
+            self.assertIn(
+                "🎯 Контекст: (все задачи выполнены 🎉)", out
             )
-            self.assertIn("← active", out)
+            self.assertNotIn("👉", out)
+
+    def test_verbose_no_focus_hint(self):
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            target = _project_dir(td_path, "nofocus")
+            ck = ContextKeeper(root=target)
+            ck.add_task("an open task")
+            ck.register(path=target, name="nofocus")
+
+            # Render from a DIFFERENT root so the marker is [ ]
+            # (non-cwd); the cwd variant is covered by the triad test.
+            elsewhere = ContextKeeper(root=td_path / "elsewhere")
+            out = self._render(elsewhere)
+            self.assertIn("🚀 nofocus [ ]", out)
+            self.assertIn("👉 (фокус не выбран)", out)
+
+    def test_verbose_missing_and_corrupt_blocks(self):
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            gone = td_path / "gone"
+            gone.mkdir()
+            ck = ContextKeeper()
+            ck.register(path=gone, name="ghost")
+            gone.rmdir()
+            corrupt = _project_dir(td_path, "corrupt")
+            # Folder exists but PLAN.md is gone -> corrupt block.
+            (corrupt / ".ck" / "PLAN.md").unlink()
+            ck.register(path=corrupt, name="corrupt")
+
+            out = self._render(ck)
+            self.assertIn("⚠️  missing", out)
+            self.assertIn("⚠️  corrupt", out)
+            # Degraded blocks still render the header + separator.
+            self.assertEqual(out.count("═" * 61), 2)
+
+    def test_verbose_no_truncation_of_titles(self):
+        """Unlike the table, the block view never truncates titles."""
+        with tempfile.TemporaryDirectory() as td:
+            target = _project_dir(Path(td), "longtitle")
+            title = "x" * 120
+            ck = ContextKeeper(root=target)
+            ck.add_task(title)
+            ck.start(2)
+            ck.register(path=target, name="longtitle")
+
+            out = self._render(ck)
+            self.assertIn(f"👉 [2] [>] {title}", out)
 
 
 # A local copy of the safe parse helper that doesn't depend on core's
@@ -370,23 +455,35 @@ class TestRelativeTime(unittest.TestCase):
         ts = (now - timedelta(seconds=2)).astimezone().isoformat()
         self.assertIn("now", _relative_time(ts))
 
+    def test_seconds_ago(self):
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        ts = (now - timedelta(seconds=42)).astimezone().isoformat()
+        self.assertEqual(_relative_time(ts), "42s ago")
+
     def test_minutes_ago(self):
         from datetime import datetime, timezone, timedelta
         now = datetime.now(timezone.utc)
         ts = (now - timedelta(minutes=5)).astimezone().isoformat()
-        self.assertIn("minute", _relative_time(ts))
+        self.assertEqual(_relative_time(ts), "5m ago")
 
     def test_hours_ago(self):
         from datetime import datetime, timezone, timedelta
         now = datetime.now(timezone.utc)
         ts = (now - timedelta(hours=3)).astimezone().isoformat()
-        self.assertIn("hour", _relative_time(ts))
+        self.assertEqual(_relative_time(ts), "3h ago")
+
+    def test_yesterday(self):
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(timezone.utc)
+        ts = (now - timedelta(days=1)).astimezone().isoformat()
+        self.assertEqual(_relative_time(ts), "yesterday")
 
     def test_days_ago(self):
         from datetime import datetime, timezone, timedelta
         now = datetime.now(timezone.utc)
         ts = (now - timedelta(days=2)).astimezone().isoformat()
-        self.assertIn("day", _relative_time(ts))
+        self.assertEqual(_relative_time(ts), "2d ago")
 
     def test_unknown_when_empty(self):
         self.assertEqual(_relative_time(""), "unknown")

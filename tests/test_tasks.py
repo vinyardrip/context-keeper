@@ -240,6 +240,38 @@ class TestCliDispatch(_IsolatedHome, unittest.TestCase):
             self.assertNotIn("GLOBAL DASHBOARD", out_tasks)
             self.assertIn("GLOBAL DASHBOARD", out_dash)
 
+    def test_dashboard_verbose_flag_is_block_view(self):
+        """`ck dashboard -v` renders the verbose МОИ ПРОЕКТЫ blocks."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            ck = self._make_project(tmp, "alpha-proj")
+
+            out = self._run(["dashboard", "-v"], ck.root)
+            self.assertIn("МОИ ПРОЕКТЫ", out)
+            self.assertNotIn("GLOBAL DASHBOARD", out)
+
+    def test_dashboard_verbose_long_flag(self):
+        """`ck dashboard --verbose` is equivalent to `-v`."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            ck = self._make_project(tmp, "alpha-proj")
+
+            out_v = self._run(["dashboard", "-v"], ck.root)
+            out_long = self._run(["dashboard", "--verbose"], ck.root)
+            self.assertEqual(out_v, out_long)
+            self.assertIn("МОИ ПРОЕКТЫ", out_long)
+
+    def test_dashboard_default_is_compact_table(self):
+        """Bare `ck dashboard` renders the compact table, not blocks."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            ck = self._make_project(tmp, "alpha-proj")
+
+            out = self._run(["dashboard"], ck.root)
+            self.assertIn("GLOBAL DASHBOARD", out)
+            self.assertIn("| Project", out)
+            self.assertNotIn("МОИ ПРОЕКТЫ", out)
+
 
 # ---------------------------------------------------------------------------
 # Help text
@@ -256,6 +288,10 @@ class TestHelpText(unittest.TestCase):
     def test_help_documents_global_flags(self):
         self.assertIn("list -g, --global", HELP_TEXT)
         self.assertIn("st --global", HELP_TEXT)
+
+    def test_help_documents_dashboard_verbose(self):
+        self.assertIn("dashboard -v, --verbose", HELP_TEXT)
+        self.assertIn("triad context per project", HELP_TEXT)
 
     def test_help_groups_local_and_global_views(self):
         self.assertIn("Local (current project):", HELP_TEXT)
