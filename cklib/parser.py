@@ -25,6 +25,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
+from typing import Tuple
 
 from .models import Section, Task, TaskList, TaskStatus
 
@@ -56,6 +57,152 @@ _LEGACY_FOCUSED_DONE_RE = re.compile(
 )
 
 _HEADER_RE = re.compile(r"^(?P<level>#{1,6})\s+(?P<title>.+?)\s*$")
+
+
+# ---------------------------------------------------------------------------
+# Input sanitization
+# ---------------------------------------------------------------------------
+
+# ANSI escape sequences, ordered most-specific first:
+# - CSI:  ESC [ <params/intermediates> <final byte 0x40-0x7E>
+# - OSC:  ESC ] ... <BEL | ST(ESC \)>      (window title, hyperlinks)
+# - DCS/SOS/PM/APC: ESC P/^/_ ... ESC \    (string sequences)
+# - Charset designation: ESC ( B, ESC ) 0, ESC # 3, ESC % G, ...
+# - Any other 2-byte ESC escape (ESC 7, ESC M, ESC =, ...)
+_ANSI_ESCAPE_RE = re.compile(
+    r"\x1b(?:"
+    r"\[[0-9:;<=>?]*[ -/]*[@-~]"          # CSI sequences
+    r"|\].*?(?:\x07|\x1b\\)"              # OSC sequences
+    r"|[PX^_].*?\x1b\\"                    # DCS / SOS / PM / APC
+    r"|[()#%*+./][0-9A-Za-z]?"            # charset & line-size escapes
+    r"|."                                  # any remaining 2-byte escape
+    r")"
+)
+
+# Non-printable control characters: C0 (except TAB/LF/CR, which are
+# normalized as whitespace below), DEL, and the C1 range.
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x80-\x9f]")
+
+
+def sanitize_task_text(text: str) -> str:
+    """Sanitize text before it is persisted to PLAN.md.
+
+    1. Strips ANSI escape sequences (colors, cursor movement, OSC
+       hyperlinks/titles, ...) so terminal output pasted via
+       ``ck add`` can never be written into PLAN.md.
+    2. Removes non-printable control characters (C0/C1/DEL).
+    3. Normalizes whitespace: every run (tabs, newlines, repeated
+       spaces) collapses to a single ASCII space; ends are trimmed.
+
+    Idempotent: sanitizing already-clean text is a no-op. Returns
+    ``""`` for input that is empty or consists only of noise.
+    """
+    if not text:
+        return ""
+    no_ansi = _ANSI_ESCAPE_RE.sub("", text)
+    no_control = _CONTROL_CHARS_RE.sub("", no_ansi)
+    return " ".join(no_control.split())
+
+
+# ---------------------------------------------------------------------------
+# Auto-repair of corrupted PLAN.md documents
+# ---------------------------------------------------------------------------
+
+
+def repair_plan_text(text: str) -> str:
+    """Filter corrupted ANSI/artifact lines out of a PLAN.md document.
+
+    Pure function: never performs I/O, never raises.
+
+    Per-line policy:
+
+    - Clean lines are preserved VERBATIM (including blank lines and
+      ordinary prose).
+    - Task lines whose titles carry escape/control noise are repaired
+      in place (the sanitized title is kept, the original marker
+      syntax is preserved). Tasks whose titles are pure noise are
+      dropped.
+    - Headers are repaired the same way.
+    - Any OTHER line containing ANSI escapes, orphaned control
+      characters, or mid-line carriage returns is treated as pasted
+      terminal output / structural noise and REMOVED.
+
+    Idempotent: repairing an already-clean document returns it
+    unchanged (fast path).
+    """
+    if not text:
+        return text
+    if (
+        not _ANSI_ESCAPE_RE.search(text)
+        and not _CONTROL_CHARS_RE.search(text)
+        # A CR that is not part of a CRLF pair is terminal noise
+        # (progress bars, ^M artifacts, mixed line endings).
+        and text.count("\r") <= text.count("\r\n")
+    ):
+        return text
+
+    # Preserve the document's dominant line ending (same rule the
+    # parser uses) so a CRLF file stays a CRLF file after repair.
+    crlf = text.count("\r\n")
+    lf_only = text.count("\n") - crlf
+    nl = "\r\n" if crlf > lf_only else "\n"
+
+    out: list[str] = []
+    for line in text.split(nl):
+        repaired = _repair_line(line)
+        if repaired is not None:
+            out.append(repaired)
+    return nl.join(out)
+
+
+def _repair_line(line: str):
+    """Repair a single source line.
+
+    Returns the repaired line, or ``None`` when the line is an
+    artifact (pure noise, or a task/header whose text did not
+    survive the cleanup) and must be dropped.
+    """
+    # Trailing CRs are line-ending leftovers, not content noise.
+    core = line.rstrip("\r")
+    has_noise = (
+        _ANSI_ESCAPE_RE.search(core) is not None
+        or _CONTROL_CHARS_RE.search(core) is not None
+        or "\r" in core  # mid-line CR = terminal artifact
+    )
+    if not has_noise:
+        return line
+
+    stripped = _CONTROL_CHARS_RE.sub("", _ANSI_ESCAPE_RE.sub("", core))
+
+    # A noise-bearing line may still be a real task (e.g. wrapped in
+    # color codes) — recover it instead of dropping it.
+    task = (
+        _CANONICAL_TASK_RE.match(stripped)
+        or _LEGACY_FOCUSED_DONE_RE.match(stripped)
+    )
+    if task:
+        title = sanitize_task_text(task.group("title"))
+        if not title:
+            return None
+        return f"- [{task.group('marker')}] {title}"
+
+    legacy = _LEGACY_OPEN_RE.match(stripped)
+    if legacy:
+        title = sanitize_task_text(legacy.group("title"))
+        if not title:
+            return None
+        return f"- [] {title}"
+
+    header = _HEADER_RE.match(stripped)
+    if header:
+        title = sanitize_task_text(header.group("title"))
+        if not title:
+            return None
+        return f"{header.group('level')} {title}"
+
+    # Non-task, non-header line carrying escape/control noise: this
+    # is pasted command output or a corrupted fragment — remove it.
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +313,32 @@ def parse_plan_file(path: Path | str) -> TaskList:
     return parse_plan(text)
 
 
+def load_repaired_plan(path: Path | str) -> Tuple[TaskList, bool]:
+    """Read + auto-repair a PLAN.md file.
+
+    Returns ``(task_list, repaired)`` where ``repaired`` is True when
+    the on-disk text contained corruption (ANSI escapes, orphaned
+    control sequences, artifact lines) and the cleaned text was
+    ATOMICALLY WRITTEN BACK to disk (self-healing parse). Clean
+    files are left untouched (no write, no lock churn).
+
+    The repair-persist cycle is the read side of ``ck add`` and other
+    mutations: every command that mutates PLAN.md heals any existing
+    corruption as part of its read-modify-write pass, under the same
+    file lock the caller's write will use.
+    """
+    p = Path(path)
+    if not p.exists():
+        return TaskList(), False
+    with open(p, "r", encoding="utf-8", newline="") as fh:
+        text = fh.read()
+    repaired_text = repair_plan_text(text)
+    if repaired_text == text:
+        return parse_plan(text), False
+    _atomic_write_text(p, repaired_text)
+    return parse_plan(repaired_text), True
+
+
 # ---------------------------------------------------------------------------
 # Normalization (explicit, opt-in)
 # ---------------------------------------------------------------------------
@@ -237,7 +410,7 @@ def _emit_with_source(tl: TaskList) -> str:
     # lossy document.
     seen_lines: set[int] = set()
     for t in tl.tasks:
-        if 1 <= t.line_number <= max_src_line:
+        if t.line_number <= max_src_line and t.insert_line is None:
             if t.line_number in seen_lines:
                 raise ValueError(
                     f"Two tasks share line_number {t.line_number}; "
@@ -258,7 +431,7 @@ def _emit_with_source(tl: TaskList) -> str:
     # Non-task lines are preserved VERBATIM (including any trailing
     # whitespace) so the render never reflows the user's document.
     for t in tl.tasks:
-        if 1 <= t.line_number <= max_src_line:
+        if 1 <= t.line_number <= max_src_line and t.insert_line is None:
             original = out[t.line_number - 1]
             if not _is_task_line(original):
                 raise ValueError(
@@ -268,12 +441,14 @@ def _emit_with_source(tl: TaskList) -> str:
                 )
             out[t.line_number - 1] = t.to_line()
 
-    # Second pass: tasks beyond EOF. Insert them just before the
-    # "## Completed" header (or at EOF), never replacing content.
+    # Second pass: NEW tasks. Tasks carrying an explicit ``insert_line``
+    # hint are inserted at that 1-based source position (the end of
+    # ``## Current Sprint`` — computed by ``_sprint_insert_line`` and
+    # validated in core). Other past-EOF tasks fall back to just
+    # before the ``## Completed`` header (or at EOF), never
+    # replacing content.
     if pending_append:
-        insert_at = _find_completed_line(out)
-        if insert_at is None:
-            insert_at = len(out)
+        insert_at = _insert_position_for(pending_append[0], out, max_src_line)
         for t in pending_append:
             out.insert(insert_at, t.to_line())
             insert_at += 1
@@ -282,6 +457,24 @@ def _emit_with_source(tl: TaskList) -> str:
     if not rendered.endswith(nl):
         rendered += nl
     return rendered
+
+
+def _insert_position_for(task: Task, out: list[str],
+                         max_src_line: int) -> int:
+    """0-based insertion index for the first new (past-EOF) task.
+
+    A new task with an ``insert_line`` hint (end of ``## Current
+    Sprint``) is inserted at its hinted position. When the hint is
+    missing, stale, or points outside the document, fall back to just
+    before ``## Completed`` (or EOF) so insertion is always safe.
+    """
+    hint = task.insert_line
+    if hint is not None and 1 <= hint <= max_src_line + 1:
+        return hint - 1
+    completed = _find_completed_line(out)
+    if completed is not None:
+        return completed
+    return len(out)
 
 
 def _is_task_line(line: str) -> bool:
@@ -301,6 +494,42 @@ def _find_completed_line(lines: list[str]) -> int | None:
             if title == "completed":
                 return i
     return None
+
+
+def _find_section_end(lines: list[str], title: str) -> int | None:
+    """0-based index one PAST the last content line of a section.
+
+    ``title`` is matched case-insensitively against ``##`` headers
+    (any heading level is accepted). The end of a section is the
+    first line of the NEXT header at any level, or EOF. Trailing
+    blank lines inside the section are kept OUT of the insertion
+    point so new tasks land directly beneath the last task, not
+    after a blank gap.
+    """
+    target = title.strip().lower()
+    if not target:
+        return None
+    in_target = False
+    end = None
+    for i, raw in enumerate(lines):
+        header = _HEADER_RE.match(raw)
+        if header:
+            if in_target:
+                # Next header ends the section.
+                end = i
+                break
+            if header.group("title").strip().lower() == target:
+                in_target = True
+        elif in_target:
+            end = i + 1
+    if not in_target:
+        return None
+    if end is None:
+        return len(lines)
+    # Trim trailing blank lines from the section body.
+    while end > 0 and not lines[end - 1].strip():
+        end -= 1
+    return end
 
 
 # ---------------------------------------------------------------------------
@@ -371,8 +600,12 @@ def _atomic_write_text(path: Path, text: str) -> None:
 __all__ = [
     "parse_plan",
     "parse_plan_file",
+    "load_repaired_plan",
     "normalize_plan",
     "render_plan",
     "write_plan",
+    "sanitize_task_text",
+    "repair_plan_text",
     "_find_completed_line",
+    "_find_section_end",
 ]

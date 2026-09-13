@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.1.0-blue)]()
+[![version](https://img.shields.io/badge/version-0.1.1-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -80,7 +80,7 @@ chmod +x ck
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.1.0
+ck -v    # → ck version 0.1.1
 ```
 
 ---
@@ -107,13 +107,15 @@ ck -v    # → ck version 0.1.0
 | ck add \<text\> | Add a new open task (inserted before `## Completed`) |
 | ck start \<ID\> | Focus a task (`- [>]`) |
 | ck done \<ID\|range\|list\> | Mark task(s) done (`- [x]`), e.g. `3`, `2-4`, `1,3,5` |
-| ck edit | Open PLAN.md in $EDITOR |
+| ck edit | Open PLAN.md in your editor (see [Editor Resolution](#editor-resolution)) |
 | ck save | Task completion workflow: optional note + optional **local** commit |
-| ck log | Open HISTORY.md in $EDITOR |
-| ck st | Status overview |
+| ck log | Open HISTORY.md in your editor (see [Editor Resolution](#editor-resolution)) |
+| ck st | Status overview (tri-state: Previous / Focus / Next) |
 | ck st --all | Full status incl. full PLAN.md |
+| ck tasks | Print the local project task list to STDOUT (no editor, pipe-friendly) |
+| ck list | Local view: same as `ck tasks` |
 | ck st --global / ck dashboard | Cross-project dashboard table |
-| ck list / ck list -g | List registered projects (same as dashboard) |
+| ck list -g / ck list --global | Global view: same as `ck dashboard` |
 | ck register [-n NAME] [--path PATH] | Add a project to the global registry |
 | ck unregister [--path PATH \| NAME] | Remove a project from the registry |
 | ck prune | Drop registry entries whose folders no longer exist |
@@ -128,9 +130,37 @@ ck -v    # → ck version 0.1.0
 
 ## ck save Workflow
 - Display current active task
-- Enter commit description + optional note (inline or via $EDITOR)
+- Enter commit description + optional note (inline or via your editor — see [Editor Resolution](#editor-resolution))
 - Optional **local** Git commit (never pushes; skips gracefully if Git is unavailable or declined)
 - Auto-archive HISTORY.md when limit reached (gapless rotation, original preserved as .bak)
+
+---
+
+## <a name="editor-resolution"></a>⌨️ Editor Resolution
+
+`ck edit`, `ck log`, and the `e=editor` note option in `ck save` launch an external editor. The editor is resolved by strict precedence — the first match wins:
+
+1. **Project config** — the `"editor"` key in `.ck.json` at the project root (the directory containing `.ck/`)
+2. **`$VISUAL`** environment variable
+3. **`$EDITOR`** environment variable
+4. **System fallback** — `nano` if installed, otherwise `vi`
+
+### Configure per-project (highest priority)
+Create `.ck.json` next to the `.ck/` directory:
+```json
+{
+  "editor": "code --wait"
+}
+```
+The value may include arguments (it is passed to the shell-launched editor command). A malformed or unreadable `.ck.json` is ignored gracefully.
+
+### Configure globally
+```bash
+export VISUAL="vim"   # wins over EDITOR
+export EDITOR="nano"  # used when VISUAL is unset
+```
+
+> `$VISUAL` takes precedence over `$EDITOR` because that is the classic Unix convention: `VISUAL` designates a full-screen editor, `EDITOR` a line editor fallback.
 
 ---
 
@@ -246,6 +276,29 @@ chmod +x ck
 - Ввод коммита и опциональной заметки
 - Локальный коммит (push не выполняется никогда)
 - Авто-архивация
+
+---
+
+## ⌨️ Выбор редактора
+
+`ck edit`, `ck log` и опция `e=editor` в `ck save` запускают внешний редактор, который определяется по строгому приоритету (побеждает первое совпадение):
+
+1. **Конфиг проекта** — ключ `"editor"` в файле `.ck.json` в корне проекта (рядом с каталогом `.ck/`)
+2. **`$VISUAL`** — переменная окружения
+3. **`$EDITOR`** — переменная окружения
+4. **Системный fallback** — `nano` (если установлен), иначе `vi`
+
+Настройка для конкретного проекта (наивысший приоритет):
+```json
+// .ck.json
+{ "editor": "code --wait" }
+```
+
+Глобальная настройка:
+```bash
+export VISUAL="vim"   # имеет приоритет над EDITOR
+export EDITOR="nano"  # используется, если VISUAL не задан
+```
 
 ---
 

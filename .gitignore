@@ -48,6 +48,7 @@ ai_session/
 __ai_context__/
 chat_history.md
 context_dump.md
+project_context.txt
 *.ai.log
 *.llm.cache
 

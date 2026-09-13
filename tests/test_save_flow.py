@@ -156,6 +156,213 @@ class TestSaveGracefulDecline(IsolatedHomeMixin, unittest.TestCase):
             ])
 
 
+class TestSaveUxWording(IsolatedHomeMixin, unittest.TestCase):
+    """Step 4: explicit save confirmation + history-vs-Git clarity."""
+
+    def _make_ck(self, tmp: Path) -> ContextKeeper:
+        root = tmp / "project"
+        root.mkdir()
+        ck = ContextKeeper(root=root)
+        ck.init()
+        ck.add_task("alpha")
+        return ck
+
+    def _run_save(self, ck, prompts):
+        iter_prompts = iter(prompts)
+
+        def fake_input(prompt: str = "") -> str:
+            return next(iter_prompts)
+
+        captured = []
+        printer = lambda s: captured.append(s)
+        result = ck.save(input_fn=fake_input, printer=printer)
+        return result, captured
+
+    def test_note_append_prints_explicit_confirmation(self):
+        """Whenever an entry lands in HISTORY.md, STDOUT says so with
+        the relative path and the not-a-Git-commit qualifier."""
+        with tempfile.TemporaryDirectory() as td:
+            ck = self._make_ck(Path(td))
+            result, captured = self._run_save(ck, [
+                "s",            # skip note body
+                "did the thing",
+                "n",            # decline commit
+            ])
+            self.assertIsNone(result)
+            self.assertTrue(
+                any(
+                    "Saved entry to .ck/HISTORY.md" in line
+                    and "not a Git commit" in line
+                    for line in captured
+                ),
+                f"missing explicit confirmation, got: {captured!r}",
+            )
+            # The entry is actually on disk
+            self.assertIn("did the thing",
+                          ck.history_file.read_text(encoding="utf-8"))
+
+    def test_confirmation_appears_in_commit_path_too(self):
+        """The explicit HISTORY.md confirmation prints before the Git
+        phase even when the user goes on to commit."""
+        with tempfile.TemporaryDirectory() as td:
+            ck = self._make_ck(Path(td))
+
+            from cklib import git as gith_mod
+            orig_is_repo = gith_mod.is_git_repo
+            orig_local = gith_mod.local_commit
+            gith_mod.is_git_repo = lambda path=None: True
+            gith_mod.local_commit = lambda msg, path=None, stage=None: True
+            try:
+                result, captured = self._run_save(ck, [
+                    "s",            # skip note body
+                    "summary",
+                    "",             # default commit message
+                    "y",            # confirm commit
+                ])
+            finally:
+                gith_mod.is_git_repo = orig_is_repo
+                gith_mod.local_commit = orig_local
+
+            self.assertIsNotNone(result)
+            self.assertTrue(any(
+                "Saved entry to .ck/HISTORY.md" in line for line in captured
+            ))
+            # Git success message mentions local-only, no push
+            self.assertTrue(any("no push" in line for line in captured))
+
+    def test_step_headers_distinguish_history_and_git(self):
+        """The flow announces Step 1 (local history) and Step 2 (Git
+        commit) as clearly separate phases."""
+        with tempfile.TemporaryDirectory() as td:
+            ck = self._make_ck(Path(td))
+            result, captured = self._run_save(ck, [
+                "s", "summary", "n",
+            ])
+            self.assertIsNone(result)
+            self.assertTrue(any(
+                "Step 1: local history" in line and ".ck/HISTORY.md" in line
+                for line in captured
+            ))
+            self.assertTrue(any(
+                "Step 2: Git commit" in line for line in captured
+            ))
+
+    def test_decline_commit_message_clarifies_history_is_saved(self):
+        """Declining the Git commit must reassure the user the local
+        history entry is already saved."""
+        with tempfile.TemporaryDirectory() as td:
+            ck = self._make_ck(Path(td))
+
+            from cklib import git as gith_mod
+            orig_is_repo = gith_mod.is_git_repo
+            gith_mod.is_git_repo = lambda path=None: True
+            try:
+                result, captured = self._run_save(ck, [
+                    "s",            # skip note body
+                    "summary",
+                    "",             # default commit message
+                    "n",            # decline the commit itself
+                ])
+            finally:
+                gith_mod.is_git_repo = orig_is_repo
+
+            self.assertIsNone(result)
+            decline_msg = "\n".join(captured)
+            self.assertIn("No commit created", decline_msg)
+            self.assertIn(".ck/HISTORY.md", decline_msg)
+            self.assertIn("local history only", decline_msg)
+
+    def test_no_repo_decline_clarifies_history_is_saved(self):
+        """Declining Git init must reassure the user the local history
+        entry is already saved."""
+        with tempfile.TemporaryDirectory() as td:
+            ck = self._make_ck(Path(td))
+
+            from cklib import git as gith_mod
+            orig_is_repo = gith_mod.is_git_repo
+            gith_mod.is_git_repo = lambda path=None: False
+            try:
+                result, captured = self._run_save(ck, [
+                    "s",            # skip note body
+                    "summary",
+                    "n",            # decline git init
+                ])
+            finally:
+                gith_mod.is_git_repo = orig_is_repo
+
+            self.assertIsNone(result)
+            decline_msg = "\n".join(captured)
+            self.assertIn("No commit created", decline_msg)
+            self.assertIn(".ck/HISTORY.md", decline_msg)
+            self.assertIn("local history only", decline_msg)
+
+    def test_eof_after_note_reports_history_saved(self):
+        """EOF mid-flow (after the entry is durable, before the Git
+        phase completes) still reports the HISTORY.md entry."""
+        with tempfile.TemporaryDirectory() as td:
+            ck = self._make_ck(Path(td))
+
+            from cklib import git as gith_mod
+            orig_is_repo = gith_mod.is_git_repo
+            gith_mod.is_git_repo = lambda path=None: True
+
+            def fake_input(prompt: str = "") -> str:
+                if "note for this task" in prompt:
+                    return "s"
+                if "Short summary" in prompt:
+                    return "summary"
+                # Git phase: stdin closes mid-flow
+                raise EOFError
+
+            captured = []
+            printer = lambda s: captured.append(s)
+            try:
+                result = ck.save(input_fn=fake_input, printer=printer)
+            finally:
+                gith_mod.is_git_repo = orig_is_repo
+
+            self.assertIsNone(result)
+            combined = "\n".join(captured)
+            self.assertIn("Saved entry to .ck/HISTORY.md", combined)
+            self.assertIn("entry saved to .ck/HISTORY.md", combined)
+            self.assertIn("no Git commit created", combined)
+
+    def test_prompt_wording_distinguishes_git_commit(self):
+        """The commit prompts explicitly say 'Git'."""
+        with tempfile.TemporaryDirectory() as td:
+            ck = self._make_ck(Path(td))
+
+            from cklib import git as gith_mod
+            orig_is_repo = gith_mod.is_git_repo
+            gith_mod.is_git_repo = lambda path=None: True
+            prompts_seen = []
+
+            def fake_input(prompt: str = "") -> str:
+                prompts_seen.append(prompt)
+                if "note for this task" in prompt:
+                    return "s"
+                if "Short summary" in prompt:
+                    return "summary"
+                if "commit message" in prompt.lower():
+                    return ""
+                return "n"
+
+            try:
+                result = ck.save(input_fn=fake_input)
+            finally:
+                gith_mod.is_git_repo = orig_is_repo
+
+            self.assertIsNone(result)
+            commit_prompt = next(
+                p for p in prompts_seen if "commit message" in p.lower()
+            )
+            self.assertIn("Git commit message", commit_prompt)
+            confirm_prompt = next(
+                p for p in prompts_seen if "Create" in p and "commit" in p
+            )
+            self.assertIn("LOCAL Git commit", confirm_prompt)
+
+
 class TestAddTaskIsAstBased(IsolatedHomeMixin, unittest.TestCase):
     def test_add_returns_id_and_writes_canonical(self):
         with tempfile.TemporaryDirectory() as td:

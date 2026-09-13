@@ -51,9 +51,13 @@ from .config import (
 from .models import Notes, TaskList, TaskStatus
 from .parser import (
     _atomic_write_text,
+    _find_completed_line,
+    _find_section_end,
+    load_repaired_plan,
     normalize_plan,
     parse_plan_file,
     render_plan,
+    sanitize_task_text,
 )
 
 
@@ -320,8 +324,16 @@ class ContextKeeper:
     # ------------------------------------------------------------------ #
 
     def _load_plan(self) -> TaskList:
-        """Parse PLAN.md. Returns an empty TaskList if missing."""
-        return parse_plan_file(self.plan_file)
+        """Parse PLAN.md with AUTO-REPAIR.
+
+        Corrupted content (pasted ANSI noise, orphaned control
+        sequences) is cleaned out and atomically persisted back to
+        disk on load — every mutating command self-heals the file as
+        part of its read-modify-write pass. Returns an empty
+        TaskList if the file is missing.
+        """
+        tl, _repaired = load_repaired_plan(self.plan_file)
+        return tl
 
     def _commit_plan(self, task_list: TaskList) -> None:
         """Normalize (opt-in), then atomically write PLAN.md under lock.
@@ -338,8 +350,15 @@ class ContextKeeper:
             _atomic_write_text(self.plan_file, text)
 
     def add_task(self, task_text: str) -> int:
-        """Insert a new ``[ ] title`` task into PLAN.md and return its ID."""
-        title = task_text.strip()
+        """Insert a new ``[ ] title`` task into PLAN.md and return its ID.
+
+        The title is sanitized (ANSI escapes, control characters,
+        and whitespace runs are stripped) so terminal output pasted
+        into the CLI can never corrupt PLAN.md. The task is inserted
+        at the end of ``## Current Sprint`` when that section exists,
+        otherwise directly before ``## Completed``.
+        """
+        title = sanitize_task_text(task_text)
         if not title:
             raise ValueError("Task text is empty")
 
@@ -353,7 +372,11 @@ class ContextKeeper:
 
         tl = self._load_plan()
         section = _section_for_new_task(tl)
-        new_task = tl.add(title, status=TaskStatus.OPEN, section=section)
+        insert_line = _sprint_insert_line(tl)
+        new_task = tl.add(
+            title, status=TaskStatus.OPEN, section=section,
+            insert_line=insert_line,
+        )
 
         # ``render_plan`` will place any task whose ``line_number``
         # exceeds the original source length just before the
@@ -491,6 +514,17 @@ class ContextKeeper:
         tl = parse_plan_file(self.plan_file)
         return _render_local_status(self, tl, gith)
 
+    def tasks(self) -> str:
+        """Return the current project's task list for STDOUT.
+
+        A clean, pipe-friendly rendering (no editor, no decorations
+        that would confuse grep/cut): one line per task as
+        ``[<status marker>] <id>. <title>``, grouped by section with
+        ``##``-style headers. Suitable for ``ck tasks | grep ...``.
+        """
+        tl = load_repaired_plan(self.plan_file)[0]
+        return _render_tasks_listing(tl)
+
     def dashboard(self) -> str:
         """Return the cross-project dashboard as a string."""
         return _render_dashboard(
@@ -543,7 +577,15 @@ class ContextKeeper:
 
     def save(self, *, input_fn=input, stdin_read=sys.stdin.read,
              printer=print) -> Optional[str]:
-        """Two-step save: optional Note, then optional local commit.
+        """Two-step save: optional local-history note, then optional Git commit.
+
+        Step 1 appends a dated entry to ``.ck/HISTORY.md`` — Context
+        Keeper's own plain-text context log. This is LOCAL history
+        and involves no Git whatsoever. Step 2 optionally creates a
+        LOCAL Git commit of the ck artifacts. Prompts and
+        confirmations explicitly label which step is which so a user
+        can never mistake a local history entry for a Git commit (or
+        vice versa).
 
         If Git is unavailable and the user declines initialization,
         the commit phase is bypassed gracefully — no subprocess
@@ -560,14 +602,23 @@ class ContextKeeper:
             return None
 
         task_id, task_title = active.id, active.title
+        history_rel = f"{CK_DIR_NAME}/{HISTORY_FILENAME}"
         printer(f"\U0001f4cd Active task: [{task_id}] {task_title}")
 
         note_recorded = False
         try:
-            # ---- Step 1: Notes ----------------------------------------- #
+            # ---- Step 1: LOCAL HISTORY (HISTORY.md, no Git) ------ #
+            printer("")
+            printer(
+                f"\U0001f4cb Step 1: local history \u2014 append entry to "
+                f"{history_rel} (not a Git commit)"
+            )
             body = self._prompt_note(input_fn, printer)
 
-            comment = input_fn("Short summary (commit subject): ").strip() or "update"
+            comment = input_fn(
+                "Short summary (saved with the history entry; "
+                "reused as default commit subject): "
+            ).strip() or "update"
 
             ts = datetime.now().strftime("%Y-%m-%d %H:%M")
             note = Notes(
@@ -590,7 +641,10 @@ class ContextKeeper:
                     _count_history_entries(history_text) > HISTORY_LIMIT
                 )
             note_recorded = True
-            printer("\U0001f4be Note recorded.")
+            printer(
+                f"\u2705 Saved entry to {history_rel} "
+                "(local context history \u2014 not a Git commit)."
+            )
 
             state = self._read_state()
             state["last_update"] = datetime.now().isoformat()
@@ -600,31 +654,53 @@ class ContextKeeper:
             if needs_rotation:
                 self._rotate_history()
 
-            # ---- Step 2: local Git commit (graceful bypass) ---------- #
+            # ---- Step 2: LOCAL GIT COMMIT (separate from history) - #
+            printer("")
+            printer(
+                "\U0001f4e6 Step 2: Git commit \u2014 optional, "
+                "separate from local history"
+            )
             if not gith.is_git_repo(self.root):
-                ans = input_fn("\u2049\ufe0f  Not a Git repo. Initialize? (y/N): ").strip().lower()
+                ans = input_fn(
+                    "\u2049\ufe0f  Not a Git repo. Initialize one for "
+                    "local commits? (y/N): "
+                ).strip().lower()
                 if ans != "y":
-                    printer("\u2139\ufe0f  No commit created (no Git repo).")
+                    printer(
+                        f"\u2139\ufe0f  No commit created. Your entry is "
+                        f"saved in {history_rel} (local history only)."
+                    )
                     return None
                 if not gith.init_repo(self.root):
-                    printer("\u274c Git init failed; skipping commit.")
+                    printer(
+                        f"\u274c Git init failed; commit skipped "
+                        f"(entry stays saved in {history_rel})."
+                    )
                     return None
 
             default_msg = f"{task_title}: {comment}".strip(": ")
             custom = input_fn(
-                "\U0001f680 Commit message [Enter=accept / type custom]: "
+                "\U0001f680 Git commit message [Enter=accept / type custom]: "
             ).strip()
             msg = custom or default_msg
 
-            if input_fn(f"\u2705 Create local commit \"{msg}\"? (y/N): ").strip().lower() != "y":
-                printer("\u2139\ufe0f  No commit created.")
+            if input_fn(
+                f"\u2705 Create LOCAL Git commit \"{msg}\"? (y/N): "
+            ).strip().lower() != "y":
+                printer(
+                    f"\u2139\ufe0f  No commit created. Your entry is saved "
+                    f"in {history_rel} (local history only)."
+                )
                 return None
         except EOFError:
             # Non-interactive stdin ran out mid-flow. Abort cleanly:
             # whatever was durably written (note) stays; the commit
             # phase simply never runs.
             if note_recorded:
-                printer("\u274c Input closed \u2014 note saved, no commit created.")
+                printer(
+                    f"\u274c Input closed \u2014 entry saved to "
+                    f"{history_rel}, no Git commit created."
+                )
             else:
                 printer("\u274c Input closed \u2014 save aborted (nothing written).")
             return None
@@ -645,9 +721,11 @@ class ContextKeeper:
         ]
         stage = [p for p in ck_artifacts if (self.root / p).exists()]
         if gith.local_commit(msg, path=self.root, stage=stage):
-            printer("\U0001f4e4 Local commit created (no push).")
+            printer("\U0001f4e4 Git commit created (local only \u2014 no push).")
             return msg
-        printer("\u26a0\ufe0f  Commit failed.")
+        printer(
+            f"\u26a0\ufe0f  Commit failed (entry remains saved in {history_rel})."
+        )
         return None
 
     def _prompt_note(self, input_fn: Callable[[str], str],
@@ -662,7 +740,7 @@ class ContextKeeper:
             tmp = self.ck_path / ".ck_note.tmp"
             tmp.write_text("", encoding="utf-8")
             try:
-                subprocess.run([get_editor(), str(tmp)], check=False)
+                subprocess.run([get_editor(self.root), str(tmp)], check=False)
                 return tmp.read_text(encoding="utf-8").strip()
             finally:
                 tmp.unlink(missing_ok=True)
@@ -684,10 +762,10 @@ class ContextKeeper:
     # ------------------------------------------------------------------ #
 
     def edit_plan(self) -> None:
-        subprocess.run([get_editor(), str(self.plan_file)], check=False)
+        subprocess.run([get_editor(self.root), str(self.plan_file)], check=False)
 
     def edit_log(self) -> None:
-        subprocess.run([get_editor(), str(self.history_file)], check=False)
+        subprocess.run([get_editor(self.root), str(self.history_file)], check=False)
 
     # ------------------------------------------------------------------ #
     # COMMAND: update (git pull --ff-only)                                #
@@ -996,6 +1074,30 @@ def _section_for_new_task(tl: TaskList) -> str:
     return ""
 
 
+def _sprint_insert_line(tl: TaskList) -> Optional[int]:
+    """1-based source line where ``ck add`` should insert a new task.
+
+    Resolution order (mirrors the spec for clean insertion):
+
+    1. End of the ``## Current Sprint`` section (after its last
+       content line, before the next header).
+    2. Directly before the ``## Completed`` header.
+    3. ``None`` → the renderer's default: before ``## Completed``
+       or at EOF.
+    """
+    src_lines = tl.source_text.splitlines()
+    # Fast path: no document → let the renderer default handle it.
+    if not src_lines:
+        return None
+    sprint_end = _find_section_end(src_lines, "Current Sprint")
+    if sprint_end is not None:
+        return sprint_end + 1  # 0-based → 1-based
+    completed = _find_completed_line(src_lines)
+    if completed is not None:
+        return completed + 1  # insert at (before) the Completed header
+    return None
+
+
 # ---------------------------------------------------------------------- #
 # Presentation helpers
 # ---------------------------------------------------------------------- #
@@ -1007,14 +1109,9 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
     lines.append("")
     lines.append(bar)
     lines.append(f" \U0001f680 PROJECT: {ck.root.name} [v{VERSION}]")
-    active = tl.active()
-    if active:
-        marker = ">" if active.status == TaskStatus.FOCUSED else " "
-        lines.append(
-            f" \U0001f3af FOCUS: [{active.id}] [{marker}] {active.title}"
-        )
-    else:
-        lines.append(" \U0001f3af FOCUS: --")
+
+    # Tri-state task view: Previous / Focus / Next.
+    _append_tri_state(lines, tl)
 
     if gith_mod.is_git_repo(ck.root):
         br = gith_mod.current_branch(ck.root) or "unknown"
@@ -1030,7 +1127,9 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
 
     gap_ids = tl.gap_ids()
     if gap_ids:
-        lines.append(f" \u26a0\ufe0f  GAPS detected: {', '.join(map(str, gap_ids))}")
+        lines.append(
+            f" \u26a0\ufe0f  GAPS detected: {_collapse_ids(gap_ids)}"
+        )
 
     tools = [t for t, ok in (ck._check_tools()).items() if ok]
     if tools:
@@ -1048,6 +1147,97 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
 
     lines.append("\u2550" * 25 + " [end] " + "\u2550" * 11 + "\n")
     return "\n".join(lines)
+
+
+def _render_tasks_listing(tl: TaskList) -> str:
+    """Render the local task list for ``ck tasks`` (STDOUT output).
+
+    Format (grep/cut-friendly, no editor involved):
+
+    ::
+
+        # <project tasks>            (omitted when no sections exist)
+        ## Current Sprint
+        [ ] 1. first open task
+        [>] 2. focused task
+        [x] 3. done task
+        ## Completed
+        [x] 4. old done task
+
+    Status markers mirror PLAN.md syntax: ``[ ]`` open, ``[>]``
+    focused, ``[x]`` done. Empty plans render a single hint line.
+    """
+    if not tl.tasks:
+        return "No tasks. Add one with `ck add <text>`."
+
+    lines: list[str] = []
+    current_section = object()  # sentinel: "no section yet"
+    for t in tl.tasks:
+        if t.section and t.section != current_section:
+            lines.append(f"## {t.section}")
+            current_section = t.section
+        marker = t.status.canonical_marker
+        lines.append(f"[{marker}] {t.id}. {t.title}")
+    return "\n".join(lines)
+
+
+def _append_tri_state(lines: list, tl: TaskList) -> None:
+    """Previous / Focus / Next tri-state view of the task list.
+
+    - PREVIOUS: the most recently completed task (last ``[x]``).
+    - FOCUS: the focused task (``[>]``), else the first open task.
+    - NEXT: the first open task that follows the FOCUS task.
+    """
+    previous = tl.done[-1] if tl.done else None
+    focus = tl.active()
+    next_task = None
+    if focus is not None:
+        for i, t in enumerate(tl.tasks):
+            if t.id == focus.id:
+                next_task = next(
+                    (u for u in tl.tasks[i + 1:]
+                     if u.status == TaskStatus.OPEN),
+                    None,
+                )
+                break
+
+    if previous is not None:
+        lines.append(f" \u25c0 PREVIOUS: [{previous.id}] {previous.title}")
+    else:
+        lines.append(" \u25c0 PREVIOUS: --")
+    if focus is not None:
+        marker = "[>] " if focus.status == TaskStatus.FOCUSED else ""
+        lines.append(f" \U0001f3af FOCUS:    [{focus.id}] {marker}{focus.title}")
+    else:
+        lines.append(" \U0001f3af FOCUS:    --")
+    if next_task is not None:
+        lines.append(f" \u25b6 NEXT:      [{next_task.id}] {next_task.title}")
+    else:
+        lines.append(" \u25b6 NEXT:      --")
+
+
+def _collapse_ids(ids: list) -> str:
+    """Collapse consecutive ID runs into ranges.
+
+    ``[3, 4, 5, 6, 7, 8]`` → ``"3-8"``; ``[3, 4, 8]`` → ``"3-4, 8"``;
+    single IDs stay as-is. Input is deduplicated and sorted
+    defensively.
+    """
+    ordered = sorted(set(ids))
+    if not ordered:
+        return ""
+    runs: list = []
+    start = prev = ordered[0]
+    for i in ordered[1:]:
+        if i == prev + 1:
+            prev = i
+        else:
+            runs.append((start, prev))
+            start = prev = i
+    runs.append((start, prev))
+    return ", ".join(
+        str(a) if a == b else f"{a}-{b}" for a, b in runs
+    )
 
 
 def _safe_parse_plan(plan_path: Path) -> "TaskList | None":
@@ -1071,6 +1261,23 @@ def _truncate(text: str, width: int) -> str:
     if len(text) <= width:
         return text
     return "..." + text[-(width - 3):]
+
+
+def _truncate_ellipsis(text: str, width: int) -> str:
+    """Fit ``text`` into ``width`` columns with a middle ellipsis.
+
+    Used by the dashboard table: long paths and focus-task titles
+    keep both their start and their end (the informative parts) —
+    e.g. ``/very/long/path/to/some/project`` → ``/very/lo…oject``.
+    Never returns a string longer than ``width``.
+    """
+    if len(text) <= width:
+        return text
+    if width <= 1:
+        return "…"[:width] if width >= 0 else text
+    half = (width - 1) // 2
+    keep_end = width - 1 - half
+    return f"{text[:half]}…{text[len(text) - keep_end:]}"
 
 
 def _relative_time(iso: str, *, now: Optional[datetime] = None) -> str:
@@ -1142,7 +1349,7 @@ def _render_dashboard(ck: Optional[ContextKeeper], *, list_projects,
 
         if not on_disk:
             project_display = entry.name
-            path_display = _truncate(entry.path, 40)
+            path_display = entry.path
             last_active = _relative_time(entry.last_seen)
             focus_display = "n/a"
             status_display = "missing"
@@ -1151,7 +1358,7 @@ def _render_dashboard(ck: Optional[ContextKeeper], *, list_projects,
             project_display = entry.name
             if cwd and entry.path == cwd:
                 project_display = f"{entry.name}  \u2190 active"
-            path_display = _truncate(entry.path, 40)
+            path_display = entry.path
             last_active = _relative_time(entry.last_seen)
             focus_display = "n/a"
             status_display = "corrupt"
@@ -1159,7 +1366,7 @@ def _render_dashboard(ck: Optional[ContextKeeper], *, list_projects,
             project_display = entry.name
             if cwd and entry.path == cwd:
                 project_display = f"{entry.name}  \u2190 active"
-            path_display = _truncate(entry.path, 40)
+            path_display = entry.path
             last_active = _relative_time(entry.last_seen)
             if tl_local.focused:
                 t = tl_local.focused[0]
@@ -1182,18 +1389,48 @@ def _render_dashboard(ck: Optional[ContextKeeper], *, list_projects,
         })
 
     # ---- column widths -----------------------------------------------
+    # Hard total-width cap (~85 chars) so the table never wraps in a
+    # standard terminal. Fixed-width columns keep their natural size;
+    # the flexible columns (Path, Focus Task) absorb the squeeze via
+    # middle-ellipsis truncation, never below their header length.
     headers = ("Project", "Path", "Last Active", "Focus Task", "Status")
     col_keys = ("project", "path", "last", "focus", "status")
-    widths: dict[str, int] = {}
+    _MAX_TABLE_WIDTH = 85
+    _CHROME = 2 * 5 + 6  # 2-space padding per column + '|' separators
+
+    natural: dict[str, int] = {}
     for h, k in zip(headers, col_keys):
-        widths[k] = max(len(h), *(len(r[k]) for r in rows))
+        natural[k] = max(len(h), *(len(r[k]) for r in rows))
+
+    widths: dict[str, int] = dict(natural)
+    overflow = sum(widths.values()) + _CHROME - _MAX_TABLE_WIDTH
+    if overflow > 0:
+        # Phase 1: squeeze the flexible columns (Path, Focus Task)
+        # down to their header lengths.
+        for k in ("path", "focus"):
+            give = min(overflow, widths[k] - len(headers[col_keys.index(k)]))
+            if give > 0:
+                widths[k] -= give
+                overflow -= give
+    if overflow > 0:
+        # Phase 2: extreme data (very long project names) — squeeze
+        # the widest columns further, floor of 3 chars each, so the
+        # hard width cap always holds.
+        for k in sorted(col_keys, key=lambda k: -widths[k]):
+            give = min(overflow, widths[k] - 3)
+            if give > 0:
+                widths[k] -= give
+                overflow -= give
 
     def _hr() -> str:
         line = "+" + "+".join("-" * (widths[k] + 2) for k in col_keys) + "+"
         return line
 
     def _row(values: tuple[str, ...]) -> str:
-        cells = [f" {values[i].ljust(widths[col_keys[i]])} " for i in range(5)]
+        cells = [
+            f" {_truncate_ellipsis(values[i], widths[col_keys[i]]).ljust(widths[col_keys[i]])} "
+            for i in range(5)
+        ]
         return "|" + "|".join(cells) + "|"
 
     out: list[str] = []

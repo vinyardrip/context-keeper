@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
 import tempfile
 from pathlib import Path
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 CK_DIR_NAME = ".ck"
 HISTORY_LIMIT = 5
 
@@ -44,6 +45,8 @@ TRACKED_GITIGNORE_PROTECTIONS: tuple[str, ...] = (
     ".ck/README.md",
     ".ck/.gitignore",
 )
+
+PROJECT_CONFIG_FILENAME = ".ck.json"
 
 DEFAULT_PLAN = """# {project_name}
 
@@ -156,12 +159,61 @@ def find_project_root(start: Path | None = None) -> Path:
     return curr
 
 
-def get_editor() -> str:
-    """Resolve the user's preferred editor."""
-    editor = os.environ.get("EDITOR")
-    if editor:
-        return editor
-    for fallback in ("micro", "nano", "vi"):
+def _read_project_editor_config(root: Path | None = None) -> str:
+    """Read the ``"editor"`` key from the project config file.
+
+    Looks for ``.ck.json`` in the Context Keeper project root
+    (the directory containing ``.ck/``, found by walking up from
+    ``root`` or the cwd). Returns ``""`` when the file is missing,
+    unreadable, or has no non-empty string ``"editor"`` value. Never
+    raises — a malformed project config must not break the CLI.
+    """
+    try:
+        project_root = find_project_root(root)
+        config_path = project_root / PROJECT_CONFIG_FILENAME
+        if not config_path.is_file():
+            return ""
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    editor = data.get("editor")
+    if isinstance(editor, str) and editor.strip():
+        return editor.strip()
+    return ""
+
+
+def get_editor(root: Path | None = None,
+               *, env: dict | None = None) -> str:
+    """Resolve the user's preferred editor.
+
+    Strict precedence:
+
+    1. Project config — the ``"editor"`` key in ``.ck.json`` at
+       the Context Keeper project root (highest priority).
+    2. ``$VISUAL`` environment variable.
+    3. ``$EDITOR`` environment variable.
+    4. System fallback — ``nano`` if installed, else ``vi``.
+
+    ``env`` defaults to ``os.environ`` (injectable for tests).
+    Values are stripped; empty/unset variables are skipped.
+    """
+    # 1. Project config (.ck.json -> "editor")
+    project_editor = _read_project_editor_config(root)
+    if project_editor:
+        return project_editor
+
+    environ = env if env is not None else os.environ
+
+    # 2. $VISUAL, 3. $EDITOR
+    for var in ("VISUAL", "EDITOR"):
+        value = (environ.get(var) or "").strip()
+        if value:
+            return value
+
+    # 4. System fallback: nano if available, otherwise vi.
+    for fallback in ("nano", "vi"):
         if shutil.which(fallback):
             return fallback
     return "vi"

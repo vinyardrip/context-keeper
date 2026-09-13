@@ -28,23 +28,32 @@ HELP_TEXT = f"""Context Keeper CLI [v{VERSION}]
 
 Usage: ck <command> [args]
 
-Core commands:
+Local (current project):
   init                       Initialize .ck/ in the current project
-  st [--all|--global]        Status of the current project (--global: dashboard)
-  dashboard                  Cross-project dashboard table
-  list [-g]                  List registered projects (-g same as dashboard)
+  st [--all]                 Status of the current project
+  tasks                      Print the local task list to STDOUT (no editor)
+  list                       Local view: same as `ck tasks`
   start <ID>                 Mark task ID as focused ([>])
   done <ID|Range>            Mark task(s) as done ([x])
   add <text>                 Insert a new open task before ## Completed
   save                       Two-step save: optional note, then local commit
-  edit                       Open PLAN.md in $EDITOR
-  log                        Open HISTORY.md in $EDITOR
+  edit                       Open PLAN.md in your editor
+  log                        Open HISTORY.md in your editor
   info                       Diagnostic information about this installation
 
-Global registry:
+Global (all registered projects):
+  st --global                Cross-project dashboard
+  dashboard                  Cross-project dashboard table
+  list -g, --global          Global view: same as `ck dashboard`
   register   [-n NAME] [--path PATH]  Add a project to the global registry
   unregister [--path PATH | NAME]     Remove a project from the registry
   prune                              Drop entries whose folders no longer exist
+
+Editor resolution (ck edit / ck log):
+  1. "editor" key in .ck.json at the project root
+  2. $VISUAL
+  3. $EDITOR
+  4. nano (if installed), else vi
 
 System commands:
   install                    Symlink ck to {USER_INSTALL_PATH}
@@ -59,7 +68,7 @@ Options:
 
 # Commands that may print a non-blocking update notice to stderr.
 _NOTIFIER_COMMANDS = frozenset({
-    "st", "status", "dashboard", "list", "info", "prune",
+    "st", "status", "dashboard", "list", "tasks", "info", "prune",
 })
 
 
@@ -87,9 +96,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("dashboard", help="Cross-project dashboard table")
 
-    p_list = sub.add_parser("list", help="List registered projects")
+    p_list = sub.add_parser("list", help="Local task list; with -g/--global: dashboard")
     p_list.add_argument("-g", "--global", dest="global_dash", action="store_true",
-                        help="Render as a table (alias for dashboard)")
+                        help="Global view: all registered projects (same as dashboard)")
+
+    sub.add_parser("tasks", help="Print the local task list to STDOUT")
 
     p_start = sub.add_parser("start", help="Focus a task")
     p_start.add_argument("task_id", type=int, help="Task ID to focus")
@@ -131,7 +142,7 @@ def build_parser() -> argparse.ArgumentParser:
 _LEGACY_CHOICES = (
     "init", "st", "dashboard", "start", "done", "add", "save",
     "edit", "log", "install", "uninstall", "update", "help",
-    "list", "register", "unregister", "prune", "info",
+    "list", "tasks", "register", "unregister", "prune", "info",
 )
 
 # Flags each legacy command accepts. Anything else starting with "-"
@@ -142,6 +153,7 @@ _LEGACY_FLAGS: dict[str, frozenset] = {
     "st": frozenset({"--global", "--all"}),
     "dashboard": frozenset(),
     "list": frozenset({"-g", "--global"}),
+    "tasks": frozenset(),
     "start": frozenset(),
     "done": frozenset(),
     "add": frozenset(),
@@ -234,8 +246,15 @@ def main(argv: Optional[List[str]] = None) -> int:
             _maybe_notify(ck)
             print(ck.dashboard())
         elif args.command == "list":
+            if getattr(args, "global_dash", False):
+                _maybe_notify(ck)
+                print(ck.dashboard())
+            else:
+                _maybe_notify(ck)
+                print(ck.tasks())
+        elif args.command == "tasks":
             _maybe_notify(ck)
-            print(ck.dashboard())
+            print(ck.tasks())
         elif args.command == "info":
             print(ck.info())
         elif args.command == "start":
@@ -347,14 +366,20 @@ def _legacy_dispatch(raw: List[str]) -> int:
                 _print_full_plan(ck)
             else:
                 print(ck.status())
-        elif cmd == "dashboard" or (cmd == "list" and "-g" in rest):
+        elif cmd == "dashboard" or (
+            cmd == "list" and ("-g" in rest or "--global" in rest)
+        ):
             if notifiable:
                 _maybe_notify(ck)
             print(ck.dashboard())
         elif cmd == "list":
             if notifiable:
                 _maybe_notify(ck)
-            print(ck.dashboard())
+            print(ck.tasks())
+        elif cmd == "tasks":
+            if notifiable:
+                _maybe_notify(ck)
+            print(ck.tasks())
         elif cmd == "info":
             print(ck.info())
         elif cmd == "start":

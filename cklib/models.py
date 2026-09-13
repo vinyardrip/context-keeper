@@ -82,6 +82,11 @@ class Task:
     section: str = ""
     notes: list[str] = field(default_factory=list)
     legacy_syntax: bool = False
+    # 1-based source position where a NEW task should be inserted
+    # (end of the ``## Current Sprint`` section). Parsed tasks never
+    # carry this hint; it routes the renderer through the INSERT
+    # pass instead of substitution / before-Completed append.
+    insert_line: Optional[int] = None
 
     # ---- rendering ----
 
@@ -167,17 +172,22 @@ class TaskList:
     def gap_ids(self) -> list[int]:
         """Detect open tasks that appear *after* a done task.
 
-        Returns the IDs of offending open tasks whose line number
-        exceeds the last done task's line number.
+        Detection is POSITIONAL (order within the task list) rather
+        than line-number based, so the result is immune to source
+        line renumbering — auto-repair dropping artifact lines, or
+        newly added tasks whose provisional line numbers point past
+        EOF — and never miscounts. Returns the IDs of the offending
+        open tasks that follow the last done task.
         """
-        last_done_line = -1
-        for t in self.tasks:
+        last_done_pos = -1
+        for pos, t in enumerate(self.tasks):
             if t.status == TaskStatus.DONE:
-                last_done_line = max(last_done_line, t.line_number)
+                last_done_pos = pos
+        if last_done_pos == -1:
+            return []
         return [
-            t.id for t in self.tasks
-            if t.status == TaskStatus.OPEN
-            and t.line_number > last_done_line > -1
+            t.id for pos, t in enumerate(self.tasks)
+            if pos > last_done_pos and t.status == TaskStatus.OPEN
         ]
 
     def active(self) -> Optional[Task]:
@@ -191,7 +201,8 @@ class TaskList:
     # ---- AST mutations (no string juggling) ----
 
     def add(self, title: str, status: TaskStatus = TaskStatus.OPEN,
-            section: str = "", line_number: int | None = None) -> Task:
+            section: str = "", line_number: int | None = None,
+            insert_line: int | None = None) -> Task:
         """Append a new task node and return it.
 
         New nodes are placed **past the end of the source document**
@@ -199,6 +210,12 @@ class TaskList:
         source line such as a header or prose). Explicit
         ``line_number`` values that would collide with an existing
         task are rejected to guarantee the render is lossless.
+
+        ``insert_line`` overrides that default: it routes the new
+        task through the renderer's INSERT pass at the given 1-based
+        source position (used by ``ck add`` to place the task at the
+        end of ``## Current Sprint`` instead of just before
+        ``## Completed``).
         """
         new_id = (max((t.id for t in self.tasks), default=0)) + 1
         if line_number is None:
@@ -224,6 +241,7 @@ class TaskList:
             marker_raw=status.canonical_marker.strip(),
             section=section,
             legacy_syntax=False,
+            insert_line=insert_line,
         )
         self.tasks.append(task)
         return task
