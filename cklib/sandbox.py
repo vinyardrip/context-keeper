@@ -1,8 +1,8 @@
 """Sandbox manager for dev mode (``ck-dev`` / ``CK_SANDBOX=1``).
 
 Dev mode provides a read-only view of the real Context Keeper state
-(``~/.config/context-keeper/projects.json``, real project folders)
-while redirecting EVERY write to an isolated tree under
+(``~/.config/ck/projects.json``, real project folders) while
+redirecting EVERY write to an isolated tree under
 ``<repo_root>/.sandbox/``. Production state stays strictly immutable
 while the sandbox is active.
 
@@ -17,20 +17,46 @@ Layout::
 The sandbox root is anchored to the REPOSITORY root (the parent
 directory of the ``cklib`` package), not the cwd, so its location is
 stable no matter where ``ck`` is invoked from.
+
+Dev-mode triggers (any one activates interception):
+
+- the ``ck-dev`` entrypoint was invoked
+- ``CK_SANDBOX=1`` (or another truthy value) in the environment
+- ``CK_DEV=1`` in the environment
+- the ``--sandbox`` flag on the command line
 """
 
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import sys
 from pathlib import Path
-from typing import Union
+from typing import Optional, Union
+
+from .config import CK_DIR_NAME as CK_DIR, PROJECT_CONFIG_FILENAME
 
 SANDBOX_DIR_NAME = ".sandbox"
 PROJECTS_SUBDIR = "projects"
 CONFIG_SUBDIR = "config"
 DEV_LOG_FILENAME = "dev.log"
+
+# Environment values treated as "on" for the CK_* toggles.
+_TRUTHY_ENV = frozenset({"1", "true", "yes", "on"})
+
+# Names of the dev-mode entrypoint (with/without executable suffix).
+_DEV_ENTRYPOINT_NAMES = frozenset({"ck-dev", "ck-dev.exe"})
+
+
+class SandboxViolationError(RuntimeError):
+    """Raised when dev mode would write to real production state.
+
+    A *guardrail* exception: writing to the global registry
+    (``~/.config/ck/``), a real project's ``.ck/`` tree, or its
+    ``.ck.json`` while ``IS_DEV`` is active is a bug, not a
+    user error — fail loudly instead of corrupting production data.
+    """
 
 
 def sandbox_root() -> Path:
@@ -145,11 +171,233 @@ def is_within_sandbox(path: Union[Path, str]) -> bool:
         return False
 
 
+# --------------------------------------------------------------------------- #
+# Dev-mode detection
+# --------------------------------------------------------------------------- #
+
+
+def _env_flag_on(env: dict, name: str) -> bool:
+    """True when ``env[name]`` holds a truthy toggle value."""
+    return str(env.get(name, "")).strip().lower() in _TRUTHY_ENV
+
+
+def is_dev_mode(argv: Optional[list] = None,
+                env: Optional[dict] = None) -> bool:
+    """True when dev mode (write interception) should be active.
+
+    Triggers (any one):
+
+    1. The ``ck-dev`` entrypoint: ``argv[0]`` basename is ``ck-dev``
+       (defaults to ``sys.argv``).
+    2. ``CK_SANDBOX=1`` environment toggle.
+    3. ``CK_DEV=1`` environment toggle.
+    4. The ``--sandbox`` CLI flag present anywhere in ``argv``.
+
+    ``argv``/``env`` are injectable for tests; both default to the
+    process state. Pure function — no side effects.
+    """
+    if argv is None:
+        argv = sys.argv
+    if env is None:
+        env = os.environ
+
+    if argv:
+        entry = Path(argv[0]).name
+        if entry.lower() in _DEV_ENTRYPOINT_NAMES:
+            return True
+        if "--sandbox" in argv[1:]:
+            return True
+
+    return _env_flag_on(env, "CK_SANDBOX") or _env_flag_on(env, "CK_DEV")
+
+
+# --------------------------------------------------------------------------- #
+# Write-path interception
+# --------------------------------------------------------------------------- #
+
+
+def _global_config_root() -> Path:
+    """The real global config dir this install actually uses.
+
+    ``cklib.config.GLOBAL_CONFIG_DIR`` is consulted dynamically (it
+    is monkeypatched by other test suites), falling back to
+    ``~/.config/ck``.
+    """
+    try:
+        from . import config as _cfg
+        return Path(_cfg.GLOBAL_CONFIG_DIR)
+    except Exception:
+        return Path.home() / ".config" / "ck"
+
+
+def _intercept_global_config_path(target: Path) -> Optional[Path]:
+    """Redirect a path inside the global config dir into the sandbox.
+
+    Returns the sandboxed path, or None when ``target`` is not under
+    the global config root.
+    """
+    root = _global_config_root()
+    try:
+        target_r = target.resolve()
+        root_r = root.resolve()
+    except OSError:
+        return None
+    if target_r == root_r:
+        # Whole-dir target: redirect to the sandbox config dir root.
+        return sandbox_config_dir()
+    if root_r in target_r.parents:
+        rel = target_r.relative_to(root_r)
+        d = sandbox_config_dir()
+        result = d / rel
+        result.parent.mkdir(parents=True, exist_ok=True)
+        return result
+    return None
+
+
+def _intercept_project_path(target: Path) -> Optional[Path]:
+    """Redirect a real project write (``.ck/`` tree, ``.ck.json``).
+
+    Returns the sandboxed path, or None when ``target`` is not a
+    production project write.
+    """
+    try:
+        t = target.resolve()
+    except OSError:
+        # Absolute-ize lexically; never fail interception on I/O.
+        t = Path(os.path.abspath(str(target)))
+    parts = t.parts
+    if not parts or parts[0] != os.sep:
+        return None  # unreachable after abspath; defensive only
+
+    # A real project write touches either the ``.ck`` directory (or
+    # something beneath it) or the project-level ``.ck.json`` file.
+    if CK_DIR in parts:
+        idx = parts.index(CK_DIR)
+        project_root = Path(*parts[:idx])
+        result = sandbox_project_dir(project_root) / Path(*parts[idx:])
+    elif parts[-1] == PROJECT_CONFIG_FILENAME:
+        project_root = Path(*parts[:-1])
+        result = sandbox_project_dir(project_root) / PROJECT_CONFIG_FILENAME
+    else:
+        return None
+
+    try:
+        result.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return result
+
+
+def resolve_write_path(target_path: Union[Path, str]) -> Path:
+    """Resolve the destination for a write to ``target_path``.
+
+    - Dev mode OFF: the original path is returned unchanged (writes
+      go to production as normal; reads always use the original).
+    - Dev mode ON: production writes are redirected into the
+      sandbox — global-config paths to ``.sandbox/config/`` and
+      real-project paths (``.ck/`` trees, ``.ck.json``) to
+      ``.sandbox/projects/<hash>/`` — with parents auto-created.
+
+    Non-production targets (e.g. a user's arbitrary scratch file)
+    pass through unchanged even in dev mode: the sandbox exists to
+    protect *Context Keeper production state*, not to kidnap all
+    filesystem writes.
+    """
+    target = Path(target_path)
+
+    if not is_dev_mode():
+        return target
+
+    # Already inside the sandbox: leave as-is (idempotent mapping).
+    if is_within_sandbox(target):
+        return target
+
+    intercepted = _intercept_global_config_path(target)
+    if intercepted is None:
+        intercepted = _intercept_project_path(target)
+    if intercepted is not None:
+        log_sandbox_debug(
+            f"Intercepted write -> {intercepted} (real path untouched: {target})"
+        )
+        return intercepted
+
+    # Not Context-Keeper production state: pass through, but note it
+    # in the debug log so unexpected writes are traceable.
+    log_sandbox_debug(f"Pass-through write (not ck state): {target}")
+    return target
+
+
+def assert_no_real_write(target_path: Union[Path, str]) -> None:
+    """Guardrail: raise ``SandboxViolationError`` when ``target_path``
+    is a real production write attempted under dev mode.
+
+    Call this before any write in dev mode; :func:`resolve_write_path`
+    already redirects, so a real production path reaching this check
+    means interception failed and we must fail loudly.
+    """
+    if not is_dev_mode():
+        return
+    target = Path(target_path)
+    if is_within_sandbox(target):
+        return
+    if _intercept_global_config_path(target) is not None:
+        raise SandboxViolationError(
+            f"Dev-mode guardrail: refusing to write global-config "
+            f"production path {target}"
+        )
+    if _intercept_project_path(target) is not None:
+        raise SandboxViolationError(
+            f"Dev-mode guardrail: refusing to write real project "
+            f"path {target} (PLAN.md/.ck tree)"
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Debug logging (stderr / .sandbox/dev.log — never stdout)
+# --------------------------------------------------------------------------- #
+
+
+def debug_enabled(env: Optional[dict] = None) -> bool:
+    """True when sandbox debug logging is on (``CK_DEBUG=1``, or
+    ``-v``/``--verbose`` in argv)."""
+    if env is None:
+        env = os.environ
+    if _env_flag_on(env, "CK_DEBUG"):
+        return True
+    argv = sys.argv
+    return any(a in ("-v", "--verbose") for a in argv[1:])
+
+
+def log_sandbox_debug(msg: str, *, env: Optional[dict] = None) -> None:
+    """Emit a sandbox debug line — NEVER to stdout.
+
+    With debug enabled (``CK_DEBUG=1`` or ``-v``/``--verbose``):
+    writes ``[DEBUG] <msg>`` to stderr and appends to
+    ``.sandbox/dev.log``. Otherwise a silent no-op. All I/O errors
+    are swallowed: logging must never break the command it traces.
+    """
+    try:
+        if not debug_enabled(env):
+            return
+        line = f"[DEBUG] {msg}"
+        print(line, file=sys.stderr)
+        log_path = sandbox_root() / DEV_LOG_FILENAME
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+        except OSError:
+            pass
+    except Exception:
+        pass
+
+
 __all__ = [
     "SANDBOX_DIR_NAME",
     "PROJECTS_SUBDIR",
     "CONFIG_SUBDIR",
     "DEV_LOG_FILENAME",
+    "SandboxViolationError",
     "sandbox_root",
     "project_hash",
     "ensure_sandbox_dir",
@@ -157,4 +405,9 @@ __all__ = [
     "sandbox_config_dir",
     "clean_sandbox",
     "is_within_sandbox",
+    "is_dev_mode",
+    "resolve_write_path",
+    "assert_no_real_write",
+    "debug_enabled",
+    "log_sandbox_debug",
 ]
