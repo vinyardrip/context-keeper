@@ -592,12 +592,17 @@ class ContextKeeper:
         tl = load_repaired_plan(self.plan_file)[0]
         return _render_tasks_listing(tl)
 
-    def dashboard(self) -> str:
-        """Return the cross-project dashboard as a string."""
+    def dashboard(self, *, verbose: bool = False) -> str:
+        """Return the cross-project dashboard as a string.
+
+        ``verbose=True`` renders the block view with full per-project
+        triad context instead of the compact table.
+        """
         return _render_dashboard(
             self,
             list_projects=registry.list_projects,
             parse_plan_file=_safe_parse_plan,
+            verbose=verbose,
         )
 
     # ------------------------------------------------------------------ #
@@ -1406,9 +1411,10 @@ def _truncate(text: str, width: int) -> str:
 def _truncate_ellipsis(text: str, width: int) -> str:
     """Fit ``text`` into ``width`` columns with a middle ellipsis.
 
-    Used by the dashboard table: long paths and focus-task titles
-    keep both their start and their end (the informative parts) —
-    e.g. ``/very/long/path/to/some/project`` → ``/very/lo…oject``.
+    Used by the dashboard table: long project names and focus-task
+    titles keep both their start and their end (the informative
+    parts) — e.g. ``[3] [>] implement the very long…eaturing module``
+    → the ``[<id>] [>]`` prefix and the title tail survive.
     Never returns a string longer than ``width``.
     """
     if len(text) <= width:
@@ -1421,11 +1427,11 @@ def _truncate_ellipsis(text: str, width: int) -> str:
 
 
 def _relative_time(iso: str, *, now: Optional[datetime] = None) -> str:
-    """Format ``iso`` as a human-friendly relative timestamp.
+    """Format ``iso`` as a compact human-friendly relative timestamp.
 
-    Examples: "just now", "5 minutes ago", "2 hours ago", "3 days ago",
-    "2025-12-04 11:30" (for > 30 days). Returns "unknown" if the
-    input is unparseable.
+    Examples: "just now", "42s ago", "5m ago", "3h ago", "yesterday",
+    "2d ago", "2025-12-04 11:30" (for > 30 days). Returns "unknown"
+    if the input is unparseable.
     """
     if not iso:
         return "unknown"
@@ -1445,24 +1451,38 @@ def _relative_time(iso: str, *, now: Optional[datetime] = None) -> str:
     if secs < 5:
         return "just now"
     if secs < 60:
-        return f"{secs} seconds ago"
+        return f"{secs}s ago"
     minutes = secs // 60
     if minutes < 60:
-        return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+        return f"{minutes}m ago"
     hours = minutes // 60
     if hours < 24:
-        return f"{hours} hour{'s' if hours != 1 else ''} ago"
+        return f"{hours}h ago"
     days = hours // 24
+    if days == 1:
+        return "yesterday"
     if days < 30:
-        return f"{days} day{'s' if days != 1 else ''} ago"
+        return f"{days}d ago"
     return dt.strftime("%Y-%m-%d %H:%M")
 
 
 def _render_dashboard(ck: Optional[ContextKeeper], *, list_projects,
-                      parse_plan_file) -> str:
-    """Render the global dashboard as an ASCII table.
+                      parse_plan_file, verbose: bool = False) -> str:
+    """Render the global dashboard.
 
-    Columns: Project, Path, Last Active, Focus Task, Status.
+    Default (compact table) — columns strictly by priority:
+
+    1. Project      — name, ``*`` appended for the cwd project
+    2. Focus Task   — ``[<id>] [>] <text>`` (ellipsis-truncated) or
+                      ``(no focus)``
+    3. Progress     — compact ``<done>/<total> (<pct>%)``
+    4. Last Active  — compact relative time (``2m ago``, ``yesterday``)
+
+    Verbose (``-v`` / ``--verbose``) — one block per project with the
+    full PREV/FOCUS/NEXT triad context.
+
+    Missing folders render ``missing``; unparseable plans render
+    ``corrupt`` — neither ever crashes the whole table.
     """
     entries = list_projects()
     if not entries:
@@ -1479,110 +1499,171 @@ def _render_dashboard(ck: Optional[ContextKeeper], *, list_projects,
         except (OSError, ValueError):
             cwd = None
 
-    # ---- collect rows -------------------------------------------------
-    rows: list[dict] = []
+    # ---- collect per-entry state -------------------------------------
+    states: list[dict] = []
     for entry in entries:
         path = Path(entry.path)
         on_disk = path.exists()
         plan_path = path / CK_DIR_NAME / PLAN_FILENAME
         tl_local = parse_plan_file(plan_path) if on_disk else None
 
+        state = {
+            "entry": entry,
+            "is_cwd": bool(cwd and entry.path == cwd),
+            "tl": tl_local,
+            "condition": "ok",
+        }
         if not on_disk:
-            project_display = entry.name
-            path_display = entry.path
-            last_active = _relative_time(entry.last_seen)
-            focus_display = "n/a"
-            status_display = "missing"
+            state["condition"] = "missing"
         elif tl_local is None:
-            # Folder exists but PLAN.md is missing or unparseable.
-            project_display = entry.name
-            if cwd and entry.path == cwd:
-                project_display = f"{entry.name}  \u2190 active"
-            path_display = entry.path
-            last_active = _relative_time(entry.last_seen)
-            focus_display = "n/a"
-            status_display = "corrupt"
+            state["condition"] = "corrupt"
+        states.append(state)
+
+    if verbose:
+        return _render_dashboard_verbose(states)
+    return _render_dashboard_table(states)
+
+
+# ---------------------------------------------------------------------- #
+# Dashboard: compact table (default)
+# ---------------------------------------------------------------------- #
+
+_DASH_HEADERS = ("Project", "Focus Task", "Progress", "Last Active")
+_DASH_KEYS = ("project", "focus", "progress", "last")
+
+# Content caps applied BEFORE width computation: Focus Task truncates
+# at ~90 chars (spec band 80-100; the ``[<id>] [>]`` prefix and the
+# title tail stay readable), Project names at 40. Progress and Last
+# Active are naturally short.
+_FOCUS_CAP = 90
+_PROJECT_CAP = 40
+
+
+def _render_dashboard_table(states: list) -> str:
+    """Compact priority table: Project | Focus Task | Progress | Last Active."""
+    rows: list[dict] = []
+    for s in states:
+        entry = s["entry"]
+        tl_local = s["tl"]
+
+        project = entry.name + (" *" if s["is_cwd"] else "")
+        last = _relative_time(entry.last_seen)
+
+        if s["condition"] == "missing":
+            focus, progress = "n/a", "missing"
+        elif s["condition"] == "corrupt":
+            focus, progress = "n/a", "corrupt"
         else:
-            project_display = entry.name
-            if cwd and entry.path == cwd:
-                project_display = f"{entry.name}  \u2190 active"
-            path_display = entry.path
-            last_active = _relative_time(entry.last_seen)
             if tl_local.focused:
                 t = tl_local.focused[0]
-                focus_display = f"[{t.id}] [>] {t.title}"
-            elif tl_local.active() is not None:
-                t = tl_local.active()
-                focus_display = f"[{t.id}] {t.title}"
+                focus = f"[{t.id}] [>] {t.title}"
             else:
-                focus_display = "none"
-            open_count = len(tl_local.open)
+                focus = "(no focus)"
             done_count = len(tl_local.done)
-            status_display = f"{open_count} open, {done_count} done"
+            progress = f"{done_count}/{tl_local.total} ({tl_local.completion_pct}%)"
 
         rows.append({
-            "project": project_display,
-            "path": path_display,
-            "last": last_active,
-            "focus": focus_display,
-            "status": status_display,
+            "project": _truncate_ellipsis(project, _PROJECT_CAP),
+            "focus": _truncate_ellipsis(focus, _FOCUS_CAP),
+            "progress": progress,
+            "last": last,
         })
 
-    # ---- column widths -----------------------------------------------
-    # Hard total-width cap (~85 chars) so the table never wraps in a
-    # standard terminal. Fixed-width columns keep their natural size;
-    # the flexible columns (Path, Focus Task) absorb the squeeze via
-    # middle-ellipsis truncation, never below their header length.
-    headers = ("Project", "Path", "Last Active", "Focus Task", "Status")
-    col_keys = ("project", "path", "last", "focus", "status")
-    _MAX_TABLE_WIDTH = 85
-    _CHROME = 2 * 5 + 6  # 2-space padding per column + '|' separators
-
-    natural: dict[str, int] = {}
-    for h, k in zip(headers, col_keys):
-        natural[k] = max(len(h), *(len(r[k]) for r in rows))
-
-    widths: dict[str, int] = dict(natural)
-    overflow = sum(widths.values()) + _CHROME - _MAX_TABLE_WIDTH
-    if overflow > 0:
-        # Phase 1: squeeze the flexible columns (Path, Focus Task)
-        # down to their header lengths.
-        for k in ("path", "focus"):
-            give = min(overflow, widths[k] - len(headers[col_keys.index(k)]))
-            if give > 0:
-                widths[k] -= give
-                overflow -= give
-    if overflow > 0:
-        # Phase 2: extreme data (very long project names) — squeeze
-        # the widest columns further, floor of 3 chars each, so the
-        # hard width cap always holds.
-        for k in sorted(col_keys, key=lambda k: -widths[k]):
-            give = min(overflow, widths[k] - 3)
-            if give > 0:
-                widths[k] -= give
-                overflow -= give
+    widths: dict[str, int] = {}
+    for h, k in zip(_DASH_HEADERS, _DASH_KEYS):
+        widths[k] = max(len(h), *(len(r[k]) for r in rows))
 
     def _hr() -> str:
-        line = "+" + "+".join("-" * (widths[k] + 2) for k in col_keys) + "+"
-        return line
+        return "+" + "+".join("-" * (widths[k] + 2) for k in _DASH_KEYS) + "+"
 
-    def _row(values: tuple[str, ...]) -> str:
+    def _row(values: tuple) -> str:
         cells = [
-            f" {_truncate_ellipsis(values[i], widths[col_keys[i]]).ljust(widths[col_keys[i]])} "
-            for i in range(5)
+            f" {v.ljust(widths[k])} "
+            for v, k in zip(values, _DASH_KEYS)
         ]
         return "|" + "|".join(cells) + "|"
 
-    out: list[str] = []
-    out.append("\U0001f4ed GLOBAL DASHBOARD")
+    out: list[str] = ["\U0001f4ed GLOBAL DASHBOARD"]
     out.append(_hr())
-    out.append(_row(headers))
+    out.append(_row(_DASH_HEADERS))
     out.append(_hr())
     for r in rows:
-        out.append(_row((
-            r["project"], r["path"], r["last"], r["focus"], r["status"],
-        )))
+        out.append(_row((r["project"], r["focus"], r["progress"], r["last"])))
     out.append(_hr())
+    return "\n".join(out)
+
+
+# ---------------------------------------------------------------------- #
+# Dashboard: verbose block view (-v / --verbose)
+# ---------------------------------------------------------------------- #
+
+
+def _render_dashboard_verbose(states: list) -> str:
+    """One isolated block per project with the full triad context.
+
+    Structure (spec-exact)::
+
+        📭 МОИ ПРОЕКТЫ (<count>)
+
+         🚀 <project_name> [<active_marker>]     ([*] cwd, [ ] other)
+            📍 <path>
+            📊 Прогресс: <done>/<total> (<pct>%)
+            🎯 Контекст:
+               ⏮️  [<id>] <prev_text> [x]
+               👉 [<id>] [>] <focus_text>
+               ⏭️  [<id>] <next_text> [ ]
+
+        ═════════════════════════════════════════════════════════════
+
+    When every task in a project is done, the triad collapses to a
+    single line: ``🎯 Контекст: (все задачи выполнены 🎉)``. Missing
+    folders and unparseable plans render a ⚠️ label instead of the
+    progress/triad lines.
+    """
+    bar = "═" * 61
+    out: list[str] = [f"\U0001f4ed МОИ ПРОЕКТЫ ({len(states)})", ""]
+
+    for s in states:
+        entry = s["entry"]
+        tl_local = s["tl"]
+        marker = "*" if s["is_cwd"] else " "
+        out.append(f" \U0001f680 {entry.name} [{marker}]")
+        out.append(f"    \U0001f4cd {entry.path}")
+
+        if s["condition"] != "ok":
+            label = "missing" if s["condition"] == "missing" else "corrupt"
+            out.append(f"    \u26a0\ufe0f  {label}")
+        else:
+            done_count = len(tl_local.done)
+            out.append(
+                f"    \U0001f4ca Прогресс: {done_count}/{tl_local.total} "
+                f"({tl_local.completion_pct}%)"
+            )
+            if tl_local.total > 0 and done_count == tl_local.total:
+                out.append(
+                    "    \U0001f3af Контекст: (все задачи выполнены \U0001f389)"
+                )
+            else:
+                out.append("    \U0001f3af Контекст:")
+                prev, focus, nxt = _status_triad(tl_local)
+                if prev is not None:
+                    out.append(f"       \u23ee\ufe0f  [{prev.id}] {prev.title} [x]")
+                else:
+                    out.append("       \u23ee\ufe0f  (нет завершенных)")
+                if focus is not None:
+                    out.append(f"       \U0001f449 [{focus.id}] [>] {focus.title}")
+                else:
+                    out.append("       \U0001f449 (фокус не выбран)")
+                if nxt is not None:
+                    out.append(f"       \u23ed\ufe0f  [{nxt.id}] {nxt.title} [ ]")
+                else:
+                    out.append("       \u23ed\ufe0f  (нет открытых задач)")
+
+        # Each project is an isolated block: trailing blank line +
+        # separator bar close it off before the next block.
+        out.append("")
+        out.append(bar)
+
     return "\n".join(out)
 
 
