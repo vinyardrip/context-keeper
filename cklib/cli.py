@@ -29,7 +29,7 @@ HELP_TEXT = f"""Context Keeper CLI [v{VERSION}]
 Usage: ck <command> [args]
 
 Local (current project):
-  init                       Initialize .ck/ in the current project
+  init                       Initialize .ck/ locally (use --register to register globally)
   st [--all]                 Status of the current project
   tasks                      Print the local task list to STDOUT (no editor)
   list                       Local view: same as `ck tasks`
@@ -92,7 +92,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(dest="command", metavar="<command>")
 
-    sub.add_parser("init", help="Initialize .ck/ in the current project")
+    p_init = sub.add_parser(
+        "init", help="Initialize .ck/ locally (use --register for global registration)"
+    )
+    p_init.add_argument(
+        "--register", action="store_true",
+        help="Also register the project in the global registry",
+    )
 
     p_st = sub.add_parser("st", help="Project status")
     p_st.add_argument("--all", action="store_true", help="Include full PLAN.md")
@@ -164,7 +170,7 @@ _LEGACY_CHOICES = (
 # is reported as an error instead of being silently swallowed into
 # task text / ignored.
 _LEGACY_FLAGS: dict[str, frozenset] = {
-    "init": frozenset(),
+    "init": frozenset({"--register"}),
     "st": frozenset({"--global", "--all"}),
     "dashboard": frozenset({"-v", "--verbose"}),
     "list": frozenset({"-g", "--global"}),
@@ -250,7 +256,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(HELP_TEXT)
             return 0
         if args.command == "init":
-            ck.init()
+            ck.init(register=args.register)
         elif args.command == "st":
             if getattr(args, "global_dash", False):
                 _maybe_notify(ck)
@@ -377,7 +383,7 @@ def _legacy_dispatch(raw: List[str]) -> int:
     notifiable = cmd in _NOTIFIER_COMMANDS
     try:
         if cmd == "init":
-            ck.init()
+            ck.init(register="--register" in rest)
         elif cmd == "st":
             if notifiable:
                 _maybe_notify(ck)

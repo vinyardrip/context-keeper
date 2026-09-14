@@ -100,7 +100,7 @@ class _SnapshottedProject(_DevModeBase):
         root = Path(self._tmp.name) / name
         root.mkdir()
         ck = ContextKeeper(root=root)
-        ck.init()
+        ck.init(register=True)
         ck.add_task("alpha task")
         ck.add_task("beta task")
         return root, ck

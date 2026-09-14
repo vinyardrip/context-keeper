@@ -170,7 +170,7 @@ class TestCliDispatch(_IsolatedHome, unittest.TestCase):
         root = tmp / name
         root.mkdir()
         ck = ContextKeeper(root=root)
-        ck.init()
+        ck.init(register=True)
         return ck
 
     def _run(self, argv, cwd: Path) -> str:

@@ -529,8 +529,12 @@ class ContextKeeper:
     # COMMAND: init
     # ------------------------------------------------------------------ #
 
-    def init(self) -> None:
-        """Initialize the project structure, registry, and gitignore rules."""
+    def init(self, *, register: bool = False) -> None:
+        """Initialize the local project structure.
+
+        Registration is opt-in so local initialization never mutates the
+        global registry unless explicitly requested.
+        """
         # Boundary guard: initializing in $HOME, /tmp, or the
         # filesystem root affects every command run beneath it.
         if not self.ck_path.exists():
@@ -569,7 +573,9 @@ class ContextKeeper:
         )
         self._ensure_ck_gitignore(self.ck_path)
 
-        registry.register_project(self.root, name=self.root.name)
+        if register:
+            entry = registry.register_project(self.root, name=self.root.name)
+            print(f"\u2705 Registered: {entry.name} \u2192 {entry.path}")
         print(f"\u2705 Context Keeper v{VERSION} initialized at {self.root}")
 
     # ------------------------------------------------------------------ #
