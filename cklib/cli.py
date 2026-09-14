@@ -317,6 +317,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                 print(f"\U0001f5d1 Pruned {len(pruned)} missing entries:")
                 for p in pruned:
                     print(f"   \u2022 {p}")
+                print(
+                    f"\u2705 Summary: {len(pruned)} project(s) purged "
+                    "from the global registry."
+                )
             else:
                 print("\u2705 Nothing to prune.")
         elif args.command == "install":
@@ -480,6 +484,10 @@ def _legacy_dispatch(raw: List[str]) -> int:
                 print(f"\U0001f5d1 Pruned {len(pruned)} missing entries:")
                 for p in pruned:
                     print(f"   \u2022 {p}")
+                print(
+                    f"\u2705 Summary: {len(pruned)} project(s) purged "
+                    "from the global registry."
+                )
             else:
                 print("\u2705 Nothing to prune.")
         elif cmd == "install":

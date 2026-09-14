@@ -11,18 +11,21 @@ Covers:
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import tempfile
 import threading
 import time
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from typing import List
 
 from cklib import config as ckconfig
 from cklib import registry as ckregistry
 from cklib.config import file_lock
+from cklib.cli import main
 from cklib.core import ContextKeeper, _relative_time, _render_dashboard
 
 
@@ -276,6 +279,50 @@ class TestDashboardTable(_IsolatedRegistry, unittest.TestCase):
             out = self._render(ck)
             self.assertIn("missing", out)
             self.assertIn("ghost", out)
+            self.assertIn("[MISSING] ghost", out)
+            self.assertIn(
+                "💡 Found 1 missing project(s). Run 'ck prune' to cleanup.",
+                out,
+            )
+
+    def test_list_global_missing_tag_and_cleanup_tip(self):
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / "gone"
+            target.mkdir()
+            ckregistry.register_project(target, name="gone-project")
+            target.rmdir()
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["list", "-g"])
+
+            self.assertEqual(code, 0)
+            self.assertIn("[MISSING] gone-project", output.getvalue())
+            self.assertIn(
+                "💡 Found 1 missing project(s). Run 'ck prune' to cleanup.",
+                output.getvalue(),
+            )
+
+    def test_prune_cli_reports_paths_and_summary(self):
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / "purge-me"
+            target.mkdir()
+            ckregistry.register_project(target, name="purge-me")
+            target.rmdir()
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = main(["prune"])
+
+            text = output.getvalue()
+            self.assertEqual(code, 0)
+            self.assertIn("Pruned 1 missing entries", text)
+            self.assertIn(str(target.resolve()), text)
+            self.assertIn(
+                "Summary: 1 project(s) purged from the global registry.",
+                text,
+            )
+            self.assertEqual(ckregistry.list_projects(), [])
 
     def test_dashboard_corrupt_plan(self):
         """A missing/unparseable PLAN.md must not crash the dashboard."""
@@ -413,6 +460,7 @@ class TestDashboardVerbose(_IsolatedRegistry, unittest.TestCase):
             out = self._render(ck)
             self.assertIn("⚠️  missing", out)
             self.assertIn("⚠️  corrupt", out)
+            self.assertIn("🚀 [MISSING] ghost [ ]", out)
             # Degraded blocks still render the header + separator.
             self.assertEqual(out.count("═" * 61), 2)
 

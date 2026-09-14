@@ -1487,8 +1487,8 @@ def _render_dashboard(ck: Optional[ContextKeeper], *, list_projects,
     Verbose (``-v`` / ``--verbose``) — one block per project with the
     full PREV/FOCUS/NEXT triad context.
 
-    Missing folders render ``missing``; unparseable plans render
-    ``corrupt`` — neither ever crashes the whole table.
+    Missing folders render a ``[MISSING]`` project tag; unparseable plans
+    render ``corrupt`` — neither ever crashes the whole table.
     """
     entries = list_projects()
     if not entries:
@@ -1525,9 +1525,19 @@ def _render_dashboard(ck: Optional[ContextKeeper], *, list_projects,
             state["condition"] = "corrupt"
         states.append(state)
 
-    if verbose:
-        return _render_dashboard_verbose(states)
-    return _render_dashboard_table(states)
+    rendered = (
+        _render_dashboard_verbose(states)
+        if verbose else _render_dashboard_table(states)
+    )
+    missing_count = sum(
+        1 for state in states if state["condition"] == "missing"
+    )
+    if missing_count:
+        rendered += (
+            f"\n\n\U0001f4a1 Found {missing_count} missing project(s). "
+            "Run 'ck prune' to cleanup."
+        )
+    return rendered
 
 
 # ---------------------------------------------------------------------- #
@@ -1553,6 +1563,8 @@ def _render_dashboard_table(states: list) -> str:
         tl_local = s["tl"]
 
         project = entry.name + (" *" if s["is_cwd"] else "")
+        if s["condition"] == "missing":
+            project = f"[MISSING] {project}"
         last = _relative_time(entry.last_seen)
 
         if s["condition"] == "missing":
@@ -1633,7 +1645,10 @@ def _render_dashboard_verbose(states: list) -> str:
         entry = s["entry"]
         tl_local = s["tl"]
         marker = "*" if s["is_cwd"] else " "
-        out.append(f" \U0001f680 {entry.name} [{marker}]")
+        name = entry.name
+        if s["condition"] == "missing":
+            name = f"[MISSING] {name}"
+        out.append(f" \U0001f680 {name} [{marker}]")
         out.append(f"    \U0001f4cd {entry.path}")
 
         if s["condition"] != "ok":
