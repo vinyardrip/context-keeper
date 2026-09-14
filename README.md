@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.2.0-blue)]()
+[![version](https://img.shields.io/badge/version-0.2.3-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -46,7 +46,7 @@ Context Keeper (ck) acts as a bridge between your brain, AI agents, and Git, per
 - Self-Installer: ck install / ck uninstall (user-level symlink, no sudo)
 - Self-Updater: ck update (git fetch + `pull --ff-only`, refuses on dirty work tree)
 - CLI Task Management: ck add <text>, ck start <ID>, ck done <ID|range|list>
-- Global Registry: Cross-project dashboard (ck dashboard) backed by `~/.config/ck/projects.json`
+- Global Registry: Cross-project dashboard (ck dashboard) backed by `~/.config/ck/projects.json`; registration is explicit
 - Fail-Closed Locking: Cross-process file locking guards registry, PLAN.md, HISTORY.md and state.json writes
 - Full Plan View: ck st --all
 - Dev Sandbox: `ck-dev` runs any command against real data read-only, redirecting all writes into a git-ignored `.sandbox/` (`ck-clean` resets it)
@@ -82,7 +82,7 @@ chmod +x ck
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.2.0
+ck -v    # → ck version 0.2.3
 ```
 
 ---
@@ -105,7 +105,8 @@ ck -v    # → ck version 0.2.0
 
 | COMMAND | DESCRIPTION |
 |--------|------------|
-| ck init | Initialize project (.ck/ structure, registry, gitignore rules) |
+| ck init | Initialize the project locally (.ck/ structure and gitignore rules); does not touch the global registry |
+| ck init --register | Initialize locally and register the project in `~/.config/ck/projects.json` |
 | ck add \<text\> | Add a new open task (inserted before `## Completed`) |
 | ck start \<ID\> | Focus a task (`- [>]`) |
 | ck done \<ID\|range\|list\> | Mark task(s) done (`- [x]`), e.g. `3`, `2-4`, `1,3,5` |
@@ -121,7 +122,7 @@ ck -v    # → ck version 0.2.0
 | ck list -g / ck list --global | Global view: same as `ck dashboard` |
 | ck register [-n NAME] [--path PATH] | Add a project to the global registry |
 | ck unregister [--path PATH \| NAME] | Remove a project from the registry |
-| ck prune | Drop registry entries whose folders no longer exist |
+| ck prune | Purge registry entries whose folders no longer exist; reports each purged path and a summary count |
 | ck info | Installation diagnostics (version, branch, paths) |
 | ck install | Symlink ck to ~/.local/bin (no sudo) |
 | ck uninstall | Remove the ~/.local/bin symlink |
@@ -130,6 +131,31 @@ ck -v    # → ck version 0.2.0
 | ck-clean / ck dev clean | Purge the `.sandbox/` dev environment |
 | ck -h | Help |
 | ck -v | Version |
+
+### Initialization & Registration
+
+`ck init` is strictly local by default. It creates the `.ck/` project
+structure and updates the project `.gitignore`, but it does **not** create or
+modify `~/.config/ck/projects.json`.
+
+Use `ck init --register` when the project should be initialized and tracked in
+the global registry in one step. An already initialized project can be added
+to the registry at any time with the standalone command `ck register` (use
+`--path PATH` and/or `-n NAME` when needed).
+
+### Global Registry Hygiene
+
+`ck list -g` and `ck dashboard` keep registered projects visible even when a
+project directory has been deleted or moved. Such entries are labeled
+`[MISSING]`, and the output ends with an actionable tip:
+
+```text
+💡 Found X missing project(s). Run 'ck prune' to cleanup.
+```
+
+Run `ck prune` to remove those orphaned entries from
+`~/.config/ck/projects.json`. The command prints every purged project path
+and a summary count, so the registry cleanup is auditable.
 
 ---
 
@@ -335,6 +361,31 @@ chmod +x ck
 
 ## 🛠 Команды
 (полный список аналогичен английской версии выше)
+
+### Инициализация и регистрация
+
+`ck init` по умолчанию работает строго локально: создаёт структуру `.ck/` и
+обновляет `.gitignore` проекта, но не создаёт и не изменяет
+`~/.config/ck/projects.json`.
+
+Флаг `ck init --register` выполняет локальную инициализацию и одновременно
+добавляет проект в глобальный реестр. Уже инициализированный проект можно в
+любой момент добавить отдельно командой `ck register` (при необходимости с
+флагами `--path PATH` и/или `-n NAME`).
+
+### Гигиена глобального реестра
+
+Команды `ck list -g` и `ck dashboard` не скрывают зарегистрированные проекты,
+если их каталоги были удалены или перемещены. Такие записи помечаются тегом
+`[MISSING]`, а в конце вывода появляется подсказка:
+
+```text
+💡 Found X missing project(s). Run 'ck prune' to cleanup.
+```
+
+Команда `ck prune` удаляет осиротевшие записи из
+`~/.config/ck/projects.json`, печатает каждый удалённый путь и итоговое число
+очищенных проектов.
 
 ---
 
