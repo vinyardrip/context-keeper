@@ -64,6 +64,10 @@ System commands:
 
 Dev mode (ck-dev / CK_SANDBOX=1 / --sandbox):
   dev clean                  Remove the .sandbox/ directory (same as ck-clean)
+  sandbox setup              Build an isolated mock environment in .sandbox/
+                             (registered/unregistered/missing projects, bulk
+                             history + archive data)
+  sandbox clean              Remove the .sandbox/ directory (same as ck-clean)
 
 Options:
   -v, --version              Show version
@@ -154,6 +158,21 @@ def build_parser() -> argparse.ArgumentParser:
     dev_sub = p_dev.add_subparsers(dest="dev_command", metavar="<action>")
     dev_sub.add_parser("clean", help="Remove the .sandbox/ directory")
 
+    p_sandbox = sub.add_parser(
+        "sandbox",
+        help="Sandbox environment utilities (setup/clean)",
+    )
+    sandbox_sub = p_sandbox.add_subparsers(
+        dest="sandbox_action", metavar="<action>")
+    sandbox_sub.add_parser(
+        "setup",
+        help="Build an isolated mock environment in .sandbox/ "
+             "(bulk test data generation)",
+    )
+    sandbox_sub.add_parser(
+        "clean", help="Remove the .sandbox/ directory",
+    )
+
     return parser
 
 
@@ -163,7 +182,7 @@ _LEGACY_CHOICES = (
     "init", "st", "dashboard", "start", "done", "add", "save",
     "edit", "log", "install", "uninstall", "update", "help",
     "list", "tasks", "register", "unregister", "prune", "info",
-    "dev", "ck-clean",
+    "dev", "sandbox", "ck-clean",
 )
 
 # Flags each legacy command accepts. Anything else starting with "-"
@@ -190,6 +209,7 @@ _LEGACY_FLAGS: dict[str, frozenset] = {
     "update": frozenset(),
     "help": frozenset(),
     "dev": frozenset(),
+    "sandbox": frozenset(),
     "ck-clean": frozenset(),
 }
 
@@ -331,6 +351,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             return _do_update(ck)
         elif args.command == "dev":
             return _run_dev_command(getattr(args, "dev_command", None))
+        elif args.command == "sandbox":
+            return _run_sandbox_command(
+                getattr(args, "sandbox_action", None))
         return 0
     except KeyError as e:
         print(f"\u274c {e}")
@@ -500,6 +523,9 @@ def _legacy_dispatch(raw: List[str]) -> int:
             # `ck dev clean`, bare `ck dev` (hint), `ck ck-clean`.
             return _run_dev_command(rest[0] if cmd == "dev" and rest else
                                     ("clean" if cmd == "ck-clean" else None))
+        elif cmd == "sandbox":
+            # `ck sandbox setup` / `ck sandbox clean` (ck-dev entry).
+            return _run_sandbox_command(rest[0] if rest else None)
         elif cmd == "help":
             print(HELP_TEXT)
         else:
@@ -553,6 +579,39 @@ def _run_dev_command(action: Optional[str]) -> int:
 def clean_sandbox_entrypoint() -> int:
     """Console-script entrypoint for ``ck-clean`` (pyproject)."""
     return _run_dev_command("clean")
+
+
+# ---------------------------------------------------------------------- #
+# Sandbox environment utilities (ck sandbox setup / clean)
+# ---------------------------------------------------------------------- #
+
+def _run_sandbox_command(action: Optional[str]) -> int:
+    """Dispatch ``ck sandbox <action>`` subcommands.
+
+    - ``setup``: build the isolated mock environment in ``.sandbox/``
+      (bulk test data generation — registered/unregistered/missing
+      projects, 100+ history entries, mock archives).
+    - ``clean``: safely remove ``.sandbox/`` (same as ``ck-clean``).
+
+    Returns a process exit code. Unknown or missing actions print a
+    usage hint to stdout and return 2 (no tracebacks, no side
+    effects — mirrors ``ck dev``).
+    """
+    from .sandbox import clean_sandbox
+    from .sandbox_setup import setup_sandbox
+
+    if action == "setup":
+        return 0 if setup_sandbox() else 1
+    if action == "clean":
+        return 0 if clean_sandbox() else 1
+    if action is None:
+        print("Usage: ck sandbox <setup|clean>")
+        return 2
+    print(
+        f"Unknown sandbox action: {action!r}. "
+        "Usage: ck sandbox <setup|clean>"
+    )
+    return 2
 
 
 # ---------------------------------------------------------------------- #

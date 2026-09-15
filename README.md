@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.2.3-blue)]()
+[![version](https://img.shields.io/badge/version-0.2.4-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -49,7 +49,7 @@ Context Keeper (ck) acts as a bridge between your brain, AI agents, and Git, per
 - Global Registry: Cross-project dashboard (ck dashboard) backed by `~/.config/ck/projects.json`; registration is explicit
 - Fail-Closed Locking: Cross-process file locking guards registry, PLAN.md, HISTORY.md and state.json writes
 - Full Plan View: ck st --all
-- Dev Sandbox: `ck-dev` runs any command against real data read-only, redirecting all writes into a git-ignored `.sandbox/` (`ck-clean` resets it)
+- Dev Sandbox: `ck-dev` runs any command against real data read-only, redirecting all writes into a git-ignored `.sandbox/` (`ck-clean` resets it); `ck-dev sandbox setup` builds a disposable mock environment with bulk test data
 
 ---
 
@@ -82,7 +82,7 @@ chmod +x ck
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.2.3
+ck -v    # → ck version 0.2.4
 ```
 
 ---
@@ -128,7 +128,9 @@ ck -v    # → ck version 0.2.3
 | ck uninstall | Remove the ~/.local/bin symlink |
 | ck update | Self-update via git fetch + pull --ff-only (refuses if dirty) |
 | ck-dev \<command\> | Run any command in isolated sandbox mode (writes → `.sandbox/`) |
-| ck-clean / ck dev clean | Purge the `.sandbox/` dev environment |
+| ck-dev sandbox setup | Build an isolated mock environment in `.sandbox/` (bulk test data) |
+| ck-dev sandbox clean | Purge the `.sandbox/` dev environment |
+| ck-clean / ck dev clean / ck sandbox clean | Purge the `.sandbox/` dev environment |
 | ck -h | Help |
 | ck -v | Version |
 
@@ -246,7 +248,7 @@ Local commits only. `ck save` commits if you confirm; `ck` never pushes. `ck upd
 
 `ck-dev` is the sandbox entrypoint. It activates `CK_SANDBOX=1` (the `--sandbox` flag and `CK_DEV=1` do the same) and then behaves like `ck`, with one crucial difference:
 
-- **Reads are real**: dashboards, status, and task lists reflect your actual projects (`~/.config/context-keeper/projects.json`, real project folders).
+- **Reads are real** (with sandbox read-your-writes): dashboards, status, and task lists reflect your actual projects — unless a sandboxed copy exists (seeded by a previous dev-mode write or `sandbox setup`), in which case that copy is read so chained dev commands compose.
 - **Writes are intercepted**: ALL write operations — task mutations (`add` / `start` / `done`), `PLAN.md` edits, `state.json` updates, lock files, backups, registry changes — are redirected strictly into `.sandbox/`.
 
 Production state stays immutable while `IS_DEV` is active: the real `~/.config/context-keeper/` and real `PLAN.md` files are never modified (verified byte-for-byte, including mtime, in the test suite). Two extra guardrails are enforced in dev mode:
@@ -259,13 +261,39 @@ Production state stays immutable while `IS_DEV` is active: the real `~/.config/c
 ./ck-dev st                          # status reads the REAL project
 ```
 
-### Cleanup Utility (`ck-clean` / `ck dev clean`)
+### Cleanup Utility (`ck-clean` / `ck dev clean` / `ck sandbox clean`)
 
-`ck-clean` (or `ck dev clean`) safely and recursively purges `.sandbox/` to reset dev state. Missing directory → graceful no-op. Single-line confirmation on stdout; failures report to stderr with a non-zero exit code.
+`ck-clean` (or `ck dev clean` / `ck sandbox clean`) safely and recursively purges `.sandbox/` to reset dev state. Missing directory → graceful no-op. Single-line confirmation on stdout; failures report to stderr with a non-zero exit code.
 
 ```bash
 ./ck-clean
 # [ck-clean] Sandbox environment cleared successfully.
+```
+
+### Automated Sandbox Fixtures (`ck-dev sandbox setup`)
+
+`ck-dev sandbox setup` builds a complete, disposable mock environment inside `.sandbox/` — registered and unregistered projects, bulk history/archive data, and a registry entry whose folder is deliberately missing:
+
+```bash
+.sandbox/
+├── config/
+│   └── projects.json          # registry mock: alpha + orphaned-deleted
+└── projects/
+    ├── alpha/                 # registered & active: 6 tasks (gap at 5),
+    │   └── .ck/               # 120 history.log entries, 5+2 archives,
+    │                          # HISTORY.md exactly at the rotation limit
+    ├── beta/                  # initialized, NOT registered (ck register)
+    ├── gamma/                 # plain dir, no .ck/ (non-ck behavior)
+    └── (orphaned-deleted)     # registry-only → [MISSING] tag / ck prune
+```
+
+Because a sandboxed registry copy now exists, dev-mode reads (dashboards, `prune`) use it — the fixture environment fully replaces production state for the session. Setup writes are confined to `.sandbox/` **by construction**; `~/.config/ck/` is never touched.
+
+```bash
+./ck-dev sandbox setup
+CK_SANDBOX=1 ./ck-dev list -g   # → alpha + [MISSING] orphaned-deleted
+CK_SANDBOX=1 ./ck-dev prune     # → purges orphaned-deleted (sandbox only)
+./ck-dev sandbox clean          # → reset the workspace
 ```
 
 ### Debug Logging (`CK_DEBUG=1` / `-v` / `--verbose`)
@@ -324,7 +352,7 @@ Context Keeper (ck) служит мостом между вашим разумо
 - Поддержка AI
 - Глобальный реестр проектов и панель мониторинга
 - Fail-closed блокировка файлов, атомарная запись
-- Дев-режим с песочницей: `ck-dev` выполняет команды в режиме «только чтение» реальных данных, все записи уходят в git-ignored `.sandbox/` (`ck-clean` очищает её)
+- Дев-режим с песочницей: `ck-dev` выполняет команды в режиме «только чтение» реальных данных, все записи уходят в git-ignored `.sandbox/` (`ck-clean` очищает её); `ck-dev sandbox setup` строит одноразовое окружение-макет с объёмными тестовыми данными
 
 ---
 
@@ -452,7 +480,7 @@ export EDITOR="nano"  # используется, если VISUAL не зада�
 
 `ck-dev` — точка входа в песочницу. Он устанавливает `CK_SANDBOX=1` (аналогично работают флаг `--sandbox` и `CK_DEV=1`) и ведёт себя как `ck` с одним ключевым отличием:
 
-- **Чтение реальное**: статус, дашборды и списки задач показывают настоящие проекты (`~/.config/context-keeper/projects.json`, реальные каталоги).
+- **Чтение реальное** (с read-your-writes в песочнице): статус, дашборды и списки задач показывают настоящие проекты — если нет песочной копии (созданной предыдущей dev-записью или `sandbox setup`); при её наличии читается копия, чтобы цепочки dev-команд корректно складывались.
 - **Записи перехватываются**: ВСЕ операции записи — мутации задач (`add` / `start` / `done`), правки `PLAN.md`, обновления `state.json`, lock-файлы, бэкапы, изменения реестра — строго перенаправляются в `.sandbox/`.
 
 Пока активен `IS_DEV`, продакшен остаётся неизменным: реальный `~/.config/context-keeper/` и реальные `PLAN.md` не модифицируются (проверяется побайтно, включая mtime, в тестах). Дополнительные защитные барьеры в dev-режиме:
@@ -465,13 +493,39 @@ export EDITOR="nano"  # используется, если VISUAL не зада�
 ./ck-dev st                             # статус читает РЕАЛЬНЫЙ проект
 ```
 
-### Утилита очистки (`ck-clean` / `ck dev clean`)
+### Утилита очистки (`ck-clean` / `ck dev clean` / `ck sandbox clean`)
 
-`ck-clean` (или `ck dev clean`) безопасно и рекурсивно удаляет `.sandbox/`, сбрасывая dev-состояние. Отсутствующий каталог — корректный no-op. Подтверждение — одна строка в stdout; при ошибке — сообщение в stderr и ненулевой код возврата.
+`ck-clean` (или `ck dev clean` / `ck sandbox clean`) безопасно и рекурсивно удаляет `.sandbox/`, сбрасывая dev-состояние. Отсутствующий каталог — корректный no-op. Подтверждение — одна строка в stdout; при ошибке — сообщение в stderr и ненулевой код возврата.
 
 ```bash
 ./ck-clean
 # [ck-clean] Sandbox environment cleared successfully.
+```
+
+### Автоматические фикстуры песочницы (`ck-dev sandbox setup`)
+
+`ck-dev sandbox setup` строит полное одноразовое окружение-макет внутри `.sandbox/` — зарегистрированные и незарегистрированные проекты, объёмные данные истории/архивов и запись реестра без каталога:
+
+```bash
+.sandbox/
+├── config/
+│   └── projects.json          # макет реестра: alpha + orphaned-deleted
+└── projects/
+    ├── alpha/                 # зарегистрирован и активен: 6 задач (пропуск 5),
+    │   └── .ck/               # 120 записей history.log, 5+2 архива,
+    │                          # HISTORY.md ровно на лимите ротации
+    ├── beta/                  # инициализирован, НЕ зарегистрирован (ck register)
+    ├── gamma/                 # обычный каталог без .ck/ (не-ck поведение)
+    └── (orphaned-deleted)     # только в реестре → тег [MISSING] / ck prune
+```
+
+Поскольку песочная копия реестра существует, dev-чтения (дашборды, `prune`) используют её — фикстурное окружение полностью заменяет продакшен для сессии. Записи setup не покидают `.sandbox/` **по построению**; `~/.config/ck/` не затрагивается.
+
+```bash
+./ck-dev sandbox setup
+CK_SANDBOX=1 ./ck-dev list -g   # → alpha + [MISSING] orphaned-deleted
+CK_SANDBOX=1 ./ck-dev prune     # → удаляет orphaned-deleted (только в песочнице)
+./ck-dev sandbox clean          # → сброс рабочего окружения
 ```
 
 ### Отладочное логирование (`CK_DEBUG=1` / `-v` / `--verbose`)
