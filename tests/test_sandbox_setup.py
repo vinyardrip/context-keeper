@@ -456,14 +456,15 @@ class TestCkDevEndToEnd(_SandboxFixtureBase):
 
 class TestVersionBump(unittest.TestCase):
 
-    def test_version_is_024(self):
-        self.assertEqual(ckconfig.VERSION, "0.2.4")
+    def test_version_is_at_least_025(self):
+        parts = tuple(int(x) for x in ckconfig.VERSION.split("."))
+        self.assertGreaterEqual(parts, (0, 2, 5))
 
-    def test_pyproject_version_matches(self):
+    def test_pyproject_version_matches_config(self):
         import tomllib
         with open(REPO_ROOT / "pyproject.toml", "rb") as fh:
             data = tomllib.load(fh)
-        self.assertEqual(data["project"]["version"], "0.2.4")
+        self.assertEqual(data["project"]["version"], ckconfig.VERSION)
 
 
 if __name__ == "__main__":

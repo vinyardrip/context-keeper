@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.2.4-blue)]()
+[![version](https://img.shields.io/badge/version-0.2.5-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -82,7 +82,7 @@ chmod +x ck
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.2.4
+ck -v    # → ck version 0.2.5
 ```
 
 ---
@@ -295,6 +295,57 @@ CK_SANDBOX=1 ./ck-dev list -g   # → alpha + [MISSING] orphaned-deleted
 CK_SANDBOX=1 ./ck-dev prune     # → purges orphaned-deleted (sandbox only)
 ./ck-dev sandbox clean          # → reset the workspace
 ```
+
+### Manual Testing Walkthrough (Contributors)
+
+**Safety first — zero host impact.** The moment a sandbox session starts, every global registry interaction — `register` / `unregister` / `prune` mutations and dashboard reads alike — is re-routed from your host machine's `~/.config/ck/projects.json` to `.sandbox/config/projects.json`, and every project write (`PLAN.md`, `state.json`, `HISTORY.md`, lock files, rotation archives) lands under `.sandbox/projects/`. The host registry is never opened for writing, never created, and never quarantined — the test suite verifies it stays byte-identical (content and mtime) across full dev sessions. `sandbox setup` writes only inside `.sandbox/` by construction, and `sandbox clean` removes only `.sandbox/` itself.
+
+The sandbox infrastructure is the fastest way to exercise `ck` by hand — every command below runs against the mock environment, and your real registry (`~/.config/ck/`) and projects stay untouched. Use it before submitting changes to reproduce dashboard layouts, registry flows, and edge cases (missing projects, task-ID gaps, history rotation) in seconds.
+
+Isolated commands use the explicit form `CK_SANDBOX=1 ./ck-dev <command>`: the env var is what activates write interception, so it also works with any other entrypoint (`./ck`, an installed `ck`) and inside scripts/CI, while `./ck-dev` remains the convenient wrapper for interactive use.
+
+```bash
+# 1. Build the disposable mock environment (.sandbox/)
+./ck-dev sandbox setup
+
+# 2. Global view — registered + missing projects at a glance
+CK_SANDBOX=1 ./ck-dev list -g
+# | alpha                      | [3] [>] Active focus task | 2/6 (33.3%) | 1h ago |
+# | [MISSING] orphaned-deleted | n/a                       | missing     | 12d ago |
+
+# 3. Work inside a fixture project — commands edit fixtures IN PLACE
+#    (they already live in .sandbox/, so no further redirection happens)
+cd .sandbox/projects/alpha
+CK_SANDBOX=1 ../../ck-dev st        # progress + triad, gap shown as "gaps: 4-6"
+CK_SANDBOX=1 ../../ck-dev done 4    # complete a pending task
+CK_SANDBOX=1 ../../ck-dev start 6   # move the focus marker
+CK_SANDBOX=1 ../../ck-dev add "fresh idea from manual testing"
+cd ../../..
+
+# 4. Registry flows — mutate the MOCK registry only
+CK_SANDBOX=1 ./ck-dev prune                     # drops orphaned-deleted
+CK_SANDBOX=1 ./ck-dev register --path .sandbox/projects/beta
+CK_SANDBOX=1 ./ck-dev list -g                   # beta now on the dashboard
+
+# 5. Non-ck behavior — gamma has no .ck/ (empty status, no crash)
+cd .sandbox/projects/gamma
+CK_SANDBOX=1 ../../ck-dev st
+cd ../../..
+
+# 6. Reset the workspace — .sandbox/ is gone, fixtures rebuildable anytime
+./ck-dev sandbox clean
+```
+
+What each fixture is for:
+
+| Fixture | State | Manual-test targets |
+| --- | --- | --- |
+| `alpha` | registered, active | dashboards, focus triad, gap detection (`5` is missing), bulk `history.log` (120 entries), archive inspection, rotation limit boundary |
+| `beta` | initialized, **not** registered | `ck register` without `--register`, standalone registration |
+| `gamma` | plain directory, no `.ck/` | CLI behavior in non-ck environments |
+| `orphaned-deleted` | registry-only, no folder | `[MISSING]` tags, `ck prune` |
+
+Hard guarantees while testing: setup/clean write only inside `.sandbox/`; dev-mode writes (including lock files and rotation archives) never leave the sandbox; `ck-dev save` skips the Git-commit phase; `ck-dev update` refuses remote fetches. When in doubt, verify with `CK_DEBUG=1` — every interception is traced to `stderr` and `.sandbox/dev.log`.
 
 ### Debug Logging (`CK_DEBUG=1` / `-v` / `--verbose`)
 
@@ -527,6 +578,57 @@ CK_SANDBOX=1 ./ck-dev list -g   # → alpha + [MISSING] orphaned-deleted
 CK_SANDBOX=1 ./ck-dev prune     # → удаляет orphaned-deleted (только в песочнице)
 ./ck-dev sandbox clean          # → сброс рабочего окружения
 ```
+
+### Ручное тестирование (для контрибьюторов)
+
+**Безопасность прежде всего — нулевое воздействие на хост.** С момента начала песочной сессии каждое взаимодействие с глобальным реестром — мутации `register` / `unregister` / `prune` и чтения дашбордов — перенаправляется из `~/.config/ck/projects.json` вашей машины в `.sandbox/config/projects.json`, а каждая запись проекта (`PLAN.md`, `state.json`, `HISTORY.md`, lock-файлы, архивы ротации) попадает в `.sandbox/projects/`. Реестр хоста никогда не открывается на запись, не создаётся и не помещается в карантин — тестовый набор проверяет, что он остаётся побайтово идентичным (содержимое и mtime) на протяжении полных dev-сессий. `sandbox setup` пишет только внутри `.sandbox/` по построению, а `sandbox clean` удаляет только сам `.sandbox/`.
+
+Инфраструктура песочницы — самый быстрый способ опробовать `ck` вручную: все команды ниже работают с окружением-макетом, а реальный реестр (`~/.config/ck/`) и ваши проекты остаются нетронутыми. Используйте её перед отправкой изменений, чтобы за секунды воспроизводить макеты дашбордов, сценарии реестра и граничные случаи (отсутствующие проекты, пропуски в ID задач, ротацию истории).
+
+Изолированные команды используют явную форму `CK_SANDBOX=1 ./ck-dev <команда>`: именно переменная окружения активирует перехват записей, поэтому она работает с любой точкой входа (`./ck`, установленным `ck`) и внутри скриптов/CI, а `./ck-dev` остаётся удобной обёрткой для интерактивной работы.
+
+```bash
+# 1. Собираем одноразовое окружение-макет (.sandbox/)
+./ck-dev sandbox setup
+
+# 2. Глобальный обзор — зарегистрированные и отсутствующие проекты
+CK_SANDBOX=1 ./ck-dev list -g
+# | alpha                      | [3] [>] Active focus task | 2/6 (33.3%) | 1h ago |
+# | [MISSING] orphaned-deleted | n/a                       | missing     | 12d ago |
+
+# 3. Работа внутри фикстурного проекта — команды правят фикстуры НА МЕСТЕ
+#    (они уже внутри .sandbox/, дальнейшего перенаправления не происходит)
+cd .sandbox/projects/alpha
+CK_SANDBOX=1 ../../ck-dev st        # прогресс + триада, пропуск виден как "gaps: 4-6"
+CK_SANDBOX=1 ../../ck-dev done 4    # закрыть ожидающую задачу
+CK_SANDBOX=1 ../../ck-dev start 6   # переместить маркер фокуса
+CK_SANDBOX=1 ../../ck-dev add "свежая идея из ручного теста"
+cd ../../..
+
+# 4. Сценарии реестра — меняется ТОЛЬКО макет реестра
+CK_SANDBOX=1 ./ck-dev prune                     # удаляет orphaned-deleted
+CK_SANDBOX=1 ./ck-dev register --path .sandbox/projects/beta
+CK_SANDBOX=1 ./ck-dev list -g                   # beta теперь на дашборде
+
+# 5. Не-ck поведение — в gamma нет .ck/ (пустой статус, без падений)
+cd .sandbox/projects/gamma
+CK_SANDBOX=1 ../../ck-dev st
+cd ../../..
+
+# 6. Сброс рабочего окружения — .sandbox/ исчезает, фикстуры пересобираемы в любой момент
+./ck-dev sandbox clean
+```
+
+Назначение каждой фикстуры:
+
+| Фикстура | Состояние | Что проверять вручную |
+| --- | --- | --- |
+| `alpha` | зарегистрирован, активен | дашборды, триаду фокуса, детектор пропусков (пропущена `5`), объёмный `history.log` (120 записей), инспекцию архивов, границу лимита ротации |
+| `beta` | инициализирован, **не** зарегистрирован | `ck register` без `--register`, standalone-регистрацию |
+| `gamma` | обычный каталог без `.ck/` | поведение CLI в не-ck окружениях |
+| `orphaned-deleted` | только в реестре, без каталога | теги `[MISSING]`, `ck prune` |
+
+Жёсткие гарантии во время тестирования: setup/clean пишут только внутри `.sandbox/`; dev-записи (включая lock-файлы и архивы ротации) никогда не покидают песочницу; `ck-dev save` пропускает фазу Git-коммита; `ck-dev update` отказывается от обращений к удалённому репозиторию. Если есть сомнения — проверьте с `CK_DEBUG=1`: каждый перехват трассируется в `stderr` и `.sandbox/dev.log`.
 
 ### Отладочное логирование (`CK_DEBUG=1` / `-v` / `--verbose`)
 
