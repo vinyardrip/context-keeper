@@ -41,7 +41,10 @@ Local (current project):
   st --all                   Also print the full PLAN.md
   list                       Print task list to STDOUT
   init                       Initialize .ck/ locally (use --register to register globally)
-  start <ID>                 Mark task ID as focused ([>])
+  start <ID>                 Mark task ID as focused ([>]); 0 resets focus
+                             (a noted task that loses focus is archived to
+                             HISTORY.md and shown as Unfocused / Paused
+                             Context; a noteless one gets a soft hint)
   done <ID|Range>            Mark task(s) as done ([x])
   add <text>                 Insert a new open task before ## Completed
   note <text>                Attach/update a process note on the active task
@@ -189,8 +192,10 @@ def build_parser() -> "argparse.ArgumentParser":
 
     sub.add_parser("list", help="Print the task list to STDOUT")
 
-    p_start = sub.add_parser("start", help="Focus a task")
-    p_start.add_argument("task_id", type=int, help="Task ID to focus")
+    p_start = sub.add_parser("start", help="Focus a task (0 resets focus)")
+    p_start.add_argument(
+        "task_id", type=int,
+        help="Task ID to focus; 0 resets focus (demoted task is reported)")
 
     p_done = sub.add_parser("done", help="Mark task(s) done")
     p_done.add_argument("spec", help="Task ID, range, or list (e.g. 3, 2-4)")
@@ -344,6 +349,29 @@ def _reject_unknown_flags(cmd: str, rest: List[str]) -> Optional[List[str]]:
     return out
 
 
+def _print_focus_result(result) -> None:
+    """Print ``ck start`` output: the new focus, plus the Unfocused /
+    Paused Context handling for the task that lost it.
+
+    - The demoted task carries a note -> its scratchpad was archived
+      to HISTORY.md and a paused-context block is printed.
+    - The demoted task had NO note -> a soft hint nudges the user to
+      attach one before switching (the task stays safely open).
+    """
+    if result.task_id > 0:
+        print(f"-> Focused [{result.task_id}]: {result.title}")
+    else:
+        print("[ok] Focus reset.")
+    if result.demoted_id is not None:
+        if result.had_note:
+            print(f"[i] Task [{result.demoted_id}] {result.demoted_title} "
+                  "lost focus — moved to Unfocused / Paused Context "
+                  "(note preserved; archived by `ck done`).")
+        else:
+            print(f"[!] Task #{result.demoted_id} lost focus without a "
+                  "note. Attach one via `ck note <text>`.")
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     """CLI entry point. Returns a process exit code."""
     raw = list(sys.argv[1:] if argv is None else argv)
@@ -434,7 +462,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(ck.info())
         elif args.command == "start":
             result = ck.start(args.task_id)
-            print(f"-> Focused [{result.task_id}]: {result.title}")
+            _print_focus_result(result)
         elif args.command == "done":
             ids = ck.done(args.spec)
             print(f"[ok] Marked done: {', '.join(map(str, ids))}")
@@ -600,7 +628,7 @@ def _legacy_dispatch(raw: List[str]) -> int:
                 _print_error(f"ERROR: Invalid task ID: {rest[0]!r}")
                 return 2
             result = ck.start(tid)
-            print(f"-> Focused [{result.task_id}]: {result.title}")
+            _print_focus_result(result)
         elif cmd == "done":
             if not rest:
                 print("Usage: ck done <ID|range|list>")

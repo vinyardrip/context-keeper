@@ -210,7 +210,7 @@ class TestNoteDisplay(_NoteHarness):
                 ckui, "get_palette", return_value=ckui.Palette(True)):
             out = ck.status()
         self.assertIn(
-            f"{ckui.BOLD}{ckui.CYAN}    * Note: checking API mapping"
+            f"{ckui.BOLD}{ckui.CYAN}       * Note: checking API mapping"
             f"{ckui.RESET}",
             out,
         )
@@ -258,6 +258,180 @@ class TestNotePurgeOnDone(_NoteHarness):
         ck = self._ck()
         ck.done("3")
         self.assertFalse(ck.state_file.exists())
+
+
+# ---------------------------------------------------------------------------
+# Unfocused / Paused Context: focus-loss handling with/without a note
+# ---------------------------------------------------------------------------
+
+
+class TestUnfocusedPausedContext(_NoteHarness):
+    """Focus-loss handling per spec:
+
+    - A noted open task that loses focus (``ck start <NEW_ID>`` or a
+      reset) renders in the dedicated "Unfocused / Paused Context"
+      block of ``ck st`` / ``ck dashboard -v`` with its note intact.
+    - A noteless demotion lets the CLI emit the soft attach-a-note
+      hint.
+    - ``ck done`` archives the note into HISTORY.md and clears it.
+    """
+
+    def _run_cli(self, argv, cwd: Path) -> str:
+        buf = io.StringIO()
+        orig_cwd = Path.cwd()
+        os.chdir(cwd)
+        try:
+            with _clean_env(), redirect_stdout(buf):
+                code = main(argv)
+            self.assertEqual(code, 0, f"exit {code} for {argv!r}")
+        finally:
+            os.chdir(orig_cwd)
+        return buf.getvalue()
+
+    def test_switch_moves_noted_task_to_paused_block(self):
+        ck = self._ck()
+        ck.set_note("paused mid-refactor")
+        ck.start(3)
+        out = ck.status()
+        self.assertIn("Unfocused / Paused Context:", out)
+        self.assertIn("- [2] implement API mapping", out)
+        # The note travels with the paused task and appears exactly
+        # once — NOT duplicated under the new Focus.
+        self.assertEqual(out.count("* Note: paused mid-refactor"), 1)
+        lines = out.splitlines()
+        paused_idx = next(
+            i for i, l in enumerate(lines)
+            if "Unfocused / Paused Context:" in l)
+        note_idx = next(
+            i for i, l in enumerate(lines)
+            if "* Note: paused mid-refactor" in l)
+        self.assertGreater(note_idx, paused_idx)
+        self.assertIn("- [2] implement API mapping", lines[paused_idx + 1])
+
+    def test_switch_without_note_prints_soft_hint(self):
+        ck = self._ck()
+        out = self._run_cli(["start", "3"], ck.root)
+        self.assertIn("-> Focused [3]: write docs", out)
+        self.assertIn(
+            "[!] Task #2 lost focus without a note. "
+            "Attach one via `ck note <text>`.", out)
+        # A noteless demotion does NOT claim a paused block.
+        self.assertNotIn("Unfocused / Paused Context:", out)
+
+    def test_switch_with_note_reports_paused_block_via_cli(self):
+        ck = self._ck()
+        ck.set_note("half done")
+        out = self._run_cli(["start", "3"], ck.root)
+        self.assertIn(
+            "[i] Task [2] implement API mapping lost focus — moved to "
+            "Unfocused / Paused Context (note preserved; archived by "
+            "`ck done`).", out)
+        self.assertNotIn("lost focus without a note", out)
+
+    def test_done_archives_note_into_history_and_clears_state(self):
+        ck = self._ck()
+        ck.set_note("finish the mapping")
+        ck.done("2")
+        self.assertIsNone(ck.get_note())
+        self.assertNotIn("active_task", self._read_state_file(ck))
+        history = ck.history_file.read_text(encoding="utf-8")
+        self.assertIn("[2] implement API mapping", history)
+        self.assertIn("- finish the mapping", history)
+
+    def test_done_of_other_task_keeps_note_and_history_untouched(self):
+        ck = self._ck()
+        ck.set_note("still working")
+        before = (
+            ck.history_file.read_text(encoding="utf-8")
+            if ck.history_file.exists() else ""
+        )
+        ck.done("3")
+        self.assertEqual(ck.get_note()["note"], "still working")
+        after = (
+            ck.history_file.read_text(encoding="utf-8")
+            if ck.history_file.exists() else ""
+        )
+        self.assertEqual(before, after)
+
+    def test_noteless_done_writes_no_history(self):
+        ck = self._ck()
+        ck.done("2")
+        self.assertFalse(ck.state_file.exists())
+        self.assertFalse(ck.history_file.exists())
+
+    def test_focus_reset_keeps_note_visible(self):
+        """After ``ck start 0`` the demoted task is the auto-resolved
+        Next candidate, so its note renders inline under Next — the
+        dedicated paused block is reserved for tasks superseded by
+        another explicit focus (nothing is buried either way)."""
+        ck = self._ck()
+        ck.set_note("wip")
+        result = ck.start(0)
+        self.assertEqual(result.task_id, 0)
+        self.assertEqual(result.demoted_id, 2)
+        self.assertTrue(result.had_note)
+        self.assertEqual(ck._load_plan().focused, [])
+        out = ck.status()
+        self.assertIn("[>] Next:", out)
+        self.assertIn("* Note: wip", out)
+        self.assertNotIn("Unfocused / Paused Context:", out)
+
+    def test_reset_without_focus_is_noop(self):
+        # An UNFOCUSED plan: nothing to demote, nothing reported.
+        ck = self._ck("# P\n- [ ] alpha\n- [ ] beta\n")
+        result = ck.start(0)
+        self.assertIsNone(result.demoted_id)
+        self.assertFalse(result.had_note)
+
+    def test_reset_of_focused_task_reports_demotion(self):
+        ck = self._ck()
+        result = ck.start(0)
+        self.assertEqual(result.demoted_id, 2)
+        self.assertFalse(result.had_note)
+
+    def test_start_of_focused_task_does_not_demote(self):
+        ck = self._ck()
+        ck.set_note("wip")
+        result = ck.start(2)  # re-focus the already-focused task
+        self.assertIsNone(result.demoted_id)
+        self.assertEqual(ck.get_note()["note"], "wip")
+
+    def test_dashboard_verbose_shows_paused_block_for_registered_project(
+            self):
+        from cklib import registry as ckregistry
+        from cklib.core import _render_dashboard
+        from cklib.parser import parse_plan_file
+
+        ck = self._ck()
+        ck.set_note("paused mid-refactor")
+        ck.start(3)
+        ckregistry.register_project(ck.root, name="project")
+        out = _render_dashboard(
+            ck,
+            list_projects=ckregistry.list_projects,
+            parse_plan_file=parse_plan_file,
+            verbose=True,
+        )
+        self.assertIn("Unfocused / Paused Context:", out)
+        self.assertIn("- [2] implement API mapping", out)
+        self.assertIn("* Note: paused mid-refactor", out)
+
+    def test_dashboard_verbose_shows_inline_note_under_focus(self):
+        from cklib import registry as ckregistry
+        from cklib.core import _render_dashboard
+        from cklib.parser import parse_plan_file
+
+        ck = self._ck()
+        ck.set_note("checking API mapping")  # note stays on the focus
+        ckregistry.register_project(ck.root, name="project")
+        out = _render_dashboard(
+            ck,
+            list_projects=ckregistry.list_projects,
+            parse_plan_file=parse_plan_file,
+            verbose=True,
+        )
+        self.assertIn("* Note: checking API mapping", out)
+        self.assertNotIn("Unfocused / Paused Context:", out)
 
 
 # ---------------------------------------------------------------------------

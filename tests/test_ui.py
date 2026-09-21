@@ -598,7 +598,7 @@ class TestStatusAppliesColorConfig(unittest.TestCase):
         self.assertIn(
             f"{ui.BOLD}{ui.YELLOW}[2] focus task{ui.RESET}", out)
         self.assertIn(
-            f"{ui.BOLD}{ui.CYAN}    * Note: note text{ui.RESET}", out)
+            f"{ui.BOLD}{ui.CYAN}       * Note: note text{ui.RESET}", out)
 
     def test_text_cascade_colors_hints_and_borders(self):
         ck = self._project({"colors": {"text": "cyan"}})
