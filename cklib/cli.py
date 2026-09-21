@@ -51,6 +51,9 @@ Local (current project):
   add <text>                 Insert a new open task before ## Completed
   note <text>                Attach/update a process note on the active task
                              (shown in `ck st`, cleared by `ck done`)
+  notes                      List all active process notes: the focused
+                             task's note plus every paused task's bound note
+                             ([i] No active process notes found. when none)
   save                       Two-step save: optional note, then local commit
   edit                       Open PLAN.md in your editor
   log                        Open HISTORY.md in your editor
@@ -131,7 +134,8 @@ _NOTIFIER_COMMANDS = frozenset({"done", "save"})
 # — all three groups stay usable even when the working directory is
 # dangling (the keeper is rootless there, not broken).
 _LOCAL_ONLY_COMMANDS = frozenset({
-    "init", "start", "done", "add", "note", "save", "edit", "log",
+    "init", "start", "done", "add", "note", "notes", "save", "edit",
+    "log",
 })
 
 # User-facing message shown when a local command runs from a working
@@ -215,6 +219,9 @@ def build_parser() -> "argparse.ArgumentParser":
         "note", help="Attach a process note to the active task")
     p_note.add_argument("text", nargs="+", help="Note text")
 
+    sub.add_parser(
+        "notes", help="List all active process notes (focus + paused)")
+
     sub.add_parser("save", help="Two-step save + local commit")
     sub.add_parser("edit", help="Open PLAN.md in $EDITOR")
     sub.add_parser("log", help="Open HISTORY.md in $EDITOR")
@@ -282,8 +289,8 @@ def build_parser() -> "argparse.ArgumentParser":
 # Legacy positional parser (for backward compatibility with old ck
 # invocations like `ck add foo bar`).
 _LEGACY_CHOICES = (
-    "init", "st", "dashboard", "start", "done", "add", "note", "save",
-    "edit", "log", "install", "uninstall", "update", "help",
+    "init", "st", "dashboard", "start", "done", "add", "note", "notes",
+    "save", "edit", "log", "install", "uninstall", "update", "help",
     "list", "register", "unregister", "prune", "info",
     "dev", "sandbox", "ck-clean",
 )
@@ -309,6 +316,7 @@ _LEGACY_FLAGS: dict[str, frozenset] = {
     "done": frozenset(),
     "add": frozenset(),
     "note": frozenset(),
+    "notes": frozenset(),
     "save": frozenset(),
     "edit": frozenset(),
     "log": frozenset(),
@@ -513,6 +521,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         elif args.command == "info":
             print(ck.info())
         elif args.command == "start":
+            # IDEMPOTENCY: re-focusing the already-focused task is a
+            # clean no-op — no note prompt, no plan mutation.
+            if args.task_id > 0 and ck.is_already_focused(args.task_id):
+                print(f"Task #{args.task_id} is already focused.")
+                return 0
             _prompt_note_before_switch(
                 ck,
                 no_input=getattr(args, "no_input", False),
@@ -532,6 +545,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             text = " ".join(args.text)
             info = ck.set_note(text)
             print(f"* Note saved for [{info['id']}]: {info['note']}")
+        elif args.command == "notes":
+            print(ck.notes())
         elif args.command == "save":
             ck.save()
             _maybe_notify(ck)
@@ -695,6 +710,11 @@ def _legacy_dispatch(raw: List[str]) -> int:
                 _print_error(
                     f"ERROR: Invalid task ID: {id_tokens[0]!r}")
                 return 2
+            # IDEMPOTENCY: re-focusing the already-focused task is
+            # a clean no-op — no note prompt, no plan mutation.
+            if tid > 0 and ck.is_already_focused(tid):
+                print(f"Task #{tid} is already focused.")
+                return 0
             _prompt_note_before_switch(
                 ck, no_input=no_input, assume_yes=assume_yes)
             result = ck.start(tid)
@@ -721,6 +741,8 @@ def _legacy_dispatch(raw: List[str]) -> int:
             text = " ".join(rest)
             info = ck.set_note(text)
             print(f"* Note saved for [{info['id']}]: {info['note']}")
+        elif cmd == "notes":
+            print(ck.notes())
         elif cmd == "save":
             ck.save()
             if notifiable:
