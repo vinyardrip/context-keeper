@@ -37,14 +37,27 @@ def _isolated_sandbox_root(tmp_path):
     Tests that explicitly verify the DEFAULT anchoring pop the
     variable themselves; that is a pure path computation and never
     touches the filesystem.
+
+    DEV-TOGGLE ISOLATION: ambient ``CK_SANDBOX``/``CK_DEV`` exported
+    in the developer's shell would silently activate dev mode inside
+    tests (sandboxed writes then land in the wrong tree and
+    subprocess e2e tests inherit the flags). They are pinned OFF for
+    every test the same way ``CK_SANDBOX_ROOT`` is pinned; tests
+    that exercise dev mode set them explicitly.
     """
     anchor = tmp_path / ".sandbox"
-    saved = os.environ.get("CK_SANDBOX_ROOT")
+    saved = {
+        k: os.environ.get(k)
+        for k in ("CK_SANDBOX_ROOT", "CK_SANDBOX", "CK_DEV")
+    }
     os.environ["CK_SANDBOX_ROOT"] = str(anchor)
+    os.environ.pop("CK_SANDBOX", None)
+    os.environ.pop("CK_DEV", None)
     try:
         yield anchor
     finally:
-        if saved is None:
-            os.environ.pop("CK_SANDBOX_ROOT", None)
-        else:
-            os.environ["CK_SANDBOX_ROOT"] = saved
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
