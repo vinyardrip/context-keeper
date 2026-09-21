@@ -1,35 +1,197 @@
 #!/usr/bin/env python3
 """ck-dev — run Context Keeper in isolated sandbox mode.
 
-Every write is redirected into ``<repo_root>/.sandbox/`` — the real
-project files and ``~/.config/ck/`` remain strictly read-only. Reads
-still come from the real state, so dashboards and status reflect
-production while mutations land in the sandbox.
+Resolves the repository root DYNAMICALLY via
+``git rev-parse --show-toplevel`` from THIS SCRIPT's location (so the
+anchor is the git checkout that provides ``cklib`` — never the
+caller's ``$PWD``), then forces the sandbox context for every
+subcommand:
 
-Thin wrapper: sets ``CK_SANDBOX=1`` and delegates to the regular CLI
-runner. Run as:
+- ``CK_SANDBOX=1`` — dev-mode write interception on;
+- ``CK_SANDBOX_ROOT=$REPO_ROOT/.sandbox`` — every sandbox operation
+  (``.sandbox/`` creation, registry reads/writes, project mirrors)
+  references the checkout root no matter how deeply nested the
+  invocation directory is (e.g. ``.sandbox/projects/beta/``);
+- ``PYTHONPATH=$REPO_ROOT[:…]`` — every CHILD process of the session
+  (nested ``ck`` calls, editor subprocesses, spawned tooling) imports
+  ``cklib`` from THIS checkout, never a stale site-packages copy;
+- global-config writes are intercepted to
+  ``$REPO_ROOT/.sandbox/config/projects.json`` (reads prefer the
+  sandbox copy once it exists, mirroring the production registry
+  otherwise).
 
-    ./ck-dev <command>
+Reads still come from the real state, so dashboards and status
+reflect production while mutations land in the sandbox.
+
+Subcommands are delegated verbatim: ``ck-dev st``, ``ck-dev add ...``,
+``ck-dev dashboard``, ... Run as:
+
+    ./ck-dev <command>            # from the checkout
     python ck-dev <command>
 
+Dev mode has NO global installation: ``ck install --dev`` is
+deprecated and installs nothing — dev execution happens strictly via
+local binary execution of ``./ck-dev`` from the repository root (or
+sandbox environment).
+
+Session management (this wrapper itself):
+
+    ck-dev            enter sandbox mode: ensures ``.sandbox/`` exists
+                      (running ``sandbox setup`` when missing), resolves
+                      the ACTIVE BINARY dynamically at runtime
+                      (``command -v ck`` equivalent), prints the yellow
+                      warning banner (carrying that path) and the Global
+                      Dashboard (mock projects visible out-of-the-box),
+                      then opens an INTERACTIVE SUBSHELL ($SHELL with
+                      CK_SANDBOX=1, PYTHONPATH pinned to the checkout and
+                      a `                      (sandbox) ` prompt marker). Typing `exit` (or
+                      pressing Ctrl+D) INSIDE the subshell returns to
+                      production; the EXIT TRAP then resolves the global
+                      ``ck`` binary dynamically and prints the single
+                      clean confirmation line. Piped / non-interactive
+                      invocations print the banner + dashboard and
+                      return (no subshell); re-running bare `ck-dev`
+                      inside a session warns instead of nesting
+                      (matryoshka guard).
+
+For every delegated subcommand the active sandbox project is exported
+as ``CK_SANDBOX_ACTIVE`` so nested plain-``ck`` calls banner against
+the same project without re-reading the session state.
+
 Cleanup: ``ck-clean`` or ``ck dev clean`` removes ``.sandbox/``.
+
+GUARDRAIL: invoked from a directory tree that is NOT a git
+repository (e.g. a pip site-packages install), ck-dev exits with a
+clean error — creating ``.sandbox/`` next to installed packages
+would be a bug, not a feature.
 """
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
-if str(_HERE) not in sys.path:
-    sys.path.insert(0, str(_HERE))
 
-# Sandbox mode is the whole point of this entrypoint. (Detection also
-# recognises the argv[0] name, but the env var makes the intent
-# explicit and survives nested interpreter re-invocations.)
-os.environ["CK_SANDBOX"] = "1"
 
-from cklib.cli import main  # noqa: E402
+def _git_repo_root(start: Path) -> "Path | None":
+    """``git rev-parse --show-toplevel`` for the directory holding
+    this script.
+
+    Returns None when git is unavailable, the probe fails, or the
+    directory lies outside any work tree. Read-only: a single
+    subprocess, no repository mutation.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=str(start), capture_output=True, text=True,
+            timeout=15, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    top = result.stdout.strip()
+    if not top or top.startswith("-"):
+        return None
+    return Path(top)
+
+
+def main() -> int:
+    # Resolve the checkout root from the SCRIPT location. This is
+    # deliberately $PWD-independent: the sandbox belongs to the
+    # context-keeper checkout (where cklib and .sandbox live), not to
+    # whatever project directory the user happens to be in.
+    repo_root = _git_repo_root(_HERE)
+    if repo_root is None:
+        print(
+            "ERROR: ck-dev must run from a git checkout of "
+            "context-keeper (git rev-parse --show-toplevel failed "
+            f"for {_HERE}). Without a checkout anchor the .sandbox/ "
+            "tree could be created next to installed packages.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # POSITION-0 source pinning (see ck launcher): a later sys.path
+    # entry would let an earlier cklib (PYTHONPATH, site-packages)
+    # shadow the checkout's sources.
+    repo_root_str = str(repo_root)
+    if repo_root_str in sys.path:
+        sys.path.remove(repo_root_str)
+    sys.path.insert(0, repo_root_str)
+
+    # CLI ENVIRONMENT PROPAGATION: export PYTHONPATH so every CHILD
+    # process of a ck-dev session (nested `ck` calls, editor
+    # subprocesses, spawned tooling) imports cklib from THIS checkout
+    # — never a stale site-packages copy. Prepend to preserve any
+    # user-provided entries; the checkout root still wins the import
+    # race by position.
+    existing_pp = os.environ.get("PYTHONPATH", "")
+    pp_parts = [p for p in existing_pp.split(os.pathsep) if p]
+    if repo_root_str not in pp_parts:
+        os.environ["PYTHONPATH"] = os.pathsep.join(
+            [repo_root_str, *pp_parts])
+
+    try:
+        from cklib.sandbox import SANDBOX_DIR_NAME
+    except ImportError as e:
+        print(
+            f"ERROR: cannot import cklib from {_HERE}: {e}",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Sandbox anchor (see module docstring): honored by
+    # cklib.sandbox.sandbox_root() and keeps every sandbox operation
+    # pinned to $REPO_ROOT/.sandbox. NOTE: CK_SANDBOX itself is NOT
+    # forced here — the bare-entry path must see the INHERITED
+    # environment for the matryoshka guard, and enter_sandbox
+    # activates dev mode itself. The forced toggle below applies to
+    # delegated subcommands only.
+    os.environ["CK_SANDBOX_ROOT"] = str(repo_root / SANDBOX_DIR_NAME)
+
+    from cklib.cli import main as cli_main  # noqa: E402
+
+    args = sys.argv[1:]
+    if not args:
+        # Bare `ck-dev`: explicit sandbox ENTRY. Sets up .sandbox/ if
+        # needed, resolves the active project, persists the session,
+        # prints the warning banner (with the dynamically resolved
+        # active binary path) + dashboard, then — on interactive
+        # terminals — runs the SESSION SUBSHELL ($SHELL with
+        # CK_SANDBOX=1 and the (sandbox) prompt marker). The
+        # matryoshka guard inside detects an already-active session
+        # (inherited CK_SANDBOX) and prints the warning + dashboard
+        # instead of nesting. Typing `exit` (or Ctrl+D) INSIDE the
+        # subshell returns to production cleanly.
+        from cklib.sandbox import enter_and_spawn  # noqa: E402
+
+        return enter_and_spawn()
+    if args[0] == "exit":
+        # SAFEGUARD: `ck-dev exit` cannot close the ACTIVE session
+        # subshell (that would be a no-op or, worse, launch a
+        # replacement shell). Warn and fail WITHOUT launching
+        # anything; the real exit is typing `exit` / Ctrl+D inside
+        # the subshell, whose trap resolves the production binary
+        # and prints the confirmation.
+        from cklib.sandbox import reject_dev_exit  # noqa: E402
+
+        return reject_dev_exit()
+    # Delegated subcommand: forced sandbox context (write
+    # interception) for the CLI process.
+    os.environ["CK_SANDBOX"] = "1"
+    # Delegated subcommand: export the active project (when a session
+    # exists) so nested `ck` calls banner against the same project.
+    from cklib.sandbox import active_sandbox_project  # noqa: E402
+
+    active = active_sandbox_project()
+    if active is not None:
+        os.environ["CK_SANDBOX_ACTIVE"] = str(active)
+    return cli_main(args)
+
 
 if __name__ == "__main__":
     sys.exit(main())

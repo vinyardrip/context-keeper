@@ -8,9 +8,22 @@ Covers:
   guard (link removed, target untouched), error paths.
 - ``ck-clean`` execution: the ``ck dev clean`` dispatch, the console
   entrypoint, and the executable wrapper script.
+
+ISOLATION: every filesystem operation in this module targets the
+per-test sandbox anchor pinned by the conftest autouse fixture
+(``CK_SANDBOX_ROOT`` under the OS temp directory) — the repository's
+own ``.sandbox/`` (the manual dev environment) is never created,
+modified, or deleted here. The default-anchoring test below is a
+pure path computation with the override cleared.
 """
 
 from __future__ import annotations
+
+# Filesystem isolation safety net: importing the tests package
+# pins CK_SANDBOX_ROOT to an OS-temp directory (see tests/__init__),
+# so no test in this module can create or wipe the repository's own
+# .sandbox/ — under ANY runner, including bare `unittest discover`.
+import tests  # noqa: F401
 
 import io
 import os
@@ -20,9 +33,11 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
+from unittest import mock
 
 from cklib import sandbox
 from cklib.sandbox import (
+    SANDBOX_ROOT_ENV,
     clean_sandbox,
     ensure_sandbox_dir,
     is_within_sandbox,
@@ -41,7 +56,22 @@ class TestSandboxRoot(unittest.TestCase):
     """The sandbox root is anchored at the repository root."""
 
     def test_sandbox_root_is_repo_root_child(self):
-        self.assertEqual(sandbox_root(), REPO_ROOT / ".sandbox")
+        # DEFAULT anchoring (no override): pure path computation,
+        # no filesystem access. The conftest fixture pins the
+        # override for every test, so clear it here to probe the
+        # default.
+        env = {k: v for k, v in os.environ.items()
+               if k != SANDBOX_ROOT_ENV}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(sandbox_root(), REPO_ROOT / ".sandbox")
+
+    def test_override_pins_anchor_outside_repo(self):
+        # The conftest fixture's anchor: absolute, under the OS temp
+        # directory, never the repository's .sandbox/.
+        root = sandbox_root()
+        self.assertTrue(root.is_absolute())
+        self.assertNotEqual(root, REPO_ROOT / ".sandbox")
+        self.assertNotIn(str(REPO_ROOT), str(root))
 
     def test_sandbox_root_is_absolute_and_lexical(self):
         root = sandbox_root()
@@ -250,7 +280,7 @@ class TestCleanViaCli(unittest.TestCase):
         with redirect_stdout(buf):
             code = cli._run_dev_command(None)
         self.assertEqual(code, 2)
-        self.assertIn("Usage: ck dev clean", buf.getvalue())
+        self.assertIn("Usage: ck dev <setup|clean>", buf.getvalue())
 
     def test_dev_unknown_action_prints_usage(self):
         buf = io.StringIO()
@@ -276,14 +306,28 @@ class TestCleanViaCli(unittest.TestCase):
         code = cli.main(["dev"])
         self.assertEqual(code, 2)
 
+    def _run_ck_clean(self) -> "subprocess.CompletedProcess":
+        """Run the real ./ck-clean wrapper as a subprocess.
+
+        The child env explicitly carries the isolated sandbox anchor
+        (pinned by the conftest fixture), so the wrapper removes the
+        per-test temp sandbox — never the repository's ``.sandbox/``.
+        """
+        env = {
+            k: v for k, v in os.environ.items()
+            if k not in ("CK_SANDBOX", "CK_DEV", "CK_DEBUG")
+        }
+        env["CK_SANDBOX_ROOT"] = str(sandbox_root())
+        return subprocess.run(
+            [sys.executable, str(REPO_ROOT / "ck-clean")],
+            capture_output=True, text=True, timeout=30, env=env,
+        )
+
     def test_ck_clean_executable_script(self):
         """The ./ck-clean wrapper runs end-to-end as a subprocess."""
         ensure_sandbox_dir()
         (sandbox_root() / "dev.log").write_text("x", encoding="utf-8")
-        result = subprocess.run(
-            [sys.executable, str(REPO_ROOT / "ck-clean")],
-            capture_output=True, text=True, timeout=30,
-        )
+        result = self._run_ck_clean()
         self.assertEqual(result.returncode, 0)
         self.assertIn(
             "Sandbox environment cleared successfully.", result.stdout
@@ -292,10 +336,7 @@ class TestCleanViaCli(unittest.TestCase):
 
     def test_ck_clean_executable_when_missing(self):
         clean_sandbox(quiet=True)
-        result = subprocess.run(
-            [sys.executable, str(REPO_ROOT / "ck-clean")],
-            capture_output=True, text=True, timeout=30,
-        )
+        result = self._run_ck_clean()
         self.assertEqual(result.returncode, 0)
         self.assertIn("nothing to clean", result.stdout)
 

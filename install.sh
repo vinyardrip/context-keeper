@@ -2,20 +2,28 @@
 # install.sh — install / check / uninstall Context Keeper (ck).
 #
 # Usage:
-#   ./install.sh              # default: symlink ck into ~/.local/bin
+#   ./install.sh              # default: physical-copy ck into ~/.local/bin
 #   ./install.sh check        # verify dependencies
-#   ./install.sh uninstall    # remove the symlink
+#   ./install.sh uninstall    # remove the installation
 #
-# This script does NOT require sudo. It targets ~/.local/bin/ck
-# so users without root access can install the CLI. The
-# corresponding uninstall step removes the symlink only.
+# This script does NOT require sudo. It installs a PHYSICAL COPY of the
+# launcher at ${USER_BIN:-~/.local/bin}/ck (a regular executable file,
+# NEVER a symlink) plus a static snapshot of the cklib package at
+# ~/.local/share/ck/cklib, so the installed command stays decoupled
+# from this checkout until the install (or `ck update`) is re-run.
+# The uninstall step removes the copy, the snapshot, and any legacy
+# ~/.local/bin/ck-dev dev entrypoint.
 
 set -euo pipefail
 
 # Resolve the directory holding this script.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CK_TARGET="${HOME}/.local/bin/ck"
+BIN_DIR="${USER_BIN:-${HOME}/.local/bin}"
+CK_TARGET="${BIN_DIR}/ck"
+CK_DEV_TARGET="${BIN_DIR}/ck-dev"
+SNAPSHOT_DIR="${HOME}/.local/share/ck"
 CK_BIN_SRC="${SCRIPT_DIR}/ck"
+CK_LIB_SRC="${SCRIPT_DIR}/cklib"
 
 log()  { printf '%s\n' "$*"; }
 ok()   { printf '  \033[32m\u2713\033[0m %s\n' "$*"; }
@@ -23,11 +31,11 @@ warn() { printf '  \033[33m!\033[0m %s\n' "$*"; }
 fail() { printf '  \033[31m\u2717\033[0m %s\n' "$*"; }
 
 ensure_local_bin() {
-    mkdir -p "${HOME}/.local/bin"
+    mkdir -p "${BIN_DIR}"
 }
 
 # ---------------------------------------------------------------------- #
-# default action: install                                                #
+# default action: install (physical copy — no symlinks)                  #
 # ---------------------------------------------------------------------- #
 
 do_install() {
@@ -37,37 +45,36 @@ do_install() {
         fail "Cannot locate the 'ck' entry script under ${SCRIPT_DIR}"
         exit 1
     fi
-    chmod +x "${CK_BIN_SRC}" || true
-
-    if [[ -L "${CK_TARGET}" ]] || [[ -f "${CK_TARGET}" ]]; then
-        if [[ -L "${CK_TARGET}" ]] && \
-           [[ "$(readlink "${CK_TARGET}")" == "${CK_BIN_SRC}" ]]; then
-            ok "Already installed: ${CK_TARGET} -> ${CK_BIN_SRC}"
-            exit 0
-        fi
-        warn "${CK_TARGET} already exists."
-        printf 'Overwrite? [y/N] '
-        read -r reply
-        if [[ "${reply}" != "y" && "${reply}" != "Y" ]]; then
-            fail "Install cancelled."
-            exit 1
-        fi
-        rm -f "${CK_TARGET}"
-    fi
-
-    if ln -s "${CK_BIN_SRC}" "${CK_TARGET}"; then
-        ok "Installed: ${CK_TARGET} -> ${CK_BIN_SRC}"
-    else
-        fail "Symlink failed."
+    if [[ ! -d "${CK_LIB_SRC}" ]]; then
+        fail "Cannot locate the 'cklib' package under ${SCRIPT_DIR}"
         exit 1
     fi
+    chmod +x "${CK_BIN_SRC}" || true
+
+    # Static package snapshot (production isolation): the installed
+    # launcher resolves this copy, never the live checkout.
+    rm -rf "${SNAPSHOT_DIR}/cklib"
+    mkdir -p "${SNAPSHOT_DIR}"
+    cp -R "${CK_LIB_SRC}" "${SNAPSHOT_DIR}/cklib"
+    find "${SNAPSHOT_DIR}" -type d -name '__pycache__' -prune \
+        -exec rm -rf {} + 2>/dev/null || true
+
+    # Force-remove any existing entry (symlink or file): the target
+    # must be a fresh regular file — never a copy THROUGH a symlink.
+    rm -f "${CK_TARGET}"
+    cp "${CK_BIN_SRC}" "${CK_TARGET}"
+    chmod 0755 "${CK_TARGET}"
+
+    ok "Installed (physical copy): ${CK_TARGET}"
+    ok "Package snapshot: ${SNAPSHOT_DIR}/cklib"
+    warn "Production is a static snapshot: re-run the install (or \`ck update\`) after changing this checkout."
 
     # PATH hint
     if ! command -v ck >/dev/null 2>&1; then
-        if [[ ":${PATH}:" != *":${HOME}/.local/bin:"* ]]; then
-            warn "${HOME}/.local/bin is not on PATH."
+        if [[ ":${PATH}:" != *":${BIN_DIR}:"* ]]; then
+            warn "${BIN_DIR} is not on PATH."
             printf 'Add this to your shell rc:\n'
-            printf '  export PATH="${HOME}/.local/bin:${PATH}"\n'
+            printf '  export PATH="%s:${PATH}"\n' "${BIN_DIR}"
         fi
     fi
 }
@@ -113,20 +120,28 @@ do_check() {
         warn "\$EDITOR is not set. ck edit / ck log will fall back to micro/nano/vi."
     fi
 
-    # ~/.local/bin writable
-    if [[ -d "${HOME}/.local/bin" ]]; then
-        if [[ -w "${HOME}/.local/bin" ]]; then
-            ok "${HOME}/.local/bin is writable."
+    # bin dir writable
+    if [[ -d "${BIN_DIR}" ]]; then
+        if [[ -w "${BIN_DIR}" ]]; then
+            ok "${BIN_DIR} is writable."
         else
-            warn "${HOME}/.local/bin exists but is not writable."
+            warn "${BIN_DIR} exists but is not writable."
         fi
     else
-        warn "${HOME}/.local/bin does not exist (will be created on install)."
+        warn "${BIN_DIR} does not exist (will be created on install)."
     fi
 
-    # ck symlink
+    # ck installation
     if [[ -L "${CK_TARGET}" ]]; then
-        ok "ck symlink present: ${CK_TARGET} -> $(readlink "${CK_TARGET}")"
+        warn "ck is a SYMLINK (legacy install): ${CK_TARGET} -> $(readlink "${CK_TARGET}")."
+        warn "Re-run the install to replace it with a physical copy."
+    elif [[ -f "${CK_TARGET}" ]]; then
+        ok "ck installed (physical copy): ${CK_TARGET}"
+        if [[ -d "${SNAPSHOT_DIR}/cklib" ]]; then
+            ok "Package snapshot present: ${SNAPSHOT_DIR}/cklib"
+        else
+            warn "Package snapshot missing: ${SNAPSHOT_DIR}/cklib (re-run the install)."
+        fi
     else
         warn "ck is not installed at ${CK_TARGET}."
     fi
@@ -136,28 +151,32 @@ do_check() {
 }
 
 # ---------------------------------------------------------------------- #
-# uninstall action                                                        #
+# uninstall action                                                       #
 # ---------------------------------------------------------------------- #
 
 do_uninstall() {
-    if [[ ! -e "${CK_TARGET}" && ! -L "${CK_TARGET}" ]]; then
-        warn "ck is not installed at ${CK_TARGET}."
-        exit 0
-    fi
-    if [[ ! -L "${CK_TARGET}" ]]; then
-        fail "${CK_TARGET} exists but is not a symlink. Refusing to delete."
-        exit 1
-    fi
-    if rm -f "${CK_TARGET}"; then
-        ok "Removed symlink: ${CK_TARGET}"
-    else
-        fail "Failed to remove ${CK_TARGET}."
-        exit 1
+    local target
+    for target in "${CK_TARGET}" "${CK_DEV_TARGET}"; do
+        if [[ ! -e "${target}" && ! -L "${target}" ]]; then
+            warn "Not installed at ${target}."
+            continue
+        fi
+        if [[ -d "${target}" && ! -L "${target}" ]]; then
+            fail "${target} is a directory. Refusing to delete."
+            continue
+        fi
+        rm -f "${target}"
+        ok "Removed: ${target}"
+    done
+
+    if [[ -d "${SNAPSHOT_DIR}/cklib" ]]; then
+        rm -rf "${SNAPSHOT_DIR}"
+        ok "Removed package snapshot: ${SNAPSHOT_DIR}"
     fi
 }
 
 # ---------------------------------------------------------------------- #
-# dispatch                                                                #
+# dispatch                                                               #
 # ---------------------------------------------------------------------- #
 
 case "${1:-install}" in
