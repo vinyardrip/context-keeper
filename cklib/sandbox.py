@@ -451,6 +451,37 @@ def activate_sandbox_path(env: Optional[dict] = None) -> Optional[Path]:
     return entry_dir
 
 
+def _strict_session_routing(env: dict) -> bool:
+    """True when binary resolution must route STRICTLY to the checkout.
+
+    Active only INSIDE a session subshell (the session-shell marker is
+    truthy): the session contract requires the local dev binary, so a
+    globally installed ``ck`` winning the raw ``PATH`` race must be
+    overridden. Outside a session shell, PATH order is the user's
+    explicit choice and is honored.
+    """
+    return _env_flag_on(env, SANDBOX_SHELL_ENV)
+
+
+def _local_dev_binary() -> Optional[Path]:
+    """The checkout's LOCAL dev ``ck`` binary (or None).
+
+    Direct checkout lookup, independent of ``PATH``: the repository
+    root's own ``ck`` wrapper, then the ``bin/`` layout. Executability
+    is enforced the same way :func:`has_runnable_entrypoint` does.
+    """
+    dev_root = production_repo_root()
+    for candidate in (dev_root / "ck", dev_root / "bin" / "ck"):
+        try:
+            if not candidate.is_file():
+                continue
+            if os.name == "nt" or os.access(candidate, os.X_OK):
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
 def active_binary_path(env: Optional[dict] = None) -> Optional[Path]:
     """The ACTIVE ``ck`` executable, resolved dynamically at runtime.
 
@@ -458,6 +489,15 @@ def active_binary_path(env: Optional[dict] = None) -> Optional[Path]:
     / ``type -P ck``): the first executable ``ck`` on the current
     ``PATH`` — the exact binary a bare ``ck`` typed right now would
     run. Never hardcoded; the lookup is always live.
+
+    STRICT SESSION ROUTING: inside a session subshell
+    (:data:`SANDBOX_SHELL_ENV` truthy) the checkout's LOCAL DEV
+    binary is the session contract — a globally installed ``ck``
+    must never win the lookup race, even when the caller's PATH
+    (e.g. after an rc file re-export) ranks it first. When a PATH hit
+    still points OUTSIDE the checkout (like ``~/.local/bin/ck``), it
+    is overridden by the checkout's dev binary so sandbox sessions
+    always report/execute local code.
 
     SESSION SELF-HEALING: inside a session subshell
     (:data:`SANDBOX_SHELL_ENV` truthy) startup files may have
@@ -478,7 +518,8 @@ def active_binary_path(env: Optional[dict] = None) -> Optional[Path]:
     """
     if env is None:
         env = os.environ
-    if _env_flag_on(env, SANDBOX_SHELL_ENV):
+    in_session = _env_flag_on(env, SANDBOX_SHELL_ENV)
+    if in_session:
         repaired = _session_repaired_path(env)
         if repaired is not None:
             ck = _which("ck", path_value=repaired)
@@ -486,6 +527,18 @@ def active_binary_path(env: Optional[dict] = None) -> Optional[Path]:
                 return ck
     ck = _which("ck", path_value=str(env.get("PATH", "")))
     if ck is not None:
+        if in_session and _strict_session_routing(env):
+            resolved = ck.resolve() if ck.exists() else ck
+            dev_root = production_repo_root()
+            if dev_root not in resolved.parents and resolved != (
+                dev_root / "ck"
+            ):
+                # A global binary won the raw PATH race inside the
+                # session: strictly re-route to the checkout's local
+                # dev binary (the session contract).
+                dev = _local_dev_binary()
+                if dev is not None:
+                    return dev
         return ck
     # Fallback 1: the running launcher's own directory.
     try:
@@ -680,6 +733,24 @@ def _prepend_path_entry(path_value: str, entry: Path) -> str:
     return os.pathsep.join([entry_str, *parts])
 
 
+def _pin_pythonpath(env: dict) -> None:
+    """Force ``$REPO_ROOT`` to POSITION 0 of ``PYTHONPATH``.
+
+    The root is :func:`production_repo_root` (the checkout supplying
+    the running ``cklib``). An existing occurrence is MOVED to the
+    front (never duplicated); absent it is prepended. Guarantees every
+    child of the session (nested ``ck`` calls, editor subprocesses,
+    spawned tooling) imports ``cklib`` from THIS checkout — never a
+    site-packages copy or a stale snapshot — even after rc files
+    re-export the variable.
+    """
+    repo_root = str(production_repo_root())
+    parts = [p for p in str(env.get("PYTHONPATH", "")).split(os.pathsep)
+             if p]
+    parts = [p for p in parts if p != repo_root]
+    env["PYTHONPATH"] = os.pathsep.join([repo_root, *parts])
+
+
 def sandbox_shell_env(project: Path) -> dict:
     """The FULL environment for the sandbox session subshell.
 
@@ -688,32 +759,33 @@ def sandbox_shell_env(project: Path) -> dict:
 
     - ``CK_SANDBOX=1`` (the spec'd toggle),
     - the active project mirror (``CK_SANDBOX_ACTIVE``),
-    - the sandbox anchor (``CK_SANDBOX_ROOT``),
+    - the sandbox anchor (``CK_SANDBOX_ROOT``) — REQUIRED by the
+      ``ck`` launcher's sandbox session pin: it derives the checkout
+      root from this variable, so even a physical production copy
+      executing inside the session resolves and imports the CHECKOUT's
+      local dev code,
     - the session marker (``CK_SANDBOX_SHELL``),
     - ``PATH`` with the checkout's entrypoint directory PREPENDED so
       a bare ``ck`` inside the subshell executes the LOCAL dev code
       (and its current top-level flags), never a globally installed
       system binary,
-    - ``PYTHONPATH`` with the repository root PREPENDED so child
-      ``ck`` invocations import the workspace sources — never a
-      site-packages copy,
+    - ``PYTHONPATH`` with the repository root pinned to POSITION 0
+      (:func:`_pin_pythonpath`) so child ``ck`` invocations import
+      the workspace sources — never a site-packages copy,
     - a best-effort ``PS1``/``PROMPT`` prompt prefix: applied only
       when the user's own environment already exports one. Shells
       that ignore an inherited prompt variable fall back to the
       startup banner and the ``CK_SANDBOX=1`` marker; their rc files
       are never read, written or swapped.
     """
-    repo_root = str(production_repo_root())
     existing = [p for p in os.environ.get("PYTHONPATH", "").split(os.pathsep)
                 if p]
-    if repo_root in existing:
-        existing.remove(repo_root)
     env = os.environ.copy()
     env["CK_SANDBOX"] = "1"
     env[SANDBOX_ACTIVE_ENV] = str(project)
     env[SANDBOX_ROOT_ENV] = str(sandbox_root())
     env[SANDBOX_SHELL_ENV] = "1"
-    env["PYTHONPATH"] = os.pathsep.join([repo_root, *existing])
+    _pin_pythonpath(env)
     # PATH priority routing: the checkout's own entrypoint dir wins
     # the `ck` lookup race inside the subshell (same repair
     # :func:`enter_sandbox` applied to this process before spawn).
@@ -942,6 +1014,21 @@ def enter_sandbox(*, project: Optional[Union[Path, str]] = None) -> int:
     # below lands in the SANDBOX registry and the dashboard reads it
     # back. Idempotent when the wrapper already set it.
     os.environ["CK_SANDBOX"] = "1"
+    # ANCHOR EXPORT (launcher session pin): the `ck` launcher derives
+    # the checkout root from this variable, so export it here too —
+    # not only in the wrapper and the subshell env.
+    os.environ[SANDBOX_ROOT_ENV] = str(sandbox_root())
+    # SOURCE PIN (spec): inside the session, `ck -v` must reflect the
+    # version defined in the LOCAL repository code. Force the checkout
+    # to position 0 of sys.path so this process imports the workspace
+    # sources — never a site-packages copy or a stale snapshot.
+    repo_root = str(production_repo_root())
+    if repo_root in sys.path:
+        sys.path.remove(repo_root)
+    sys.path.insert(0, repo_root)
+    # PYTHONPATH PRIORITY (session contract): children (nested `ck`
+    # calls, spawned shells) inherit the same source pinning.
+    _pin_pythonpath(os.environ)
     # PATH PRIORITY (session contract): pin the checkout's dev binary
     # to the front of PATH BEFORE the banner renders, so the banner
     # reports the LOCAL dev binary — and the spawned subshell (built
@@ -1409,6 +1496,8 @@ __all__ = [
     "activate_sandbox_path",
     "active_binary_path",
     "resolved_global_binary_path",
+    "_pin_pythonpath",
+    "_local_dev_binary",
     "render_sandbox_banner",
     "print_sandbox_banner",
     "enter_sandbox",
