@@ -138,6 +138,9 @@ class FocusResult:
     task_id: int
     title: str
     path: Path
+    demoted_id: Optional[int] = None
+    demoted_title: str = ""
+    had_note: bool = False
 
 
 @dataclass
@@ -929,15 +932,52 @@ class ContextKeeper:
     def start(self, task_id: int) -> FocusResult:
         """Mark the given task as focused; demote any other focused task.
 
+        ``task_id <= 0`` RESETS focus: the currently focused task (if
+        any) is demoted to open and no new focus is set.
+
+        When a previously focused task loses focus (moved to a NEW
+        focus, or reset) the demotion is reported in
+        :class:`FocusResult` (``demoted_*`` fields) so the CLI can
+        surface the "Unfocused / Paused Context" handling: the task
+        KEEPS its process note (rendered in the paused block until
+        ``ck done`` archives it), while a noteless demotion lets the
+        CLI emit the soft attach-a-note hint.
+
         Aborts with a clear error when no project plan is bound (no
         initialized project) instead of fabricating an empty plan.
         """
         self._require_bound_plan()
         tl = self._load_plan()
-        target = tl.focus(task_id)
+        demoted: Optional[Task] = None
+        target: Optional[Task] = None
+        if task_id <= 0:
+            # Focus RESET: demote the current focus (if any); no new
+            # focus is set. ``TaskList.focus`` would raise on id 0.
+            focused = tl.focused[0] if tl.focused else None
+            if focused is not None:
+                focused.status = TaskStatus.OPEN
+                demoted = focused
+        else:
+            # Capture the previously focused task BEFORE ``focus()`
+            # demotes it — afterwards it is no longer in ``focused``.
+            focused_before = tl.focused[0] if tl.focused else None
+            target = tl.focus(task_id)  # raises KeyError when unknown
+            if focused_before is not None \
+                    and focused_before.id != task_id:
+                demoted = focused_before
+        had_note = False
+        if demoted is not None:
+            had_note = self._note_for_task(demoted.id) != ""
         self._commit_plan(tl)
         self._sync_active_task(tl)
-        return FocusResult(task_id=target.id, title=target.title, path=self.plan_file)
+        return FocusResult(
+            task_id=target.id if target is not None else 0,
+            title=target.title if target is not None else "",
+            path=self.plan_file,
+            demoted_id=demoted.id if demoted is not None else None,
+            demoted_title=demoted.title if demoted is not None else "",
+            had_note=had_note,
+        )
 
     def done(self, spec: str) -> list[int]:
         """Mark one or more tasks as DONE.
@@ -946,8 +986,9 @@ class ContextKeeper:
         comma-separated lists (``1,3,5``).
 
         Completing the task that carries the active-task process
-        note (see :meth:`set_note`) automatically purges the note
-        along with the completed task context.
+        note (see :meth:`set_note`) automatically archives the note
+        into ``HISTORY.md`` (dated entry) and clears it from the
+        active-task state along with the completed task context.
         """
         ids = _parse_id_spec(spec)
         if not ids:
@@ -956,6 +997,16 @@ class ContextKeeper:
         tl = self._load_plan()
         transitioned = tl.toggle_done(ids)
         if transitioned:
+            # Archive the process note BEFORE clearing it: the note
+            # is user data — it graduates into HISTORY.md instead of
+            # vanishing with the completed task context.
+            note_data = self.get_note()
+            if note_data is not None \
+                    and note_data.get("id") in set(transitioned):
+                archived = tl.by_id(note_data["id"])
+                if archived is not None:
+                    self._archive_note_to_history(
+                        archived, note_data["note"])
             self._commit_plan(tl)
             # Completing the focused task changes which task is
             # active; the registry pointer must follow (task IDs are
@@ -1063,6 +1114,46 @@ class ContextKeeper:
                 and not isinstance(tid, bool):
             return data
         return None
+
+    def _note_for_task(self, task_id: int) -> str:
+        """Return the stored process-note text when it belongs to
+        ``task_id`` (structurally valid entry only), else ""."""
+        data = self.get_note()
+        if data is None or data.get("id") != task_id:
+            return ""
+        return data["note"]
+
+    def _drop_note(self) -> None:
+        """Remove the stored active-task note when present. Writes
+        state only when something is actually removed (read-only
+        projects never gain a state file)."""
+        state = self._read_state()
+        if "active_task" not in state:
+            return
+        state.pop("active_task", None)
+        self._write_state(state)
+
+    def _archive_note_to_history(self, task: Task, note: str) -> None:
+        """Append ``note`` to ``HISTORY.md`` as a dated Notes entry.
+
+        Called by :meth:`done` when the noted task is completed: the
+        note is user data — it graduates into the durable history
+        instead of vanishing with the task context. Goes through
+        ``_open_history_append`` so DEV MODE appends land in the
+        sandboxed copy (the real HISTORY.md is never touched).
+        """
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+        entry = Notes(
+            task_id=task.id,
+            task_title=task.title,
+            timestamp=ts,
+            comment=note,
+            body="",
+        )
+        self._ensure_ck_dir()
+        with file_lock(self.history_file):
+            with self._open_history_append() as fh:
+                fh.write(entry.render())
 
     def _purge_note_if_completed(self, completed_ids: set) -> None:
         """Drop the active-task process note when its task was just
@@ -1970,9 +2061,12 @@ def _sprint_insert_line(tl: TaskList) -> Optional[int]:
 # Presentation helpers
 # ---------------------------------------------------------------------- #
 
-def _status_triad(tl: TaskList):
+def _status_triad(tl: TaskList, note_data: Optional[dict] = None
+                  ) -> tuple:
     """Resolve the compact PREV / FOCUS / NEXT triad used by the
     VERBOSE dashboard blocks (``ck dashboard -v``).
+
+    Returns ``(prev, focus, next, note_id, note_text)``:
 
     - PREV: nearest completed ``[x]`` task prior to the FOCUS task
       (last done overall when no focus is set).
@@ -1981,6 +2075,12 @@ def _status_triad(tl: TaskList):
       focus instead).
     - NEXT: first open ``[ ]`` task after the FOCUS task (first
       open overall when no focus is set).
+    - ``note_id`` / ``note_text``: the stored active-task process
+      note, attributed only while its task still exists in the plan.
+      A noted OPEN task that is NOT the focus is a paused/unfocused
+      task — ``note_id`` points at it so the verbose block renders a
+      dedicated "Unfocused / Paused Context" entry instead of
+      pinning the note under Focus/Next.
     """
     focus = tl.focused[0] if tl.focused else None
 
@@ -2006,7 +2106,18 @@ def _status_triad(tl: TaskList):
             nxt = t
             break
 
-    return prev, focus, nxt
+    note_id: Optional[int] = None
+    note_text = ""
+    if isinstance(note_data, dict):
+        nid = note_data.get("id")
+        ntext = note_data.get("note")
+        if isinstance(nid, int) \
+                and not isinstance(nid, bool) \
+                and isinstance(ntext, str) and ntext \
+                and tl.by_id(nid) is not None:
+            note_id, note_text = nid, ntext
+
+    return prev, focus, nxt, note_id, note_text
 
 
 # Maximum number of tasks listed BY NAME per WORK CONTEXT section
@@ -2154,6 +2265,9 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
             >> Upcoming:                          (follows Focus/Next)
                - [<id>] <title> [ ]
             * Note: <process note>                    (only when set)
+            Unfocused / Paused Context:  (noted open task that lost focus)
+               - [<id>] <title>
+                 * Note: <note text>
         =============================================================
 
     DISPLAY LIMITS: ``<< Done`` and ``[!] Skipped`` show at most
@@ -2170,6 +2284,12 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
     task — so gaps surface BY NAME instead of the abstract
     ``(gaps: X-Y)`` range (which still summarizes the progress
     line).
+
+    UNFOCUSED / PAUSED CONTEXT: a still-open task that lost focus
+    (via ``ck start <NEW_ID>`` or a focus reset) while carrying the
+    process note is rendered in a dedicated block — its note travels
+    with it. The single active note is NOT duplicated under
+    Focus/Next when the noted task is paused.
 
     ``source`` mirrors :class:`ProjectContext` resolution: a
     ``"global"`` fallback appends an accent ``<- <path>`` hint to the
@@ -2260,18 +2380,40 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
 
     # 3) [>] Focus (explicit) or Next (auto-resolved candidate —
     #    display only, the plan is never mutated).
+    note_data = ck.get_note()
+    note_id = note_data["id"] if note_data is not None else None
+    note_text = note_data["note"] if note_data is not None else ""
+    noted_task = tl.by_id(note_id) if note_id is not None else None
+    # The note is visible only while its task still exists in the
+    # plan (an externally removed task never surfaces a stale note).
+    note_visible = note_text != "" and noted_task is not None
+    # A noted OPEN task that is NOT the focused one has lost focus
+    # while carrying its note — it renders in the paused block below
+    # instead of under Focus/Next.
+    paused_task = (
+        noted_task
+        if noted_task is not None
+        and noted_task.status == TaskStatus.OPEN
+        and (ctx.current is None or noted_task.id != ctx.current.id)
+        else None
+    )
+
     if ctx.is_focus and ctx.current is not None:
         lines.append("    [>] Focus:")
         lines.append(
             f"       - "
             f"{p.bold_yellow(f'[{ctx.current.id}] {ctx.current.title}')}"
         )
+        if note_visible and not paused_task:
+            lines.append(p.bold_cyan(f"       * Note: {note_text}"))
     elif ctx.current is not None:
         t = ctx.current
         lines.append("    [>] Next:")
         lines.append(
             f"       - {p.bold_yellow(f'[{t.id}] {t.title}')} [ ]"
         )
+        if note_visible and not paused_task:
+            lines.append(p.bold_cyan(f"       * Note: {note_text}"))
     else:
         lines.append(p.muted("    [>] Next: (no open tasks)"))
 
@@ -2287,29 +2429,21 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
     else:
         lines.append(p.muted("    >> Upcoming: (none)"))
 
-    # Active-task process note (ck note "..."): displayed while the
-    # noted task still exists in the plan; purged by ck done.
-    note = _active_task_note(ck, tl)
-    if note:
-        lines.append(p.bold_cyan(f"    * Note: {note}"))
+    # 5) Unfocused / Paused Context: a still-open task that lost
+    #    focus while carrying the process note. Its note travels
+    #    with it, keeping the scratchpad attached to the task that
+    #    was paused rather than orphaning it under the new focus.
+    if paused_task is not None:
+        lines.append(p.bold_yellow("    Unfocused / Paused Context:"))
+        lines.append(
+            f"       - [{paused_task.id}] {paused_task.title}"
+        )
+        lines.append(
+            p.bold_cyan(f"         * Note: {note_text}")
+        )
 
     lines.append(p.border(bar))
     return "\n".join(lines)
-
-
-def _active_task_note(ck: ContextKeeper, tl: TaskList) -> str:
-    """Return the active-task process note text, or "".
-
-    The stored note is shown only while its referenced task still
-    exists in the current plan — an externally removed task never
-    surfaces a stale note.
-    """
-    data = ck.get_note()
-    if data is None:
-        return ""
-    if tl.by_id(data["id"]) is None:
-        return ""
-    return data["note"]
 
 
 def _render_tasks_listing(tl: TaskList) -> str:
@@ -2518,6 +2652,33 @@ def _render_dashboard(ck: Optional[ContextKeeper], *, list_projects,
     return rendered
 
 
+def read_active_task_note(project_root: Path) -> Optional[dict]:
+    """Read the stored active-task note dict for a project directory.
+
+    Standalone reader for cross-project rendering (``ck dashboard
+    -v``): loads ``<project>/.ck/state.json`` directly and returns
+    the structurally valid ``active_task`` entry (non-empty string
+    ``note``, int ``id``), or None when absent, corrupt, or
+    hand-edited. Mirrors :meth:`ContextKeeper.get_note` validation.
+    """
+    state_file = Path(project_root) / CK_DIR_NAME / STATE_FILENAME
+    try:
+        data = json.loads(state_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    active = data.get("active_task")
+    if not isinstance(active, dict):
+        return None
+    note = active.get("note")
+    tid = active.get("id")
+    if isinstance(note, str) and note and isinstance(tid, int) \
+            and not isinstance(tid, bool):
+        return active
+    return None
+
+
 # ---------------------------------------------------------------------- #
 # Dashboard: compact table (default)
 # ---------------------------------------------------------------------- #
@@ -2644,19 +2805,36 @@ def _render_dashboard_verbose(states: list) -> str:
                 )
             else:
                 out.append("    -> Context:")
-                prev, focus, nxt = _status_triad(tl_local)
+                note_data = read_active_task_note(entry.path)
+                prev, focus, nxt, note_id, note_text = _status_triad(
+                    tl_local, note_data)
                 if prev is not None:
                     out.append(f"       << [{prev.id}] {prev.title} [x]")
                 else:
                     out.append("       << (none completed)")
                 if focus is not None:
                     out.append(f"       [>] [{focus.id}] {focus.title}")
+                    if note_id is not None and note_id == focus.id:
+                        out.append(f"          * Note: {note_text}")
                 else:
                     out.append("       [>] (no focus selected)")
                 if nxt is not None:
                     out.append(f"       >> [{nxt.id}] {nxt.title} [ ]")
+                    if note_id is not None and note_id == nxt.id:
+                        out.append(f"          * Note: {note_text}")
                 else:
                     out.append("       >> (no open tasks)")
+                if note_id is not None and (
+                        (focus is None or note_id != focus.id)
+                        and (nxt is None or note_id != nxt.id)):
+                    noted = tl_local.by_id(note_id)
+                    if noted is not None:
+                        out.append(
+                            "       Unfocused / Paused Context:")
+                        out.append(
+                            f"          - [{noted.id}] {noted.title}")
+                        out.append(
+                            f"            * Note: {note_text}")
 
         # Each project is an isolated block: trailing blank line +
         # separator bar close it off before the next block.

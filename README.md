@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.3.0-blue)]()
+[![version](https://img.shields.io/badge/version-0.4.0-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -46,6 +46,7 @@ Context Keeper (ck) acts as a bridge between your brain, AI agents, and Git, per
 - Self-Installer: ck install / ck uninstall (user-level physical copy — a regular executable file, never a symlink; no sudo)
 - Self-Updater: ck update (git fetch + `pull --ff-only`, refuses on dirty work tree)
 - CLI Task Management: ck add <text>, ck start <ID>, ck done <ID|range|list>
+- Process Notes: `ck note <text>` attaches a scratchpad to the active task — shown in `ck st`, archived to HISTORY.md on `ck done`, and carried through focus switches via the Unfocused / Paused Context block
 - Global Registry: Cross-project dashboard (ck dashboard) backed by `~/.config/ck/projects.json`; registration is explicit
 - Fail-Closed Locking: Cross-process file locking guards registry, PLAN.md, HISTORY.md and state.json writes
 - Full Plan View: ck st --all
@@ -83,7 +84,7 @@ chmod +x ck
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.3.0
+ck -v    # → ck version 0.4.0
 ```
 
 ---
@@ -109,8 +110,9 @@ ck -v    # → ck version 0.3.0
 | ck init | Initialize the project locally (.ck/ structure and gitignore rules); does not touch the global registry |
 | ck init --register | Initialize locally and register the project in `~/.config/ck/projects.json` |
 | ck add \<text\> | Add a new open task (inserted before `## Completed`) |
-| ck start \<ID\> | Focus a task (`- [>]`) |
-| ck done \<ID\|range\|list\> | Mark task(s) done (`- [x]`), e.g. `3`, `2-4`, `1,3,5` |
+| ck start \<ID\> | Focus a task (`- [>]`); `ck start 0` resets focus. A noted task that loses focus moves to Unfocused / Paused Context (note preserved until `ck done` archives it); a noteless one gets a soft attach-a-note hint |
+| ck done \<ID\|range\|list\> | Mark task(s) done (`- [x]`), e.g. `3`, `2-4`, `1,3,5`; the completed task's process note is archived into HISTORY.md and cleared |
+| ck note \<text\> | Attach/update a process note on the active task (shown in `ck st`; archived to HISTORY.md by `ck done`) |
 | ck edit | Open PLAN.md in your editor (see [Editor Resolution](#editor-resolution)) |
 | ck save | Task completion workflow: optional note + optional **local** commit |
 | ck log | Open HISTORY.md in your editor (see [Editor Resolution](#editor-resolution)) |
@@ -174,6 +176,64 @@ and a summary count, so the registry cleanup is auditable.
 - Enter commit description + optional note (inline or via your editor — see [Editor Resolution](#editor-resolution))
 - Optional **local** Git commit (never pushes; skips gracefully if Git is unavailable or declined)
 - Auto-archive HISTORY.md when limit reached (gapless rotation, original preserved as .bak)
+
+---
+
+## Process Notes & Unfocused / Paused Context
+
+A **process note** (`ck note <text>`) is a lightweight scratchpad attached to the
+active task. It lives in `.ck/state.json`, renders under the task it belongs to,
+and follows a strict lifecycle:
+
+- **Attach / update** — `ck note <text>` writes the note onto the active task
+  (focused task, else first open task).
+- **Display** — `ck st` shows `* Note: <text>` under the task that owns it, and
+  `ck dashboard -v` shows it per project (including for registered projects
+  viewed from another directory).
+- **Complete** — `ck done <ID>` archives the note into `HISTORY.md` as a dated
+  entry, then clears it from the active-task state. The note is user data: it
+  graduates into history, it is never silently dropped.
+
+### Switching focus
+
+When focus moves away from a task (via `ck start <NEW_ID>` or a focus reset with
+`ck start 0`), the task that lost focus is handled according to whether it
+carries a note:
+
+- **With a note** — the task moves to a dedicated `Unfocused / Paused Context`
+  block in `ck st` (and `ck dashboard -v`). Its note stays attached and travels
+  with it, so the scratchpad is never orphaned under the new focus:
+
+  ```text
+  -> WORK CONTEXT:
+     << Done:
+        - [1] setup repo [x]
+     [!] Skipped: (none)
+     [>] Focus:
+        - [3] write docs
+     >> Upcoming: (none)
+     Unfocused / Paused Context:
+        - [2] implement API mapping
+          * Note: paused mid-refactor — mapping layer half done
+  ```
+
+  The switch itself reports the archival:
+
+  ```text
+  -> Focused [3]: write docs
+  [i] Task [2] implement API mapping lost focus — moved to Unfocused / Paused Context (note preserved; archived by `ck done`).
+  ```
+
+- **Without a note** — a soft prompt nudges you to attach one before the
+  context is lost (the task itself is untouched):
+
+  ```text
+  -> Focused [3]: write docs
+  [!] Task #2 lost focus without a note. Attach one via `ck note <text>`.
+  ```
+
+  (Switching back with `ck start 2` resumes the task; completing it with
+  `ck done 2` archives its note into HISTORY.md and clears it.)
 
 ---
 
