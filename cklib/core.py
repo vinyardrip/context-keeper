@@ -938,10 +938,14 @@ class ContextKeeper:
         When a previously focused task loses focus (moved to a NEW
         focus, or reset) the demotion is reported in
         :class:`FocusResult` (``demoted_*`` fields) so the CLI can
-        surface the "Unfocused / Paused Context" handling: the task
-        KEEPS its process note (rendered in the paused block until
-        ``ck done`` archives it), while a noteless demotion lets the
-        CLI emit the soft attach-a-note hint.
+        surface the "Unfocused / Paused Context" handling, and the
+        task is recorded in the ``paused_tasks`` registry (see
+        :meth:`_register_paused`): a noted demotion moves its process
+        note into the registry entry so the note stays bound to the
+        paused task through further focus switches; a noteless one is
+        recorded too so it never disappears into the generic skipped
+        list. Re-focusing restores the note as the active process
+        note; completing archives it to HISTORY.md.
 
         Aborts with a clear error when no project plan is bound (no
         initialized project) instead of fabricating an empty plan.
@@ -967,7 +971,13 @@ class ContextKeeper:
                 demoted = focused_before
         had_note = False
         if demoted is not None:
-            had_note = self._note_for_task(demoted.id) != ""
+            note = self._note_for_task(demoted.id)
+            had_note = bool(note)
+            self._register_paused(demoted.id, demoted.title, note)
+        if target is not None:
+            # Re-focus side effect: a previously paused task regains
+            # its registry note as the active process note (LIFO).
+            self._restore_paused_note(target.id)
         self._commit_plan(tl)
         self._sync_active_task(tl)
         return FocusResult(
@@ -997,22 +1007,33 @@ class ContextKeeper:
         tl = self._load_plan()
         transitioned = tl.toggle_done(ids)
         if transitioned:
+            completed = set(transitioned)
             # Archive the process note BEFORE clearing it: the note
             # is user data — it graduates into HISTORY.md instead of
             # vanishing with the completed task context.
             note_data = self.get_note()
             if note_data is not None \
-                    and note_data.get("id") in set(transitioned):
+                    and note_data.get("id") in completed:
                 archived = tl.by_id(note_data["id"])
                 if archived is not None:
                     self._archive_note_to_history(
                         archived, note_data["note"])
+            # Paused-task registry: archived notes for completed
+            # entries, then drop ALL completed tasks from the
+            # registry — a done task is finished, never paused.
+            for entry in self._paused_tasks():
+                if entry["id"] in completed and entry["note"]:
+                    archived = tl.by_id(entry["id"])
+                    if archived is not None:
+                        self._archive_note_to_history(
+                            archived, entry["note"])
+            self._purge_paused_tasks(completed)
             self._commit_plan(tl)
             # Completing the focused task changes which task is
             # active; the registry pointer must follow (task IDs are
             # positional and can shift, so re-derive from the AST).
             self._sync_active_task(tl)
-            self._purge_note_if_completed(set(transitioned))
+            self._purge_note_if_completed(completed)
         return transitioned
 
     def _sync_active_task(self, tl: TaskList) -> None:
@@ -1115,6 +1136,124 @@ class ContextKeeper:
             return data
         return None
 
+    # ------------------------------------------------------------------ #
+    # Paused-task registry (Unfocused / Paused Context)
+    # ------------------------------------------------------------------ #
+
+    def _paused_tasks(self) -> list[dict]:
+        """Return the stored ``paused_tasks`` registry (valid entries
+        only), most recently paused first.
+
+        Each entry is ``{"id": int, "title": str, "note": str}``
+        (``note`` may be empty). Entries whose task no longer exists
+        in the plan are filtered out on read — externally removed or
+        completed tasks never surface as paused.
+        """
+        tl = self._load_plan()
+        raw = self._read_state().get("paused_tasks")
+        if not isinstance(raw, list):
+            return []
+        out: list[dict] = []
+        seen: set[int] = set()
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            tid = item.get("id")
+            title = item.get("title")
+            note = item.get("note")
+            if not isinstance(tid, int) or isinstance(tid, bool) \
+                    or tid in seen:
+                continue
+            if not isinstance(title, str) or not isinstance(note, str):
+                continue
+            if tl.by_id(tid) is None:
+                continue
+            seen.add(tid)
+            out.append({"id": tid, "title": title, "note": note})
+        return out
+
+    def _register_paused(self, task_id: int, title: str,
+                         note: str) -> None:
+        """Record a focus-loss demotion in the ``paused_tasks``
+        registry.
+
+        When the demoted task carried the active process note, the
+        note MOVES into the registry entry: it stays bound to the
+        paused task through further focus switches instead of being
+        orphaned under (or wiped by) the next ``set_note``. The most
+        recently paused task is kept first (LIFO restore order).
+        Read-only projects never gain a state file.
+        """
+        state = self._read_state()
+        paused = state.get("paused_tasks")
+        entries: list[dict] = [e for e in paused if isinstance(e, dict)] \
+            if isinstance(paused, list) else []
+        # Drop any stale entry for this task, then prepend.
+        entries = [e for e in entries if e.get("id") != task_id]
+        entries.insert(0, {
+            "id": task_id,
+            "title": title,
+            "note": note,
+        })
+        # Move the active note into the registry (never lose data).
+        if note:
+            active = state.get("active_task")
+            if isinstance(active, dict) and active.get("id") == task_id:
+                state.pop("active_task", None)
+        state["paused_tasks"] = entries
+        self._write_state(state)
+
+    def _restore_paused_note(self, task_id: int) -> None:
+        """Re-focus side effect: restore a paused task's registry
+        note as the active process note (LIFO — the most recently
+        paused task wins) and remove the registry entry."""
+        state = self._read_state()
+        paused = state.get("paused_tasks")
+        if not isinstance(paused, list):
+            return
+        kept: list[dict] = []
+        restored: Optional[dict] = None
+        for entry in paused:
+            if (isinstance(entry, dict) and entry.get("id") == task_id
+                    and restored is None):
+                restored = entry
+                continue
+            kept.append(entry)
+        if restored is None:
+            return
+        if restored.get("note"):
+            state["active_task"] = {
+                "id": task_id,
+                "title": restored.get("title", ""),
+                "note": restored["note"],
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+            }
+        state["paused_tasks"] = kept
+        self._write_state(state)
+
+    def pending_focus_loss(self) -> Optional[dict]:
+        """Peek at what an immediate focus switch would demote.
+
+        Returns ``{"id", "title", "has_note"}`` for the currently
+        focused task, or None when no focus is set or no plan is
+        bound. Read-only: the CLI uses this to decide whether the
+        interactive note prompt applies BEFORE mutating anything.
+        """
+        if self.plan_file is None or not self.plan_file.exists():
+            return None
+        try:
+            tl = self._load_plan()
+        except (OSError, ValueError):
+            return None
+        focus = tl.focused[0] if tl.focused else None
+        if focus is None:
+            return None
+        return {
+            "id": focus.id,
+            "title": focus.title,
+            "has_note": self._note_for_task(focus.id) != "",
+        }
+
     def _note_for_task(self, task_id: int) -> str:
         """Return the stored process-note text when it belongs to
         ``task_id`` (structurally valid entry only), else ""."""
@@ -1166,6 +1305,21 @@ class ContextKeeper:
         tid = active.get("id")
         if isinstance(tid, int) and tid in completed_ids:
             state.pop("active_task", None)
+            self._write_state(state)
+
+    def _purge_paused_tasks(self, completed_ids: set) -> None:
+        """Remove completed tasks from the paused_tasks registry.
+        Writes state only when an entry is actually removed."""
+        state = self._read_state()
+        paused = state.get("paused_tasks")
+        if not isinstance(paused, list) or not completed_ids:
+            return
+        kept = [
+            e for e in paused
+            if not (isinstance(e, dict) and e.get("id") in completed_ids)
+        ]
+        if len(kept) != len(paused):
+            state["paused_tasks"] = kept
             self._write_state(state)
 
     # ------------------------------------------------------------------ #
@@ -2360,14 +2514,67 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
     else:
         lines.append(p.muted("    << Done: (none completed)"))
 
+    # Active note + paused-task ledger: the ``paused_tasks``
+    # registry is the single source of truth for the "Unfocused /
+    # Paused Context" block — EVERY open task that previously held
+    # focus appears there (with its bound note, if any), so unnoted
+    # or previously paused tasks can never vanish into the generic
+    # skipped list. (A note in the legacy ``active_task`` slot
+    # pointing at a non-focused open task — e.g. state written by an
+    # older version — renders as a paused entry too.)
+    note_data = ck.get_note()
+    note_id = note_data["id"] if note_data is not None else None
+    note_text = note_data["note"] if note_data is not None else ""
+    paused_display: list = []  # (id, title, note) triples
+    paused_ids: set = set()
+    for entry in ck._paused_tasks():
+        p_task = tl.by_id(entry["id"])
+        if p_task is None or p_task.status != TaskStatus.OPEN:
+            continue
+        if ctx.current is not None and p_task.id == ctx.current.id:
+            continue
+        if p_task.id in paused_ids:
+            continue
+        paused_ids.add(p_task.id)
+        paused_display.append((p_task.id, p_task.title, entry["note"]))
+    # Legacy bridge: an active_task note pointing at a non-focused
+    # open task (state written by an older version) renders as a
+    # paused entry too.
+    noted_task = tl.by_id(note_id) if note_id is not None else None
+    if (noted_task is not None
+            and noted_task.status == TaskStatus.OPEN
+            and noted_task.id not in paused_ids
+            and (ctx.current is None or noted_task.id != ctx.current.id)):
+        paused_ids.add(noted_task.id)
+        paused_display.append(
+            (noted_task.id, noted_task.title, note_text))
+    # The note bound to the DISPLAYED Focus/Next task renders inline
+    # under it — whether it sits in the active slot or in the paused
+    # registry (e.g. right after a re-focus or a focus reset).
+    inline_note = ""
+    if ctx.current is not None:
+        if note_id == ctx.current.id and note_text:
+            inline_note = note_text
+        else:
+            for entry in ck._paused_tasks():
+                if entry["id"] == ctx.current.id and entry["note"]:
+                    inline_note = entry["note"]
+                    break
+
     # 2) [!] Skipped: passed-over / stranded opens, BY NAME (capped,
-    #    closest to the focus first).
-    if ctx.skipped:
-        shown = ctx.skipped[:_CONTEXT_SHOWN_LIMIT]
-        hidden = len(ctx.skipped) - len(shown)
+    #    closest to the focus first). Tasks rendered in the
+    #    Unfocused / Paused Context block are excluded here so a
+    #    paused task never doubles up in the generic skipped list.
+    skipped_visible = [
+        t for t in ctx.skipped if t.id not in paused_ids
+    ]
+    if skipped_visible:
+        shown = skipped_visible[:_CONTEXT_SHOWN_LIMIT]
+        hidden = len(skipped_visible) - len(shown)
         if hidden > 0:
             lines.append(
-                p.yellow(f"    [!] Skipped ({len(ctx.skipped)} tasks):"))
+                p.yellow(
+                    f"    [!] Skipped ({len(skipped_visible)} tasks):"))
         else:
             lines.append(p.yellow("    [!] Skipped:"))
         for t in shown:
@@ -2380,40 +2587,22 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
 
     # 3) [>] Focus (explicit) or Next (auto-resolved candidate —
     #    display only, the plan is never mutated).
-    note_data = ck.get_note()
-    note_id = note_data["id"] if note_data is not None else None
-    note_text = note_data["note"] if note_data is not None else ""
-    noted_task = tl.by_id(note_id) if note_id is not None else None
-    # The note is visible only while its task still exists in the
-    # plan (an externally removed task never surfaces a stale note).
-    note_visible = note_text != "" and noted_task is not None
-    # A noted OPEN task that is NOT the focused one has lost focus
-    # while carrying its note — it renders in the paused block below
-    # instead of under Focus/Next.
-    paused_task = (
-        noted_task
-        if noted_task is not None
-        and noted_task.status == TaskStatus.OPEN
-        and (ctx.current is None or noted_task.id != ctx.current.id)
-        else None
-    )
-
     if ctx.is_focus and ctx.current is not None:
         lines.append("    [>] Focus:")
         lines.append(
             f"       - "
             f"{p.bold_yellow(f'[{ctx.current.id}] {ctx.current.title}')}"
         )
-        if note_visible and not paused_task:
-            lines.append(p.bold_cyan(f"       * Note: {note_text}"))
+        if inline_note:
+            lines.append(p.bold_cyan(f"       * Note: {inline_note}"))
     elif ctx.current is not None:
         t = ctx.current
         lines.append("    [>] Next:")
         lines.append(
             f"       - {p.bold_yellow(f'[{t.id}] {t.title}')} [ ]"
         )
-        if note_visible and not paused_task:
-            lines.append(p.bold_cyan(f"       * Note: {note_text}"))
+        if inline_note:
+            lines.append(p.bold_cyan(f"       * Note: {inline_note}"))
     else:
         lines.append(p.muted("    [>] Next: (no open tasks)"))
 
@@ -2429,18 +2618,16 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
     else:
         lines.append(p.muted("    >> Upcoming: (none)"))
 
-    # 5) Unfocused / Paused Context: a still-open task that lost
-    #    focus while carrying the process note. Its note travels
-    #    with it, keeping the scratchpad attached to the task that
-    #    was paused rather than orphaning it under the new focus.
-    if paused_task is not None:
+    # 5) Unfocused / Paused Context: every still-open task that
+    #    previously held focus (the paused_tasks ledger), each with
+    #    its bound note when one was attached — unnoted pauses stay
+    #    visible too instead of sinking into the skipped list.
+    if paused_display:
         lines.append(p.bold_yellow("    Unfocused / Paused Context:"))
-        lines.append(
-            f"       - [{paused_task.id}] {paused_task.title}"
-        )
-        lines.append(
-            p.bold_cyan(f"         * Note: {note_text}")
-        )
+        for pid, ptitle, pnote in paused_display:
+            lines.append(f"       - [{pid}] {ptitle}")
+            if pnote:
+                lines.append(p.bold_cyan(f"         * Note: {pnote}"))
 
     lines.append(p.border(bar))
     return "\n".join(lines)
@@ -2652,6 +2839,45 @@ def _render_dashboard(ck: Optional[ContextKeeper], *, list_projects,
     return rendered
 
 
+def read_paused_tasks(project_root: Path) -> list[dict]:
+    """Read the ``paused_tasks`` registry for a project directory.
+
+    Standalone reader for cross-project rendering (``ck dashboard
+    -v``): loads ``<project>/.ck/state.json`` directly and returns
+    the valid ``paused_tasks`` entries (``{"id": int, "title":
+    str, "note": str}``) in stored order, tolerating absent or
+    corrupt state. Mirrors :meth:`ContextKeeper._paused_tasks`
+    structural validation minus the plan-membership check (the
+    caller resolves tasks against its own parsed plan).
+    """
+    state_file = Path(project_root) / CK_DIR_NAME / STATE_FILENAME
+    try:
+        data = json.loads(state_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    raw = data.get("paused_tasks")
+    if not isinstance(raw, list):
+        return []
+    out: list[dict] = []
+    seen: set = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        tid = item.get("id")
+        title = item.get("title")
+        note = item.get("note")
+        if not isinstance(tid, int) or isinstance(tid, bool) \
+                or tid in seen:
+            continue
+        if not isinstance(title, str) or not isinstance(note, str):
+            continue
+        seen.add(tid)
+        out.append({"id": tid, "title": title, "note": note})
+    return out
+
+
 def read_active_task_note(project_root: Path) -> Optional[dict]:
     """Read the stored active-task note dict for a project directory.
 
@@ -2808,33 +3034,66 @@ def _render_dashboard_verbose(states: list) -> str:
                 note_data = read_active_task_note(entry.path)
                 prev, focus, nxt, note_id, note_text = _status_triad(
                     tl_local, note_data)
+                # Paused ledger: every open task that previously held
+                # focus, with its bound note. The Focus/Next anchor is
+                # excluded — its note renders inline instead (a
+                # noteless pause stays visible; the anchor's bound
+                # note is looked up from the registry below).
+                anchor = focus if focus is not None else nxt
+                paused_map: dict = {}
+                for p_entry in read_paused_tasks(entry.path):
+                    p_task = tl_local.by_id(p_entry["id"])
+                    if p_task is None or p_task.status != TaskStatus.OPEN:
+                        continue
+                    if anchor is not None and p_task.id == anchor.id:
+                        continue
+                    paused_map[p_task.id] = (
+                        p_task.title, p_entry["note"])
+                # Legacy bridge: an active_task note pointing at a
+                # non-anchored open task (state written by an older
+                # version) renders as a paused entry too.
+                if (note_id is not None and note_text
+                        and (anchor is None or note_id != anchor.id)):
+                    noted = tl_local.by_id(note_id)
+                    if (noted is not None
+                            and noted.status == TaskStatus.OPEN
+                            and noted.id not in paused_map):
+                        paused_map[noted.id] = (noted.title, note_text)
+                # The note bound to the anchor renders inline under
+                # it — from the active slot or the paused registry.
+                inline_note = ""
+                if anchor is not None:
+                    if note_id == anchor.id and note_text:
+                        inline_note = note_text
+                    else:
+                        for p_entry in read_paused_tasks(entry.path):
+                            if (p_entry["id"] == anchor.id
+                                    and p_entry["note"]):
+                                inline_note = p_entry["note"]
+                                break
                 if prev is not None:
                     out.append(f"       << [{prev.id}] {prev.title} [x]")
                 else:
                     out.append("       << (none completed)")
                 if focus is not None:
                     out.append(f"       [>] [{focus.id}] {focus.title}")
-                    if note_id is not None and note_id == focus.id:
-                        out.append(f"          * Note: {note_text}")
+                    if inline_note:
+                        out.append(f"          * Note: {inline_note}")
                 else:
                     out.append("       [>] (no focus selected)")
                 if nxt is not None:
                     out.append(f"       >> [{nxt.id}] {nxt.title} [ ]")
-                    if note_id is not None and note_id == nxt.id:
-                        out.append(f"          * Note: {note_text}")
+                    if focus is None and inline_note:
+                        out.append(f"          * Note: {inline_note}")
                 else:
                     out.append("       >> (no open tasks)")
-                if note_id is not None and (
-                        (focus is None or note_id != focus.id)
-                        and (nxt is None or note_id != nxt.id)):
-                    noted = tl_local.by_id(note_id)
-                    if noted is not None:
-                        out.append(
-                            "       Unfocused / Paused Context:")
-                        out.append(
-                            f"          - [{noted.id}] {noted.title}")
-                        out.append(
-                            f"            * Note: {note_text}")
+                if paused_map:
+                    out.append(
+                        "       Unfocused / Paused Context:")
+                    for pid, (ptitle, pnote) in paused_map.items():
+                        out.append(f"          - [{pid}] {ptitle}")
+                        if pnote:
+                            out.append(f"            * Note: {pnote}")
 
         # Each project is an isolated block: trailing blank line +
         # separator bar close it off before the next block.

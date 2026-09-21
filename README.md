@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.4.0-blue)]()
+[![version](https://img.shields.io/badge/version-0.4.1-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -84,7 +84,7 @@ chmod +x ck
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.4.0
+ck -v    # → ck version 0.4.1
 ```
 
 ---
@@ -224,16 +224,40 @@ carries a note:
   [i] Task [2] implement API mapping lost focus — moved to Unfocused / Paused Context (note preserved; archived by `ck done`).
   ```
 
-- **Without a note** — a soft prompt nudges you to attach one before the
-  context is lost (the task itself is untouched):
+- **Without a note** — before the switch completes, an interactive TTY session
+  offers to capture the context first:
+
+  ```text
+  $ ck start 3
+  Task #2 lost focus. Add a process note? [y/N]: y
+  Note text: paused mid-refactor — mapping layer half done
+  * Note saved for [2]: paused mid-refactor — mapping layer half done
+  -> Focused [3]: write docs
+  ```
+
+  Answering `N` (or just pressing Enter) proceeds with the switch and emits the
+  soft hint instead:
 
   ```text
   -> Focused [3]: write docs
   [!] Task #2 lost focus without a note. Attach one via `ck note <text>`.
   ```
 
-  (Switching back with `ck start 2` resumes the task; completing it with
-  `ck done 2` archives its note into HISTORY.md and clears it.)
+  Non-interactive sessions (CI, pipes, scripts — stdin or stdout not a TTY)
+  never prompt and always get the soft hint. Flags: `--no-input` skips the
+  prompt unconditionally; `-y` / `--yes` assumes "yes" and asks only for the
+  note text.
+
+  (Switching back with `ck start 2` resumes the task and restores its note;
+  completing it with `ck done 2` archives the note into HISTORY.md and clears
+  it.)
+
+Every open task that previously held focus — with or without a note — stays
+listed under **Unfocused / Paused Context** in `ck st` and `ck dashboard -v`
+until it is re-focused or completed; paused tasks are excluded from the generic
+`[!] Skipped` list so they are never buried there. A paused task's note stays
+bound to it across further focus switches and is restored as the active note
+when the task is re-focused.
 
 ---
 

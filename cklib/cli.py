@@ -41,10 +41,12 @@ Local (current project):
   st --all                   Also print the full PLAN.md
   list                       Print task list to STDOUT
   init                       Initialize .ck/ locally (use --register to register globally)
-  start <ID>                 Mark task ID as focused ([>]); 0 resets focus
-                             (a noted task that loses focus is archived to
-                             HISTORY.md and shown as Unfocused / Paused
-                             Context; a noteless one gets a soft hint)
+  start <ID>                 Mark task ID as focused ([>]); 0 resets focus.
+                             A noted task that loses focus moves to
+                             Unfocused / Paused Context (its note travels
+                             with it); a noteless one prompts for a note
+                             (TTY) or gets a soft hint. Flags: --no-input
+                             (never prompt), -y (assume yes, ask text only)
   done <ID|Range>            Mark task(s) as done ([x])
   add <text>                 Insert a new open task before ## Completed
   note <text>                Attach/update a process note on the active task
@@ -196,6 +198,12 @@ def build_parser() -> "argparse.ArgumentParser":
     p_start.add_argument(
         "task_id", type=int,
         help="Task ID to focus; 0 resets focus (demoted task is reported)")
+    p_start.add_argument(
+        "--no-input", dest="no_input", action="store_true",
+        help="Never prompt for a note on focus loss (non-interactive)")
+    p_start.add_argument(
+        "-y", "--yes", dest="assume_yes", action="store_true",
+        help="Assume 'yes' at the note prompt (asks only for the text)")
 
     p_done = sub.add_parser("done", help="Mark task(s) done")
     p_done.add_argument("spec", help="Task ID, range, or list (e.g. 3, 2-4)")
@@ -297,7 +305,7 @@ _LEGACY_FLAGS: dict[str, frozenset] = {
                      "--all"}),
     "dashboard": frozenset({"-v", "--verbose"}),
     "list": frozenset(),
-    "start": frozenset(),
+    "start": frozenset({"--no-input", "-y", "--yes"}),
     "done": frozenset(),
     "add": frozenset(),
     "note": frozenset(),
@@ -347,6 +355,50 @@ def _reject_unknown_flags(cmd: str, rest: List[str]) -> Optional[List[str]]:
         else:
             out.append(tok)
     return out
+
+
+def _prompt_note_before_switch(ck: ContextKeeper, *, no_input: bool = False,
+                               assume_yes: bool = False) -> None:
+    """Interactive note prompt before a focus switch demotes a task.
+
+    When the currently focused task has NO process note and stdin
+    AND stdout are interactive TTYs, ask:
+
+        Task #<OLD_ID> lost focus. Add a process note? [y/N]:
+
+    - 'y'/'Y' -> ask ``Note text: `` and save it onto the old task
+      (the subsequent switch then carries it into the paused
+      registry instead of losing it).
+    - 'N'/Enter/EOF -> proceed silently; the post-switch soft hint
+      is emitted by :func:`_print_focus_result`.
+    - Non-interactive (CI/pipe/script) -> never prompt; the soft
+      hint after the switch is the only notice.
+
+    ``no_input`` skips the prompt unconditionally; ``assume_yes``
+    (``-y``) skips the y/N confirmation and asks only for the text.
+    """
+    if no_input:
+        return
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        return
+    info = ck.pending_focus_loss()
+    if info is None or info["has_note"]:
+        return
+    try:
+        if not assume_yes:
+            answer = input(
+                f"Task #{info['id']} lost focus. "
+                "Add a process note? [y/N]: ")
+            if answer.strip().lower() not in ("y", "yes"):
+                return
+        text = input("Note text: ")
+    except (EOFError, KeyboardInterrupt):
+        return
+    text = text.strip()
+    if not text:
+        return
+    saved = ck.set_note(text)
+    print(f"* Note saved for [{saved['id']}]: {saved['note']}")
 
 
 def _print_focus_result(result) -> None:
@@ -461,6 +513,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         elif args.command == "info":
             print(ck.info())
         elif args.command == "start":
+            _prompt_note_before_switch(
+                ck,
+                no_input=getattr(args, "no_input", False),
+                assume_yes=getattr(args, "assume_yes", False),
+            )
             result = ck.start(args.task_id)
             _print_focus_result(result)
         elif args.command == "done":
@@ -619,14 +676,27 @@ def _legacy_dispatch(raw: List[str]) -> int:
         elif cmd == "info":
             print(ck.info())
         elif cmd == "start":
-            if not rest:
+            no_input = False
+            assume_yes = False
+            id_tokens: List[str] = []
+            for tok in rest:
+                if tok == "--no-input":
+                    no_input = True
+                elif tok in ("-y", "--yes"):
+                    assume_yes = True
+                else:
+                    id_tokens.append(tok)
+            if not id_tokens:
                 print("Usage: ck start <ID>")
                 return 2
             try:
-                tid = int(rest[0])
+                tid = int(id_tokens[0])
             except ValueError:
-                _print_error(f"ERROR: Invalid task ID: {rest[0]!r}")
+                _print_error(
+                    f"ERROR: Invalid task ID: {id_tokens[0]!r}")
                 return 2
+            _prompt_note_before_switch(
+                ck, no_input=no_input, assume_yes=assume_yes)
             result = ck.start(tid)
             _print_focus_result(result)
         elif cmd == "done":
