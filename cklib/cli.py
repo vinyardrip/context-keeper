@@ -26,6 +26,7 @@ from .sandbox import (
     enter_sandbox,
     exit_sandbox,
     is_dev_entrypoint,
+    is_dev_mode,
     reject_dev_exit,
 )
 
@@ -868,6 +869,27 @@ def _resolve_install_source(script_name: str) -> Optional[Path]:
     return None
 
 
+def _refuse_global_mutation_in_dev_mode(action: str) -> bool:
+    """Print a clean refusal when dev mode targets the GLOBAL install.
+
+    DEV-MODE GUARDRAIL (spec): dev-mode execution/testing must never
+    touch, overwrite or mutate global system binaries
+    (``~/.local/bin/ck``) or global state (``~/.config/ck/``).
+    Returns True when a refusal was printed (caller must bail).
+    """
+    if not is_dev_mode():
+        return False
+    print(
+        f"[!] Dev mode: `{action}` would mutate the global installation "
+        f"({USER_INSTALL_PATH}, {SNAPSHOT_INSTALL_DIR})."
+    )
+    print(
+        "    Sandbox sessions never touch global state — run this "
+        "command outside dev mode (plain `ck` without CK_SANDBOX)."
+    )
+    return True
+
+
 def _install_user(dev: bool = False) -> None:
     """Install production ``ck`` as a PHYSICAL copy (never a symlink).
 
@@ -894,6 +916,8 @@ def _install_user(dev: bool = False) -> None:
         )
         print("    (no global dev entrypoint is installed).")
         print("    Production install (physical copy): ./ck install")
+        return
+    if _refuse_global_mutation_in_dev_mode("install"):
         return
     source = _resolve_install_source("ck")
     if source is None:
@@ -988,6 +1012,10 @@ def _uninstall_user() -> None:
 
     ``ck uninstall`` tears down the whole user installation:
 
+    DEV-MODE GUARDRAIL: refuses (clean message, exit-code-free no-op)
+    when dev mode is active — a sandbox session must never remove the
+    global binary or the package snapshot.
+
     - ``$USER_BIN/ck`` — the physical copy written by ``ck install``
       (regular file), or a legacy symlink from older versions;
     - ``$USER_BIN/ck-dev`` — the legacy dev entrypoint created by the
@@ -996,7 +1024,12 @@ def _uninstall_user() -> None:
 
     Directories at the bin paths are refused (never deleted); missing
     paths are reported gracefully.
+    DEV-MODE GUARDRAIL: refuses with a clean message (no mutation)
+    when dev mode is active — a sandbox session must never remove the
+    global binary or the package snapshot.
     """
+    if _refuse_global_mutation_in_dev_mode("uninstall"):
+        return
     bin_dir = _user_bin_dir()
     targets = (bin_dir / "ck", bin_dir / _DEV_SCRIPT_NAME)
     for target in targets:

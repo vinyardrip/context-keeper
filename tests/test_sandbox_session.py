@@ -24,6 +24,7 @@ import io
 import json
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -577,6 +578,132 @@ class TestSandboxPathPriority(_SandboxAnchor):
         # The banner therefore reports the LOCAL DEV binary.
         self.assertIn(f"Active binary: {entry / 'ck'}", out)
         self.assertNotIn(f"Active binary: {dirs['global'] / 'ck'}", out)
+
+
+class TestSessionSourcePinning(_SandboxAnchor):
+    """Dev-session source pinning: `ck -v` inside ./ck-dev must run
+    the LOCAL checkout's code, even against a decoy global binary.
+
+    Covers the launcher-side pin (sandbox_shell_env exports
+    CK_SANDBOX_ROOT + position-0 PYTHONPATH), the in-process pin
+    (enter_sandbox pins sys.path), and strict routing in
+    active_binary_path (a global binary winning the raw PATH race is
+    overridden inside a dev context).
+    """
+
+    def _dirs(self, names) -> dict:
+        base = Path(tempfile.mkdtemp(prefix="ck-srcpin-"))
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        made = {}
+        for name in names:
+            d = base / name
+            d.mkdir()
+            exe = d / "ck"
+            exe.write_text("#!/bin/sh\necho ck\n", encoding="utf-8")
+            exe.chmod(0o755)
+            made[name] = d
+        return made
+
+    def test_shell_env_pins_pythonpath_to_front(self):
+        dirs = self._dirs(("checkout",))
+        env_in = {"PYTHONPATH": "/opt/site-packages:/somewhere/else"}
+        with mock.patch.dict(os.environ, env_in, clear=False), \
+                mock.patch.object(cksandbox, "production_repo_root",
+                                  return_value=dirs["checkout"]), \
+                mock.patch.object(cksandbox, "sandbox_root",
+                                  return_value=dirs["checkout"] / ".sandbox"):
+            env = cksandbox.sandbox_shell_env(dirs["checkout"])
+        parts = env["PYTHONPATH"].split(os.pathsep)
+        self.assertEqual(parts[0], str(dirs["checkout"]))
+        self.assertIn("/opt/site-packages", parts)
+
+    def test_shell_env_moves_existing_repo_root_to_front(self):
+        dirs = self._dirs(("checkout",))
+        env_in = {"PYTHONPATH": os.pathsep.join(
+            ["/other", str(dirs["checkout"])])}
+        with mock.patch.dict(os.environ, env_in, clear=False), \
+                mock.patch.object(cksandbox, "production_repo_root",
+                                  return_value=dirs["checkout"]), \
+                mock.patch.object(cksandbox, "sandbox_root",
+                                  return_value=dirs["checkout"] / ".sandbox"):
+            env = cksandbox.sandbox_shell_env(dirs["checkout"])
+        self.assertEqual(
+            env["PYTHONPATH"].split(os.pathsep),
+            [str(dirs["checkout"]), "/other"])
+
+    def test_shell_env_exports_sandbox_root_anchor(self):
+        """CK_SANDBOX_ROOT exported so the `ck` launcher's session pin
+        can derive the checkout root dynamically."""
+        dirs = self._dirs(("checkout",))
+        with mock.patch.dict(os.environ, {}, clear=False), \
+                mock.patch.object(cksandbox, "production_repo_root",
+                                  return_value=dirs["checkout"]), \
+                mock.patch.object(cksandbox, "sandbox_root",
+                                  return_value=dirs["checkout"] / ".sandbox"):
+            env = cksandbox.sandbox_shell_env(dirs["checkout"])
+        self.assertEqual(env["CK_SANDBOX"], "1")
+        self.assertEqual(env[cksandbox.SANDBOX_ROOT_ENV],
+                         str(dirs["checkout"] / ".sandbox"))
+        self.assertEqual(env[cksandbox.SANDBOX_SHELL_ENV], "1")
+
+    def test_enter_sandbox_pins_sys_path_position_zero(self):
+        """enter_sandbox() forces the checkout to sys.path[0] so the
+        running process itself imports the workspace sources."""
+        self._build_minimal_sandbox()
+        proj = sandbox_root() / "projects" / "alpha"
+        proj.mkdir(exist_ok=True)
+        (sandbox_root() / "config" / "projects.json").write_text(
+            "{}", encoding="utf-8")
+        repo_root = Path(cksandbox.__file__).resolve().parent.parent
+        buf = io.StringIO()
+        captured = {}
+        with mock.patch.dict(os.environ, {"CK_SANDBOX": ""},
+                             clear=False):
+            with redirect_stdout(buf):
+                code = cksandbox.enter_sandbox(project=proj)
+            captured["front"] = sys.path[0] if sys.path else None
+        self.assertEqual(code, 0)
+        self.assertEqual(captured["front"], str(repo_root))
+
+    def test_strict_routing_overrides_global_binary_in_dev_context(self):
+        """Inside a session subshell, a global binary that wins the raw
+        PATH race is strictly re-routed to the checkout's dev binary."""
+        dirs = self._dirs(("checkout", "global"))
+        env = {
+            "PATH": os.pathsep.join(
+                [str(dirs["global"]), str(dirs["checkout"])]),
+            cksandbox.SANDBOX_SHELL_ENV: "1",
+            cksandbox.SANDBOX_ROOT_ENV: str(
+                dirs["checkout"] / ".sandbox"),
+        }
+        with mock.patch.object(cksandbox, "production_repo_root",
+                               return_value=dirs["checkout"]):
+            resolved = cksandbox.active_binary_path(env=env)
+        self.assertEqual(resolved, dirs["checkout"] / "ck")
+
+    def test_no_strict_routing_outside_dev_context(self):
+        """Without dev markers the raw PATH order wins (production
+        semantics untouched)."""
+        dirs = self._dirs(("checkout", "global"))
+        env = {"PATH": os.pathsep.join(
+            [str(dirs["global"]), str(dirs["checkout"])])}
+        with mock.patch.object(cksandbox, "production_repo_root",
+                               return_value=dirs["checkout"]):
+            self.assertEqual(
+                cksandbox.active_binary_path(env=env),
+                dirs["global"] / "ck")
+
+    def test_local_dev_binary_helper(self):
+        dirs = self._dirs(("checkout",))
+        with mock.patch.object(cksandbox, "production_repo_root",
+                               return_value=dirs["checkout"]):
+            self.assertEqual(cksandbox._local_dev_binary(),
+                             dirs["checkout"] / "ck")
+        empty = Path(tempfile.mkdtemp(prefix="ck-emptyroot-"))
+        self.addCleanup(shutil.rmtree, empty, ignore_errors=True)
+        with mock.patch.object(cksandbox, "production_repo_root",
+                               return_value=empty):
+            self.assertIsNone(cksandbox._local_dev_binary())
 
 
 class TestBinaryResolution(unittest.TestCase):
