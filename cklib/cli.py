@@ -224,7 +224,16 @@ def build_parser() -> "argparse.ArgumentParser":
 
     sub.add_parser("save", help="Two-step save + local commit")
     sub.add_parser("edit", help="Open PLAN.md in $EDITOR")
-    sub.add_parser("log", help="Open HISTORY.md in $EDITOR")
+    p_log = sub.add_parser(
+        "log", help="Open HISTORY.md in $EDITOR (--all: view the "
+        "full archive history)"
+    )
+    p_log.add_argument(
+        "--all", action="store_true",
+        help="View the full history: every rotation archive (.md.gz "
+             "decompressed / legacy .md.bak, oldest first) followed by "
+             "the current HISTORY.md",
+    )
     sub.add_parser("info", help="Show installation diagnostics")
 
     p_reg = sub.add_parser("register", help="Register a project globally")
@@ -319,7 +328,7 @@ _LEGACY_FLAGS: dict[str, frozenset] = {
     "notes": frozenset(),
     "save": frozenset(),
     "edit": frozenset(),
-    "log": frozenset(),
+    "log": frozenset({"--all"}),
     "info": frozenset(),
     "register": frozenset({"-n", "--name", "--path"}),
     "unregister": frozenset({"--path"}),
@@ -474,6 +483,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     if raw[0] in _STATUS_SHORTCUTS:
         raw = ["st", *raw]
 
+    # `ck --all log` (flag-first) is a documented synonym of
+    # `ck log --all`; normalize so the legacy dispatcher sees the
+    # command first.
+    if raw[0] == "--all" and len(raw) >= 2 and raw[1] == "log":
+        raw = ["log", "--all", *raw[2:]]
+
     # DANGLING WORKING DIRECTORY: when the cwd's descriptor is gone
     # (wiped sandbox, external rebuild), a rootless keeper can still
     # serve the GLOBAL registry commands and global-fallback reads —
@@ -553,7 +568,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         elif args.command == "edit":
             ck.edit_plan()
         elif args.command == "log":
-            ck.edit_log()
+            if args.all:
+                print(ck.read_full_history())
+            else:
+                ck.edit_log()
         elif args.command == "register":
             path = Path(args.path).resolve() if args.path else None
             entry = ck.register(path=path, name=args.name)
@@ -750,7 +768,10 @@ def _legacy_dispatch(raw: List[str]) -> int:
         elif cmd == "edit":
             ck.edit_plan()
         elif cmd == "log":
-            ck.edit_log()
+            if "--all" in rest:
+                print(ck.read_full_history())
+            else:
+                ck.edit_log()
         elif cmd == "register":
             name = None
             path = None

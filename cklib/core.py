@@ -42,8 +42,10 @@ from .config import (
     GLOBAL_REGISTRY_FILE,
     GLOBAL_STATE_FILE,
     HISTORY_FILENAME,
-    HISTORY_LIMIT,
     LEGACY_GLOBAL_CONFIG_FILE,
+    compress_archives_enabled,
+    history_limit,
+    max_bak_files,
     LOCAL_GITIGNORE_ENTRIES,
     PLAN_FILENAME,
     PROMPT_FILENAME,
@@ -61,6 +63,14 @@ from .config import (
     warn_if_sensitive_root,
 )
 from .models import Notes, Task, TaskList, TaskStatus
+from .history import (
+    archive_name,
+    concat_archives,
+    compress_to,
+    fifo_cleanup,
+    list_history_archives,
+    read_archive,
+)
 from .parser import (
     _atomic_write_text,
     _find_completed_line,
@@ -563,22 +573,58 @@ class ContextKeeper:
         ``### <date>`` headings, so ``###`` text inside note bodies
         or code fences can never trigger a false rotation or corrupt
         the preserved tail.
+
+        Archive format (``COMPRESS_ARCHIVES``, default True):
+        ``HISTORY_<YYYYMMDD>_<HHMMSS>.md.gz`` — gzip-compressed with
+        Python's built-in ``gzip`` module (fully cross-platform, no
+        external binaries). When compression is disabled the legacy
+        uncompressed ``HISTORY_<YYYYMMDD>_<HHMMSS>.md.bak`` name is
+        preserved. Retention is enforced FIFO-style: the oldest
+        archives beyond ``MAX_BAK_FILES`` are deleted after each
+        rotation.
         """
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        archive = self.ck_path / f"HISTORY_{ts}.md.bak"
+        now = datetime.now()
         with file_lock(self.history_file):
             # DEV MODE: rotation is a WRITE flow — operate entirely on
             # the sandboxed copies (archive + replacement) while
             # reading the ORIGINAL history for the preserved tail.
             content = self.history_file.read_text(encoding="utf-8")
             last_entry = _last_history_entry(content)
-            header = f"# History {self.root.name}\nArchive: {archive.name}\n\n"
-            new_text = header + last_entry
             target_dir = (
                 resolve_write_path(self.ck_path) if is_dev_mode()
                 else self.ck_path
             )
-            archive = target_dir / f"HISTORY_{ts}.md.bak"
+            if is_dev_mode():
+                # COPY-ON-FIRST-WRITE: the rotation consumes the
+                # history file itself (rename), so the sandboxed
+                # mirror must exist before the rename. Without this,
+                # the first dev-mode rotation would archive an empty
+                # tree and drop the real context on the floor.
+                dev_history = resolve_write_path(self.history_file)
+                if not dev_history.exists():
+                    dev_history.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(self.history_file, dev_history)
+            compressed = compress_archives_enabled()
+            # The archive is first renamed under the legacy .md.bak
+            # name (honest extension for plain bytes); compression
+            # then upgrades it to .md.gz. When compression fails the
+            # file stays a valid uncompressed .md.bak — data is never
+            # lost and extensions always match content.
+            # Same-second rotations get a dedupe suffix so no
+            # archive can ever silently overwrite another.
+            seq = 0
+            while (
+                (target_dir / archive_name(now, compressed=False, seq=seq)).exists()
+                or (target_dir / archive_name(now, compressed=True, seq=seq)).exists()
+            ):
+                seq += 1
+            plain = target_dir / archive_name(now, compressed=False, seq=seq)
+            gz = target_dir / archive_name(now, compressed=True, seq=seq)
+            header = (
+                f"# History {self.root.name}\n"
+                f"Archive: {gz.name if compressed else plain.name}\n\n"
+            )
+            new_text = header + last_entry
             # Write the replacement content to a temp file first so
             # there is never a window where HISTORY.md is absent.
             # fsync before the renames so a crash cannot leave an
@@ -601,7 +647,22 @@ class ContextKeeper:
                 rotated = resolve_write_path(self.history_file) \
                     if is_dev_mode() else self.history_file
                 if rotated.exists():
-                    rotated.rename(archive)
+                    rotated.rename(plain)
+                if compressed:
+                    # Gzip-compress the renamed archive: compress to a
+                    # temp sibling first, then atomically replace. On
+                    # failure the plain .md.bak stays in place (still
+                    # a complete archive) and the temp file is removed.
+                    tmp_gz = target_dir / f".{gz.name}.tmp"
+                    try:
+                        compress_to(plain, tmp_gz)
+                        os.replace(tmp_gz, gz)
+                        plain.unlink()
+                    except OSError:
+                        try:
+                            os.unlink(tmp_gz)
+                        except OSError:
+                            pass
                 os.replace(tmp_name, rotated)
             except Exception:
                 try:
@@ -609,10 +670,17 @@ class ContextKeeper:
                 except OSError:
                     pass
                 raise
-        print(
-            f"History reached limit ({HISTORY_LIMIT} entries) "
+            # FIFO retention: prune the oldest archives beyond
+            # MAX_BAK_FILES (both .md.gz and legacy .md.bak count
+            # against the same budget).
+            pruned = fifo_cleanup(target_dir, max_bak_files())
+        message = (
+            f"History reached limit ({history_limit()} entries) "
             "and was archived. Context preserved."
         )
+        if pruned:
+            message += f" ({len(pruned)} oldest archive(s) purged.)"
+        print(message)
 
     def _read_state(self) -> dict:
         path = self.state_file
@@ -1709,7 +1777,7 @@ class ContextKeeper:
                     history_text = self.history_file.read_text(
                         encoding="utf-8")
                 needs_rotation = (
-                    _count_history_entries(history_text) > HISTORY_LIMIT
+                    _count_history_entries(history_text) > history_limit()
                 )
             note_recorded = True
             printer(
@@ -1890,6 +1958,58 @@ class ContextKeeper:
                 encoding="utf-8",
             )
         subprocess.run([get_editor(self.root), str(target)], check=False)
+
+    # ------------------------------------------------------------------ #
+    # COMMAND: log --all (archive-aware read-only view)                   #
+    # ------------------------------------------------------------------ #
+
+    def read_full_history(self) -> str:
+        """Full history text: archives (old→new) then the live file.
+
+        Every rotation archive in ``.ck/`` is read — ``.md.gz``
+        transparently decompressed, legacy ``.md.bak`` read as plain
+        text — in chronological order and concatenated, followed by
+        the current ``HISTORY.md``. A corrupted archive contributes a
+        warning line in place instead of failing the whole view.
+
+        In dev mode the sandboxed mirror is preferred when it exists
+        (write-your-writes), while archive listing always includes the
+        ORIGINAL ``.ck/`` so real rotation archives stay visible.
+        """
+        if self.root is None or self.ck_path is None:
+            raise ValueError(
+                "Not in a valid project directory — no history to read."
+            )
+        dirs: list = []
+        ck_dir = resolve_write_path(self.ck_path) \
+            if is_dev_mode() else self.ck_path
+        if ck_dir.is_dir():
+            dirs.append(ck_dir)
+        # Real .ck/ keeps archives written outside the dev session.
+        if is_dev_mode() and self.ck_path != ck_dir \
+                and self.ck_path.is_dir():
+            dirs.append(self.ck_path)
+        paths = list_history_archives(dirs[0]) if dirs else []
+        for extra in dirs[1:]:
+            paths.extend(list_history_archives(extra))
+        text, warnings = concat_archives(paths)
+        parts: list = []
+        if warnings:
+            parts.append("\n".join(warnings))
+        if text:
+            parts.append(text)
+        live = self.history_file
+        if is_dev_mode() and live is not None:
+            mirrored = resolve_write_path(live)
+            if mirrored.exists():
+                live = mirrored
+        if live is not None and live.exists():
+            live_text = live.read_text(encoding="utf-8")
+            if live_text.strip():
+                parts.append(live_text)
+        if not parts:
+            return "[i] No history entries found."
+        return "\n".join(parts)
 
     # ------------------------------------------------------------------ #
     # COMMAND: update (git pull --ff-only)                                #
