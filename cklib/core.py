@@ -21,10 +21,15 @@ from typing import Callable, Optional, Tuple
 
 from . import git as gith
 from . import registry
+from . import ui
 from .sandbox import (
+    PROJECTS_SUBDIR,
     is_dev_mode,
+    log_sandbox_debug,
+    project_hash,
     resolve_write_path,
     sandbox_project_dir,
+    sandbox_root,
 )
 from .config import (
     CK_DIR_NAME,
@@ -43,6 +48,7 @@ from .config import (
     PLAN_FILENAME,
     PROMPT_FILENAME,
     README_FILENAME,
+    SNAPSHOT_INSTALL_DIR,
     STATE_FILENAME,
     TRACKED_GITIGNORE_PROTECTIONS,
     UPDATE_CHECK_INTERVAL_HOURS,
@@ -51,9 +57,10 @@ from .config import (
     file_lock,
     find_project_root,
     get_editor,
+    read_color_config,
     warn_if_sensitive_root,
 )
-from .models import Notes, TaskList, TaskStatus
+from .models import Notes, Task, TaskList, TaskStatus
 from .parser import (
     _atomic_write_text,
     _find_completed_line,
@@ -133,23 +140,354 @@ class FocusResult:
     path: Path
 
 
+@dataclass
+class ProjectContext:
+    """A resolved project context for READ operations (``ck st`` & co).
+
+    ``source`` describes HOW the context was found:
+
+    - ``"local"``  — the bound/start directory carries its own
+      ``PLAN.md`` (real, or a dev-mode sandbox mirror);
+    - ``"parent"`` — an ancestor directory (up to the Git repo root)
+      carries the project;
+    - ``"global"`` — nothing found locally: the most recently active
+      project from the global registry.
+    """
+
+    root: Path
+    source: str  # "local" | "parent" | "global"
+
+
+# ---------------------------------------------------------------------- #
+# Project context resolution helpers (local → parent → global registry)
+# ---------------------------------------------------------------------- #
+
+
+def _sandbox_plan_mirror(project_root: Path) -> Optional[Path]:
+    """Sandboxed mirror of ``<project_root>/.ck/PLAN.md`` (dev mode).
+
+    Pure path computation: unlike :func:`resolve_write_path` it never
+    creates directories, so probing candidates during context
+    resolution has no filesystem side effects. Returns None outside
+    dev mode.
+    """
+    if not is_dev_mode():
+        return None
+    try:
+        return (
+            sandbox_root() / PROJECTS_SUBDIR
+            / project_hash(project_root) / CK_DIR_NAME / PLAN_FILENAME
+        )
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _has_resolvable_plan(project_root: Path) -> bool:
+    """True when ``project_root`` has a PLAN.md (real or sandboxed)."""
+    real = project_root / CK_DIR_NAME / PLAN_FILENAME
+    if real.is_file():
+        return True
+    mirror = _sandbox_plan_mirror(project_root)
+    return mirror is not None and mirror.is_file()
+
+
+def _newest_real_plan(root_plan: Path, real: Path) -> Optional[Path]:
+    """Newest of the two real plan candidates, or None when neither exists.
+
+    The project-root ``PLAN.md`` wins ties (``>=``) so a hand-authored
+    root plan is preferred over an equally fresh ``.ck`` copy.
+    """
+    try:
+        if root_plan.is_file():
+            if (not real.is_file()
+                    or root_plan.stat().st_mtime_ns >= real.stat().st_mtime_ns):
+                return root_plan
+            return real
+        return real if real.is_file() else None
+    except OSError:
+        return real if real.is_file() else None
+
+
+def _sync_sandbox_plan_mirror(project_root: Path, *,
+                              seed_missing: bool = False,
+                              promote_missing: bool = False) -> None:
+    """Bidirectional, mtime-based convergence of the plan copies (dev mode).
+
+    Three on-disk candidates take part:
+
+    - the project-root ``PLAN.md`` (``<root>/PLAN.md``),
+    - the real ``<root>/.ck/PLAN.md``,
+    - the sandboxed mirror (``.sandbox/projects/<hash>/.ck/PLAN.md``)
+      — the copy dev-mode mutations actually write.
+
+    Direction is decided STRICTLY by ``st_mtime_ns``:
+
+    - MIRROR NEWER than the newest real plan → the last write was a
+      dev mutation (``ck-dev add``/``start``/``done``/…): the mirror
+      content is PROMOTED into the existing project-root ``PLAN.md``
+      so read-after-write holds — ``ck-dev st`` right after
+      ``ck-dev add`` shows the new task, and the root file itself
+      contains it. Without this, the unidirectional model hid every
+      dev mutation behind the (stale) root plan on the read path.
+    - MIRROR OLDER → the real plan changed underneath the session
+      (external editor, ``git pull``/``checkout``, a tool rewriting
+      the file): the mirror is re-seeded so later mutations compose
+      on current content instead of forking from a stale snapshot.
+    - EQUAL mtimes / equal content → converged no-op. The content
+      equality guard on both write branches prevents mtime
+      ping-pong: every sync would otherwise bump the target's mtime
+      past the source and flip the direction on the next read
+      forever.
+
+    The promotion target is ONLY the project-root ``PLAN.md`` — it
+    is not a sandbox-protected path, so the write is a deliberate
+    real (production) side effect. The real ``.ck/`` tree stays
+    immutable in dev mode (production-immutability contract); it
+    re-converges indirectly because the promoted root plan becomes
+    the newest real source for later re-seeds.
+
+    MISSING TARGET (``promote_missing=True`` — read/display path
+    ONLY): when the project-root ``PLAN.md`` does NOT exist yet (a
+    project bootstrapped entirely in dev mode — e.g.
+    ``.sandbox/projects/<hash>/`` fixtures or an uninitialized
+    directory with just ``.ck/PLAN.md``), the dev mutation has no
+    real file to promote into and display would silently fall back
+    to the (stale-seeming) ``.ck`` copy. With the flag set, the
+    root plan is CREATED from the mirror content so the mutation is
+    durable and read-after-write holds. WITHOUT the flag (the
+    mutation path) a missing root plan is still never created:
+    dev mutations must not materialize production files behind the
+    user's back — display falls back to the real ``.ck/PLAN.md``
+    (or the mirror) as usual.
+
+    SOURCE SELECTION: the authoritative real plan is the NEWEST of
+    the two real candidates (see :func:`_newest_real_plan`) — a
+    root-level plan edited more recently than ``.ck/PLAN.md`` wins,
+    so the mirror (and every later dev mutation) composes on the
+    content the read commands actually display.
+
+    SEEDING: with ``seed_missing=True`` (MUTATION path only —
+    :meth:`ContextKeeper._plan_load_path`) a MISSING mirror is
+    created from the newest real plan, so the FIRST dev mutation of
+    a session forks from current root content instead of the stale
+    ``.ck`` scaffold. Read paths never pass the flag: a read must
+    not materialize the ``.sandbox/`` skeleton.
+
+    Called from BOTH the mutation paths
+    (:meth:`ContextKeeper._plan_load_path`, i.e. every
+    ``add``/``start``/``done``/``note``/``save`` read-modify-write
+    cycle), ``ck-dev edit`` (:meth:`ContextKeeper.edit_plan`) AND
+    the read path (:meth:`ContextKeeper._plan_display_path`, i.e.
+    ``st``/``list``/``st --all``). Healing on every read
+    converges the copies eagerly — an external edit followed by
+    nothing but ``ck-dev st`` still leaves the mirror up to date,
+    and a pending dev mutation is promoted by the very next read
+    (including first-time CREATION of the root plan when the
+    project carries only ``.ck/PLAN.md``).
+
+    No-ops (silently) outside dev mode, when there is no real file,
+    or on any filesystem error — this is a freshness heuristic and
+    must never break a command.
+    """
+    if not is_dev_mode():
+        return
+    real = project_root / CK_DIR_NAME / PLAN_FILENAME
+    root_plan = project_root / PLAN_FILENAME
+    mirror = _sandbox_plan_mirror(project_root)
+    if mirror is None:
+        return
+    try:
+        if not mirror.is_file():
+            if not seed_missing:
+                return
+            # First dev mutation of the session: seed the working
+            # copy from the NEWEST real plan so the mutation composes
+            # on current content instead of forking from a stale
+            # ``.ck`` snapshot.
+            source = _newest_real_plan(root_plan, real)
+            if source is None:
+                return
+            mirror.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write_text(mirror, source.read_text(encoding="utf-8"))
+            log_sandbox_debug(
+                f"Seeded PLAN.md mirror from newest real plan "
+                f"({source} -> {mirror})"
+            )
+            return
+
+        # Authoritative real source: the NEWEST on-disk plan — the
+        # project-root PLAN.md when it exists and was edited after
+        # .ck/PLAN.md (or when .ck/PLAN.md is absent), else .ck/PLAN.md.
+        source = _newest_real_plan(root_plan, real)
+        if source is None:
+            return
+        mirror_ns = mirror.stat().st_mtime_ns
+        source_ns = source.stat().st_mtime_ns
+        if mirror_ns > source_ns:
+            # The mirror is the NEWEST copy overall: a dev mutation
+            # wrote last — promote its content into the root plan.
+            # Target is ONLY the root plan (not sandbox-protected);
+            # when it does not exist yet (dev-bootstrapped project
+            # with only ``.ck/PLAN.md``), it is created — but only
+            # on the READ path (``promote_missing=True``): a dev
+            # mutation must never materialize production files.
+            text = mirror.read_text(encoding="utf-8")
+            if root_plan.is_file():
+                if root_plan.read_text(encoding="utf-8") != text:
+                    # Real, atomic write: the root plan is NOT an
+                    # intercepted path, so this deliberately updates
+                    # production (read-after-write promotion).
+                    _atomic_write_text(root_plan, text)
+                    log_sandbox_debug(
+                        f"Promoted newer PLAN.md mirror to root plan "
+                        f"({mirror} -> {root_plan})"
+                    )
+            elif promote_missing:
+                # First-ever materialization of the root plan from a
+                # dev-only session: display requires it (read-after-
+                # write across ``ck-dev add`` → ``ck-dev st``), so the
+                # mutation becomes durable in the real project.
+                # CONTENT GUARD: a re-seeded mirror (real file edited
+                # underneath the session) re-emerges with a NEWER
+                # mtime but IDENTICAL content to the source — that is
+                # a healing artifact, not a dev mutation. Creating a
+                # duplicate root copy for it would let a bare read
+                # fabricate production files; only content that
+                # actually differs from the newest real plan (a real
+                # dev mutation composed on it) is promoted.
+                if source.read_text(encoding="utf-8") != text:
+                    _atomic_write_text(root_plan, text)
+                    log_sandbox_debug(
+                        f"Created root PLAN.md from newer mirror "
+                        f"({mirror} -> {root_plan})"
+                    )
+        elif mirror_ns < source_ns:
+            # Real plan changed underneath the session: re-seed the
+            # stale mirror so later mutations compose on current
+            # content.
+            text = source.read_text(encoding="utf-8")
+            if mirror.read_text(encoding="utf-8") != text:
+                # Atomic write; the mirror path already lives inside
+                # the sandbox, so interception passes it through.
+                _atomic_write_text(mirror, text)
+                log_sandbox_debug(
+                    f"Re-seeded stale PLAN.md mirror from newer real "
+                    f"file ({source} -> {mirror})"
+                )
+        # EQUAL mtimes (or equal content): converged — the equality
+        # guards above prevent mtime ping-pong across repeated reads.
+    except OSError:
+        return  # freshness/convergence must never break a command
+
+
+def _upward_context_candidates(start: Path) -> list:
+    """Directories from ``start`` upward for context resolution.
+
+    Inside a Git work tree the walk stops AT (and includes) the
+    repository root — a ``.ck/`` project living above the repo
+    boundary is deliberately NOT picked up. Outside Git the walk
+    continues to the filesystem root (the classic
+    :func:`find_project_root` behaviour).
+    """
+    try:
+        curr = start.resolve()
+    except (OSError, RuntimeError):
+        curr = Path(os.path.abspath(str(start)))
+    git_top = gith.repo_root(curr)
+    out = [curr]
+    for parent in curr.parents:
+        if git_top is not None:
+            try:
+                parent.relative_to(git_top)
+            except ValueError:
+                break  # escaped the Git repository boundary
+        out.append(parent)
+    return out
+
+
+def _global_context() -> Optional[ProjectContext]:
+    """The most recently active registered project, when usable.
+
+    Registry entries are already sorted by ``last_seen`` (newest
+    first); the first one whose folder still exists AND carries a
+    resolvable PLAN.md (real or sandboxed) wins. Never raises and
+    never creates the registry (no lock churn on a machine where
+    nothing was ever registered).
+    """
+    try:
+        if not registry.has_registry():
+            return None
+        entries = registry.list_projects()
+    except Exception:
+        # Read-side degradation: a locked/corrupt registry must not
+        # crash a read-only command — behave as "no global context".
+        return None
+    for entry in entries:
+        raw = getattr(entry, "path", "")
+        if not raw:
+            continue
+        try:
+            root = Path(raw)
+        except (TypeError, ValueError):
+            continue
+        if _has_resolvable_plan(root):
+            return ProjectContext(root=root, source="global")
+    return None
+
+
 class ContextKeeper:
     """High-level orchestrator. One instance per CLI invocation."""
 
     def __init__(self, root: Optional[Path] = None) -> None:
-        self.root: Path = root or find_project_root()
+        self.root: Optional[Path] = root or find_project_root()
+        # Resolution anchor for READ operations (see resolve_context):
+        # the directory the caller bound explicitly, else the process
+        # cwd — NEVER find_project_root()'s unbounded walk result, so
+        # the Git-repo-root traversal bound cannot be pre-escaped.
+        self._start: Optional[Path] = (
+            Path(root).resolve() if root is not None else None
+        )
+        # DANGLING CWD DEGRADATION: when the working directory has
+        # been wiped underneath the process, ``find_project_root()``
+        # returns None (see :func:`cklib.config.find_project_root`).
+        # The keeper then runs ROOTLESS: global registry commands
+        # (``ck st -g``, ``dashboard``, ``register``, ``unregister``,
+        # ``prune``) operate purely on registry state, while local
+        # commands are rejected by the CLI with a clean "not in a
+        # valid project directory" message instead of a traceback.
+        if self.root is None:
+            self._start = None
+            self.ck_path = None
+            self.state_file = None
+            self.plan_file = None
+            self.history_file = None
+            self.prompt_file = None
+            self.readme_file = None
+            self._color_overrides: Optional[dict] = {}
+            return
         self.ck_path: Path = self.root / CK_DIR_NAME
         self.state_file: Path = self.ck_path / STATE_FILENAME
         self.plan_file: Path = self.ck_path / PLAN_FILENAME
         self.history_file: Path = self.ck_path / HISTORY_FILENAME
         self.prompt_file: Path = self.ck_path / PROMPT_FILENAME
         self.readme_file: Path = self.ck_path / README_FILENAME
+        # Lazily-loaded palette overrides from .ck.json (see
+        # color_overrides()).
+        self._color_overrides: Optional[dict] = None
 
     # ------------------------------------------------------------------ #
     # Internal helpers
     # ------------------------------------------------------------------ #
 
     def _ensure_ck_dir(self) -> None:
+        # ROOTLESS keeper (dangling cwd): there is no project
+        # directory to create anything in — surface the same clean
+        # error the CLI shows for local commands.
+        if self.ck_path is None:
+            raise ValueError(
+                "Not in a valid project directory. "
+                "cd into your project (or use a global command: ck st -g)."
+            )
         # DEV MODE: the .ck/ tree is created inside the sandbox copy
         # for this project, never in the real project directory.
         if is_dev_mode():
@@ -186,10 +524,10 @@ class ContextKeeper:
             # never leave a torn template file.
             _atomic_write_text(path, content)
             if echo:
-                printer(f"\U0001f4dd Created: {label}")
+                printer(f"[+] Created: {label}")
             return True
         if echo:
-            printer(f"\u2139\ufe0f Exists: {label}")
+            printer(f"[i] Exists: {label}")
         return False
 
     def _check_tools(self) -> dict[str, bool]:
@@ -203,7 +541,7 @@ class ContextKeeper:
         if not py_ok:
             v = sys.version_info
             print(
-                f"\u26a0\ufe0f  Warning: Python {v.major}.{v.minor} detected. "
+                f"Warning: Python {v.major}.{v.minor} detected. "
                 "Python 3.8+ recommended."
             )
         return tools
@@ -269,15 +607,26 @@ class ContextKeeper:
                     pass
                 raise
         print(
-            f"\U0001f5c4 History reached limit ({HISTORY_LIMIT} entries) "
+            f"History reached limit ({HISTORY_LIMIT} entries) "
             "and was archived. Context preserved."
         )
 
     def _read_state(self) -> dict:
-        if not self.state_file.exists():
+        path = self.state_file
+        # DEV MODE read-your-writes: once a sandboxed state.json copy
+        # exists (written by a previous dev-mode mutation such as
+        # ``ck note``), reads prefer it so chained commands compose;
+        # with no sandbox copy yet, reads come from the real file.
+        # The mirror probe uses create=False — a read must never
+        # materialize the .sandbox/ skeleton.
+        if is_dev_mode():
+            sandboxed = resolve_write_path(self.state_file, create=False)
+            if sandboxed.exists():
+                path = sandboxed
+        if path is None or not path.exists():
             return {}
         try:
-            return json.loads(self.state_file.read_text(encoding="utf-8"))
+            return json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return {}
 
@@ -378,6 +727,124 @@ class ContextKeeper:
     # AST-based mutations
     # ------------------------------------------------------------------ #
 
+    def _plan_load_path(self) -> Path:
+        """Plan path for MUTATING read-modify-write cycles.
+
+        DEV MODE read-your-writes: prefer the sandboxed copy once it
+        exists (written by a previous dev-mode mutation) so chained
+        commands compose; with no sandbox copy yet it is SEEDED from
+        the newest real plan (root ``PLAN.md`` preferred over the
+        ``.ck`` copy — see :func:`_sync_sandbox_plan_mirror`) so the
+        FIRST dev mutation composes on current content instead of
+        forking from a stale ``.ck`` snapshot. Only this MUTATION
+        path seeds a missing mirror; read paths never materialize
+        ``.sandbox/``.
+
+        STALENESS GUARD: a mirror that is OLDER than the real
+        PLAN.md means the real file was edited externally (editor,
+        ``git pull``, …) after the dev session last touched it —
+        the mirror is refreshed from the real file first, so the
+        mutation composes on CURRENT content instead of forking
+        from a stale snapshot (see
+        :func:`_sync_sandbox_plan_mirror`).
+        """
+        plan_path = self.plan_file
+        if plan_path is None:
+            # ROOTLESS keeper — callers with a None plan path must
+            # guard before calling (see _load_plan /
+            # _require_bound_plan).
+            return plan_path
+        if is_dev_mode():
+            # Mutations must compose on the NEWEST content wherever it
+            # lives: converge the mirror first (bidirectional mtime
+            # sync) and seed it when missing.
+            _sync_sandbox_plan_mirror(self.root, seed_missing=True)
+            sandboxed = resolve_write_path(plan_path, create=False)
+            if sandboxed.exists():
+                plan_path = sandboxed
+        return plan_path
+
+    def _plan_display_path(self) -> Path:
+        """Plan path for READ-ONLY display (``ck st`` / ``ck list``).
+
+        Precedence (BUG FIX — stale read state):
+
+        1. The PROJECT-ROOT ``PLAN.md`` (``<root>/PLAN.md``) wins when
+           it exists — it is the plan users hand-edit at the top of
+           the project, so reads must reflect it. Returning the
+           ``.ck/PLAN.md`` copy here made every read command
+           (``st``/``list``/``st --all``) render the stale
+           ``.ck/`` scaffold instead of the real root plan.
+        2. Otherwise ``.ck/PLAN.md`` is displayed.
+        3. In dev mode ONLY, a project that exists just in the
+           sandbox (bootstrapped by ``ck-dev add``/``init`` in an
+           uninitialized directory) falls back to its sandboxed
+           mirror — the writes of the dev session stay visible
+           instead of rendering a fake empty dashboard. A project
+           WITH a real ``.ck/PLAN.md`` additionally gets the newer
+           mirror promoted into the (possibly first-created) root
+           plan — see the MISSING ROOT PLAN note below.
+
+        MIRROR SYNC: whenever a real plan exists (root or ``.ck/``),
+        this path also converges the sandbox mirror first — strictly
+        ``st_mtime_ns``-based and BIDIRECTIONAL (see
+        :func:`_sync_sandbox_plan_mirror`): a mirror newer than the
+        real plan (the last write was a dev mutation) is PROMOTED
+        into the root plan so read-after-write holds, while a STALE
+        mirror is re-seeded from the newest real plan. Reads display
+        fresh content either way, and converged copies are left
+        untouched (no mtime churn on repeated reads).
+
+        MISSING ROOT PLAN (dev-bootstrapped projects — only
+        ``.ck/PLAN.md`` on disk, e.g. inside
+        ``.sandbox/projects/<hash>/``): promotion now CREATES the
+        root plan from the newer mirror (``promote_missing=True``
+        on this read path only), so a task added by ``ck-dev add``
+        is immediately visible to ``st``/``list`` AND
+        durable in the real project. The method then returns the
+        freshly promoted root plan — exactly the state a project
+        with a pre-existing root plan is already in. Only a project
+        with NO real plan anywhere (uninitialized directory, the
+        dev session lives purely in the mirror) keeps falling back
+        to the plain ``.ck/PLAN.md`` or the mirror — a read must
+        never fabricate production files in a directory the user
+        never initialized.
+        """
+        root_plan = self.root / PLAN_FILENAME
+        if root_plan.is_file():
+            _sync_sandbox_plan_mirror(self.root)
+            return root_plan
+        if self.plan_file.is_file():
+            # No root plan: the dev mutation lives in the mirror —
+            # promote (and, when nothing real exists yet, CREATE) the
+            # root plan, then display the promoted file.
+            _sync_sandbox_plan_mirror(self.root, promote_missing=True)
+            if root_plan.is_file():
+                return root_plan
+            return self.plan_file
+        mirror = _sandbox_plan_mirror(self.root)
+        if mirror is not None and mirror.is_file():
+            # Mirror-only project (no real plan anywhere): display
+            # falls back to the mirror — no root plan is fabricated
+            # for a directory the user never initialized.
+            return mirror
+        return self.plan_file
+
+    def _require_bound_plan(self) -> None:
+        """Write-command guard: a valid project plan must be bound.
+
+        ``ck note`` / ``ck start`` invoked outside any initialized
+        project (no local PLAN.md — real or sandboxed) must abort
+        with a clear error instead of creating orphaned state
+        entries. Note this intentionally does NOT fall back to the
+        global registry: writes target the bound local project only.
+        """
+        if self.plan_file is None or not self._plan_load_path().is_file():
+            raise ValueError(
+                "No active project found. Run 'ck init' in a project "
+                "directory first."
+            )
+
     def _load_plan(self) -> TaskList:
         """Parse PLAN.md with AUTO-REPAIR.
 
@@ -392,14 +859,18 @@ class ContextKeeper:
         mutations read THAT copy so chained commands (add → start →
         done) compose instead of each clobbering the previous
         sandbox write. With no sandbox copy yet, reads come from the
-        real PLAN.md and the first mutation seeds the sandbox.
+        real PLAN.md and the first mutation seeds the sandbox. A
+        mirror OLDER than the real file (external edit underneath
+        the session) is re-seeded first — see
+        :func:`_sync_sandbox_plan_mirror`.
         """
-        plan_path = self.plan_file
-        if is_dev_mode():
-            sandboxed = resolve_write_path(plan_path)
-            if sandboxed.exists():
-                plan_path = sandboxed
-        tl, _repaired = load_repaired_plan(plan_path)
+        if self.plan_file is None:
+            # ROOTLESS keeper (dangling cwd): no project to load.
+            raise ValueError(
+                "No active project found. Run 'ck init' in a project "
+                "directory first."
+            )
+        tl, _repaired = load_repaired_plan(self._plan_load_path())
         return tl
 
     def _commit_plan(self, task_list: TaskList) -> None:
@@ -456,7 +927,12 @@ class ContextKeeper:
         return new_task.id
 
     def start(self, task_id: int) -> FocusResult:
-        """Mark the given task as focused; demote any other focused task."""
+        """Mark the given task as focused; demote any other focused task.
+
+        Aborts with a clear error when no project plan is bound (no
+        initialized project) instead of fabricating an empty plan.
+        """
+        self._require_bound_plan()
         tl = self._load_plan()
         target = tl.focus(task_id)
         self._commit_plan(tl)
@@ -468,6 +944,10 @@ class ContextKeeper:
 
         ``spec`` accepts single IDs (``3``), ranges (``2-4``), and
         comma-separated lists (``1,3,5``).
+
+        Completing the task that carries the active-task process
+        note (see :meth:`set_note`) automatically purges the note
+        along with the completed task context.
         """
         ids = _parse_id_spec(spec)
         if not ids:
@@ -481,6 +961,7 @@ class ContextKeeper:
             # active; the registry pointer must follow (task IDs are
             # positional and can shift, so re-derive from the AST).
             self._sync_active_task(tl)
+            self._purge_note_if_completed(set(transitioned))
         return transitioned
 
     def _sync_active_task(self, tl: TaskList) -> None:
@@ -526,6 +1007,77 @@ class ContextKeeper:
                 fh.write(entry.render())
 
     # ------------------------------------------------------------------ #
+    # COMMAND: note (active-task process note / scratchpad)
+    # ------------------------------------------------------------------ #
+
+    def set_note(self, text: str) -> dict:
+        """Attach or update a short process note on the CURRENT
+        active task (focused task, else first open task).
+
+        The note lives in ``.ck/state.json`` under ``active_task``::
+
+            {"active_task": {"id": 2, "title": "...", "note": "...",
+                             "updated_at": "..."}}
+
+        It is displayed by ``ck st`` (``* Note: <text>``) and purged
+        automatically by :meth:`done` when the noted task is
+        completed. Returns the stored note metadata dict.
+
+        Aborts with a clear error when no project plan is bound (no
+        initialized project) — no orphaned state entries are created.
+        """
+        note = sanitize_task_text(text)
+        if not note:
+            raise ValueError("Note text is empty")
+        self._require_bound_plan()
+        tl = self._load_plan()
+        active = tl.active()
+        if active is None:
+            raise ValueError(
+                "No active task to attach a note to "
+                "(plan is empty or every task is done)"
+            )
+        state = self._read_state()
+        state["active_task"] = {
+            "id": active.id,
+            "title": active.title,
+            "note": note,
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        self._write_state(state)
+        return state["active_task"]
+
+    def get_note(self) -> Optional[dict]:
+        """Return the stored active-task note dict, or None.
+
+        Only a structurally valid entry counts: ``note`` must be a
+        non-empty string and ``id`` an int. Anything else (missing,
+        corrupt, hand-edited) is treated as "no note".
+        """
+        data = self._read_state().get("active_task")
+        if not isinstance(data, dict):
+            return None
+        note = data.get("note")
+        tid = data.get("id")
+        if isinstance(note, str) and note and isinstance(tid, int) \
+                and not isinstance(tid, bool):
+            return data
+        return None
+
+    def _purge_note_if_completed(self, completed_ids: set) -> None:
+        """Drop the active-task process note when its task was just
+        completed. Writes state only when something is actually
+        removed (read-only projects never gain a state file)."""
+        state = self._read_state()
+        active = state.get("active_task")
+        if not isinstance(active, dict):
+            return
+        tid = active.get("id")
+        if isinstance(tid, int) and tid in completed_ids:
+            state.pop("active_task", None)
+            self._write_state(state)
+
+    # ------------------------------------------------------------------ #
     # COMMAND: init
     # ------------------------------------------------------------------ #
 
@@ -535,6 +1087,14 @@ class ContextKeeper:
         Registration is opt-in so local initialization never mutates the
         global registry unless explicitly requested.
         """
+        # ROOTLESS keeper (dangling cwd): there is no directory to
+        # initialize into — abort with the clean local-command error
+        # instead of crashing on the dead working directory.
+        if self.ck_path is None or self.root is None:
+            raise ValueError(
+                "Not in a valid project directory. "
+                "cd into your project and re-run `ck init`."
+            )
         # Boundary guard: initializing in $HOME, /tmp, or the
         # filesystem root affects every command run beneath it.
         if not self.ck_path.exists():
@@ -554,7 +1114,7 @@ class ContextKeeper:
 
         added = self._ensure_root_gitignore(self.root)
         if added:
-            print(f"\U0001f4dd Root .gitignore updated: +{', +'.join(added)}")
+            print(f"[+] Root .gitignore updated: +{', +'.join(added)}")
 
         self._write_if_missing(
             self.plan_file,
@@ -575,34 +1135,157 @@ class ContextKeeper:
 
         if register:
             entry = registry.register_project(self.root, name=self.root.name)
-            print(f"\u2705 Registered: {entry.name} \u2192 {entry.path}")
-        print(f"\u2705 Context Keeper v{VERSION} initialized at {self.root}")
+            print(f"[ok] Registered: {entry.name} -> {entry.path}")
+        print(f"[ok] Context Keeper v{VERSION} initialized at {self.root}")
+
+    # ------------------------------------------------------------------ #
+    # Project context resolution (read operations)
+    # ------------------------------------------------------------------ #
+
+    def resolve_context(self) -> Optional[ProjectContext]:
+        """Resolve the project context for READ operations.
+
+        Hierarchy (first match wins):
+
+        1. LOCAL — the bound directory (explicit ``root``, else the
+           process cwd) carries its own ``PLAN.md`` (real, or a
+           dev-mode sandbox mirror);
+        2. UPWARD — ancestor directories up to the Git repository
+           root (or the filesystem root outside Git) carry the
+           project;
+        3. GLOBAL — nothing found locally: fall back to the most
+           recently active project in the global registry.
+
+        Returns None when no context can be resolved anywhere;
+        callers render the explicit uninitialized state (see
+        :func:`cklib.ui.render_no_project`) instead of fake metrics.
+
+        ROOTLESS keeper (dangling cwd): a keeper whose ``root`` is
+        ``None`` cannot inspect any local directory, so the LOCAL
+        and UPWARD tiers are skipped entirely and resolution falls
+        straight through to the GLOBAL registry tier.
+        """
+        if self._start is None:
+            try:
+                start = Path.cwd()
+            except (OSError, RuntimeError):
+                start = None
+        else:
+            start = self._start
+        if start is None:
+            # No local anchor at all (dangling cwd / rootless
+            # keeper): global registry tier only.
+            return _global_context()
+        for i, candidate in enumerate(_upward_context_candidates(start)):
+            if _has_resolvable_plan(candidate):
+                return ProjectContext(
+                    root=candidate,
+                    source="local" if i == 0 else "parent",
+                )
+        return _global_context()
+
+    def _keeper_for(self, root: Path) -> "ContextKeeper":
+        """A :class:`ContextKeeper` bound to ``root`` (``self`` when
+        the roots are identical), so status rendering (project name,
+        note state, plan paths) reflects the RESOLVED context rather
+        than the invocation directory."""
+        if self.root is None:
+            return ContextKeeper(root=root)
+        try:
+            same = self.root.resolve() == root.resolve()
+        except (OSError, RuntimeError):
+            same = Path(self.root) == Path(root)
+        return self if same else ContextKeeper(root=root)
+
+    def color_overrides(self) -> dict:
+        """Palette overrides for the project bound to this keeper.
+
+        Reads the optional ``"colors"`` mapping from ``.ck.json`` at
+        the Context Keeper project root (cached per instance; see
+        :func:`cklib.config.read_color_config`). Returns ``{}`` when
+        nothing is configured — every palette slot then inherits the
+        terminal's NATIVE text color (no low-contrast gray). Invalid
+        values are rejected later at resolve time, never raising
+        here.
+        """
+        if self._color_overrides is None:
+            if self.root is None:
+                self._color_overrides = {}
+                return self._color_overrides
+            try:
+                self._color_overrides = read_color_config(self.root)
+            except Exception:
+                self._color_overrides = {}
+        return self._color_overrides
 
     # ------------------------------------------------------------------ #
     # COMMAND: status / dashboard
     # ------------------------------------------------------------------ #
 
     def status(self) -> str:
-        """Return the single-project status block as a string."""
-        tl = parse_plan_file(self.plan_file)
-        return _render_local_status(self, tl)
+        """Return the single-project status block as a string.
+
+        The plan context is resolved through the full hierarchy
+        (local → ancestors up to the Git repo root → global registry).
+        When NO context resolves, an explicit uninitialized-state
+        message is returned — never a fake ``0/0`` dashboard. The
+        resolution heals a stale dev-mode mirror first (see
+        :meth:`_plan_display_path`).
+        """
+        ctx = self.resolve_context()
+        if ctx is None:
+            return ui.render_no_project()
+        keeper = self._keeper_for(ctx.root)
+        tl = parse_plan_file(keeper._plan_display_path())
+        return _render_local_status(keeper, tl, source=ctx.source)
 
     def tasks(self) -> str:
-        """Return the current project's task list for STDOUT.
+        """Return the resolved project's task list for STDOUT.
 
         A clean, pipe-friendly rendering (no editor, no decorations
         that would confuse grep/cut): one line per task as
         ``[<status marker>] <id>. <title>``, grouped by section with
         ``##``-style headers. Suitable for ``ck tasks | grep ...``.
+
+        The plan context is resolved through the same hierarchy as
+        ``ck st`` (stale-mirror healing included); with no
+        resolvable context the empty-list hint is returned (no fake
+        metrics involved).
         """
-        tl = load_repaired_plan(self.plan_file)[0]
+        ctx = self.resolve_context()
+        if ctx is None:
+            return "No tasks. Add one with `ck add <text>`."
+        keeper = self._keeper_for(ctx.root)
+        tl = load_repaired_plan(keeper._plan_display_path())[0]
         return _render_tasks_listing(tl)
+
+    def full_plan_text(self) -> Optional[str]:
+        """Full PLAN.md text of the resolved context (None if missing).
+
+        Used by ``ck st --all``: the printed plan follows the same
+        context resolution as the status block above it.
+        """
+        ctx = self.resolve_context()
+        if ctx is None:
+            return None
+        path = self._keeper_for(ctx.root)._plan_display_path()
+        if not path.is_file():
+            return None
+        try:
+            return path.read_text(encoding="utf-8")
+        except OSError:
+            return None
 
     def dashboard(self, *, verbose: bool = False) -> str:
         """Return the cross-project dashboard as a string.
 
         ``verbose=True`` renders the block view with full per-project
         triad context instead of the compact table.
+
+        ROOT-INDEPENDENT: the dashboard reads only the global
+        registry, so it renders identically from a keeper whose
+        ``root`` is ``None`` (dangling working directory) — the cwd
+        marker simply marks no project.
         """
         return _render_dashboard(
             self,
@@ -620,9 +1303,20 @@ class ContextKeeper:
         """Register a project in the global registry.
 
         ``path`` defaults to ``self.root`` (the current project). The
-        project's last-seen timestamp is refreshed.
+        project's last-seen timestamp is refreshed. ROOTLESS keeper
+        (dangling cwd): ``path`` becomes mandatory — registering
+        with no explicit path and no resolvable project root raises
+        the same user-facing error the CLI shows for local commands.
         """
-        target = Path(path).resolve() if path is not None else self.root.resolve()
+        if path is not None:
+            target = Path(path).resolve()
+        elif self.root is not None:
+            target = self.root.resolve()
+        else:
+            raise ValueError(
+                "Not in a valid project directory. "
+                "Pass an explicit path: ck register --path <dir>"
+            )
         project_name = name or target.name
         return registry.register_project(target, name=project_name)
 
@@ -643,10 +1337,19 @@ class ContextKeeper:
             return registry.remove_project(Path(path))
         if name is not None:
             return registry.remove_project_by_name(name)
+        if self.root is None:
+            raise ValueError(
+                "Not in a valid project directory. "
+                "Pass an explicit --path or --name to unregister."
+            )
         return registry.remove_project(self.root)
 
     def prune(self) -> list[str]:
-        """Drop registry entries whose folders are gone from disk."""
+        """Drop registry entries whose folders are gone from disk.
+
+        Pure global-registry operation: works regardless of the
+        local project root (or its absence).
+        """
         return registry.prune_missing()
 
     # ------------------------------------------------------------------ #
@@ -669,26 +1372,26 @@ class ContextKeeper:
         the commit phase is bypassed gracefully — no subprocess
         errors, no prompts past that point.
         """
-        if not self.state_file.exists():
-            printer("\u274c Run `ck init` first.")
+        if self.state_file is None or not self.state_file.exists():
+            printer("ERROR: Run `ck init` first.")
             return None
 
         tl = self._load_plan()
         active = tl.active()
         if active is None:
-            printer("\u26a0\ufe0f  No active task to save.")
+            printer("[!] No active task to save.")
             return None
 
         task_id, task_title = active.id, active.title
         history_rel = f"{CK_DIR_NAME}/{HISTORY_FILENAME}"
-        printer(f"\U0001f4cd Active task: [{task_id}] {task_title}")
+        printer(f"-> Active task: [{task_id}] {task_title}")
 
         note_recorded = False
         try:
             # ---- Step 1: LOCAL HISTORY (HISTORY.md, no Git) ------ #
             printer("")
             printer(
-                f"\U0001f4cb Step 1: local history \u2014 append entry to "
+                f"Step 1: local history - append entry to "
                 f"{history_rel} (not a Git commit)"
             )
             body = self._prompt_note(input_fn, printer)
@@ -727,8 +1430,8 @@ class ContextKeeper:
                 )
             note_recorded = True
             printer(
-                f"\u2705 Saved entry to {history_rel} "
-                "(local context history \u2014 not a Git commit)."
+                f"[ok] Saved entry to {history_rel} "
+                "(local context history - not a Git commit)."
             )
 
             state = self._read_state()
@@ -742,7 +1445,7 @@ class ContextKeeper:
             # ---- Step 2: LOCAL GIT COMMIT (separate from history) - #
             printer("")
             printer(
-                "\U0001f4e6 Step 2: Git commit \u2014 optional, "
+                "Step 2: Git commit - optional, "
                 "separate from local history"
             )
             if is_dev_mode():
@@ -750,39 +1453,39 @@ class ContextKeeper:
                 # real Git commit (or init a repo) in the project.
                 # The sandboxed history entry above is already saved.
                 printer(
-                    f"\U0001f6e1\ufe0f  Dev mode: Git commit skipped "
+                    f"[i] Dev mode: Git commit skipped "
                     f"(sandbox). Entry saved in {history_rel}."
                 )
                 return None
             if not gith.is_git_repo(self.root):
                 ans = input_fn(
-                    "\u2049\ufe0f  Not a Git repo. Initialize one for "
+                    "Not a Git repo. Initialize one for "
                     "local commits? (y/N): "
                 ).strip().lower()
                 if ans != "y":
                     printer(
-                        f"\u2139\ufe0f  No commit created. Your entry is "
+                        f"[i] No commit created. Your entry is "
                         f"saved in {history_rel} (local history only)."
                     )
                     return None
                 if not gith.init_repo(self.root):
                     printer(
-                        f"\u274c Git init failed; commit skipped "
+                        f"ERROR: Git init failed; commit skipped "
                         f"(entry stays saved in {history_rel})."
                     )
                     return None
 
             default_msg = f"{task_title}: {comment}".strip(": ")
             custom = input_fn(
-                "\U0001f680 Git commit message [Enter=accept / type custom]: "
+                "Git commit message [Enter=accept / type custom]: "
             ).strip()
             msg = custom or default_msg
 
             if input_fn(
-                f"\u2705 Create LOCAL Git commit \"{msg}\"? (y/N): "
+                f"Create LOCAL Git commit \"{msg}\"? (y/N): "
             ).strip().lower() != "y":
                 printer(
-                    f"\u2139\ufe0f  No commit created. Your entry is saved "
+                    f"[i] No commit created. Your entry is saved "
                     f"in {history_rel} (local history only)."
                 )
                 return None
@@ -792,11 +1495,11 @@ class ContextKeeper:
             # phase simply never runs.
             if note_recorded:
                 printer(
-                    f"\u274c Input closed \u2014 entry saved to "
+                    f"ERROR: Input closed - entry saved to "
                     f"{history_rel}, no Git commit created."
                 )
             else:
-                printer("\u274c Input closed \u2014 save aborted (nothing written).")
+                printer("ERROR: Input closed - save aborted (nothing written).")
             return None
 
         # Stage ONLY the Context Keeper artifacts (PLAN.md, HISTORY.md,
@@ -815,10 +1518,10 @@ class ContextKeeper:
         ]
         stage = [p for p in ck_artifacts if (self.root / p).exists()]
         if gith.local_commit(msg, path=self.root, stage=stage):
-            printer("\U0001f4e4 Git commit created (local only \u2014 no push).")
+            printer("[ok] Git commit created (local only - no push).")
             return msg
         printer(
-            f"\u26a0\ufe0f  Commit failed (entry remains saved in {history_rel})."
+            f"[!] Commit failed (entry remains saved in {history_rel})."
         )
         return None
 
@@ -826,7 +1529,7 @@ class ContextKeeper:
                      printer=print) -> str:
         """Prompt for a note body. Returns stripped body or ""."""
         skip = input_fn(
-            "\U0001f4dd Add a note for this task? [s=skip / e=editor / Enter=type]: "
+            "Add a note for this task? [s=skip / e=editor / Enter=type]: "
         ).strip().lower()
         if skip == "s" or skip == "skip":
             return ""
@@ -863,6 +1566,11 @@ class ContextKeeper:
     # ------------------------------------------------------------------ #
 
     def edit_plan(self) -> None:
+        # ROOTLESS keeper: no project directory to open an editor in.
+        if self.root is None or self.plan_file is None:
+            raise ValueError(
+                "Not in a valid project directory — nothing to edit."
+            )
         # DEV MODE: the editor edits the SANDBOXED copy; the real
         # PLAN.md is opened read-only in effect (never handed to the
         # editor as a write target).
@@ -875,9 +1583,19 @@ class ContextKeeper:
             target.write_text(
                 self.plan_file.read_text(encoding="utf-8"), encoding="utf-8"
             )
+        elif is_dev_mode() and target.exists() and self.plan_file.exists():
+            # Mirror exists: refresh it when the real file changed on
+            # disk since the last dev touch, so the editor opens
+            # CURRENT content instead of a stale snapshot.
+            _sync_sandbox_plan_mirror(self.root)
         subprocess.run([get_editor(self.root), str(target)], check=False)
 
     def edit_log(self) -> None:
+        # ROOTLESS keeper: no project directory to open an editor in.
+        if self.root is None or self.history_file is None:
+            raise ValueError(
+                "Not in a valid project directory — no history to edit."
+            )
         target = (
             resolve_write_path(self.history_file) if is_dev_mode()
             else self.history_file
@@ -974,6 +1692,14 @@ class ContextKeeper:
         """Print a one-line notice to ``stderr`` when an update is
         available, at most once every ``UPDATE_CHECK_INTERVAL_HOURS``.
 
+        Strict guard clauses (each aborts instantly — no subprocess,
+        no network, no state mutation):
+
+        - ``CK_SANDBOX=1`` (dev/sandbox mode);
+        - ``CK_DISABLE_UPDATE_CHECK=1`` (explicit opt-out);
+        - ``install_dir`` is not a Git repository root (no ``.git``);
+        - the last check is younger than the 24h throttle window.
+
         - Reads ``~/.config/ck/state.json`` to find the previous
           check timestamp.
         - If the interval has elapsed, performs a fast non-blocking
@@ -986,6 +1712,17 @@ class ContextKeeper:
         timestamp is still updated. ``stderr`` defaults to the
         current ``sys.stderr`` at call time (lazy).
         """
+        # --- Early mandatory guards (must precede ALL network logic).
+        if os.environ.get("CK_SANDBOX") == "1":
+            return False
+        if os.environ.get("CK_DISABLE_UPDATE_CHECK") == "1":
+            return False
+        try:
+            if not (self.install_dir / ".git").exists():
+                return False
+        except OSError:
+            return False
+
         if now is None:
             now = datetime.now(timezone.utc)
         if stderr is None:
@@ -1045,6 +1782,11 @@ class ContextKeeper:
             lines.append(f"branch: {br}")
             lines.append(f"head: {sha[:12]}")
         lines.append(f"user_install_path: {USER_INSTALL_PATH}")
+        lines.append(
+            "install_mode: physical copy (never a symlink; refreshed "
+            "only by `ck install` / `ck update`)"
+        )
+        lines.append(f"package_snapshot: {SNAPSHOT_INSTALL_DIR / 'cklib'}")
         return "\n".join(lines)
 
 
@@ -1126,8 +1868,9 @@ def _default_remote_head_check(repo_dir: Path
     longer produce perpetual false "update available" notices. Falls
     back to ``origin/<current-branch>`` when no upstream is tracked.
 
-    The network call is capped at a short deadline so a slow network
-    cannot stall interactive commands for the full 5s.
+    The network call is capped at a hard sub-second deadline
+    (:data:`gith.NETWORK_CHECK_TIMEOUT`) so a slow network cannot
+    stall interactive commands.
     """
     local = gith.head_sha(repo_dir)
     if not local:
@@ -1144,7 +1887,8 @@ def _default_remote_head_check(repo_dir: Path
         result = subprocess.run(
             ["git", "rev-parse", "--symbolic-full-name",
              f"{branch}@{{upstream}}"],
-            capture_output=True, text=True, timeout=5.0, check=False,
+            capture_output=True, text=True,
+            timeout=gith.NETWORK_CHECK_TIMEOUT, check=False,
             cwd=str(repo_dir),
         )
         if result.returncode == 0:
@@ -1163,23 +1907,9 @@ def _default_remote_head_check(repo_dir: Path
                 and parts[1] and not parts[1].startswith("-"):
             remote_name, ls_branch = parts[0], parts[1]
 
-    try:
-        result = subprocess.run(
-            ["git", "ls-remote", remote_name, ls_branch],
-            capture_output=True, text=True, timeout=2.0, check=False,
-            cwd=str(repo_dir),
-        )
-    except (OSError, subprocess.TimeoutExpired):
+    remote = gith.ls_remote(remote_name, ls_branch, repo_dir)
+    if not remote:
         return None
-    if result.returncode != 0:
-        return None
-    line = (result.stdout or "").strip().splitlines()
-    if not line:
-        return None
-    parts = line[0].split()
-    if len(parts) < 1:
-        return None
-    remote = parts[0].strip()
     return (local, remote)
 
 
@@ -1241,7 +1971,8 @@ def _sprint_insert_line(tl: TaskList) -> Optional[int]:
 # ---------------------------------------------------------------------- #
 
 def _status_triad(tl: TaskList):
-    """Resolve the PREV / FOCUS / NEXT task triad for ``ck st``.
+    """Resolve the compact PREV / FOCUS / NEXT triad used by the
+    VERBOSE dashboard blocks (``ck dashboard -v``).
 
     - PREV: nearest completed ``[x]`` task prior to the FOCUS task
       (last done overall when no focus is set).
@@ -1278,65 +2009,311 @@ def _status_triad(tl: TaskList):
     return prev, focus, nxt
 
 
-def _render_local_status(ck: ContextKeeper, tl: TaskList) -> str:
+# Maximum number of tasks listed BY NAME per WORK CONTEXT section
+# (``<< Done`` and ``[!] Skipped``); anything beyond folds into the
+# header's "(N tasks)" count plus a "... (+N more ...)" overflow line
+# so a long tail of gaps can never flood the block. The displayed
+# tasks are the ones CLOSEST to the active focus.
+_CONTEXT_SHOWN_LIMIT = 2
+
+
+@dataclass
+class _StatusContext:
+    """Resolved 4-element WORK CONTEXT view state for ``ck st``.
+
+    - ``done``: every completed task before the progress point,
+      ordered so the ones closest to the focus come last — the
+      renderer shows the last 2 (display limit) and folds the rest
+      into a count header + overflow line.
+    - ``skipped``: open tasks left behind — with an explicit focus,
+      ONLY the opens positioned BEFORE it (passed over); without a
+      focus, the stranded opens after the last completed task
+      (classic gaps) also qualify. The current and upcoming tasks
+      are always excluded. Listed by name in the rendering.
+    - ``current`` / ``is_focus``: the explicitly focused task, or
+      the first open task auto-resolved as the Next candidate
+      (display only — the plan state is never mutated).
+    - ``upcoming``: the first open task after ``current``.
+    """
+
+    done: list
+    skipped: list
+    current: Optional[Task]
+    is_focus: bool
+    upcoming: Optional[Task]
+
+
+def _status_context(tl: TaskList) -> _StatusContext:
+    """Resolve the 4-element WORK CONTEXT (``ck st``).
+
+    The progress point is the explicit focus when set; otherwise the
+    FIRST open task is auto-resolved as the Next candidate (without
+    mutating the plan). Done context is every completion before the
+    point (focus case) or overall (candidate case) — the renderer
+    applies the 2-task display limit. Skipped tasks are the
+    passed-over opens before an explicit focus, or the stranded
+    opens (auto-candidate case), minus the current and upcoming
+    tasks.
+    """
+    focus = tl.focused[0] if tl.focused else None
+    opens = tl.open
+
+    if focus is not None:
+        current, is_focus = focus, True
+    elif opens:
+        current, is_focus = opens[0], False
+    else:
+        current, is_focus = None, False
+
+    pos = {t.id: i for i, t in enumerate(tl.tasks)}
+    last_done_pos = -1
+    for i, t in enumerate(tl.tasks):
+        if t.status == TaskStatus.DONE:
+            last_done_pos = i
+
+    if is_focus and current is not None:
+        done = [
+            t for i, t in enumerate(tl.tasks)
+            if t.status == TaskStatus.DONE and i < pos[current.id]
+        ]
+    else:
+        done = list(tl.done)
+
+    upcoming = None
+    if current is not None:
+        for t in tl.tasks[pos[current.id] + 1:]:
+            if t.status == TaskStatus.OPEN:
+                upcoming = t
+                break
+
+    skipped: list = []
+    if current is not None:
+        cur_pos = pos[current.id]
+        excluded = {current.id}
+        if upcoming is not None:
+            excluded.add(upcoming.id)
+        # With an explicit FOCUS, only opens POSITIONED BEFORE it were
+        # passed over — every open after the focus stays Pending /
+        # Upcoming. The stranded-after-last-done heuristic is reserved
+        # for the no-focus view (auto-resolved Next candidate), where
+        # it surfaces classic plan gaps by name.
+        if is_focus:
+            skipped = [
+                t for i, t in enumerate(tl.tasks)
+                if t.status == TaskStatus.OPEN
+                and t.id not in excluded
+                and i < cur_pos
+            ]
+        else:
+            skipped = [
+                t for i, t in enumerate(tl.tasks)
+                if t.status == TaskStatus.OPEN
+                and t.id not in excluded
+                and (i < cur_pos
+                     or (last_done_pos != -1 and i > last_done_pos))
+            ]
+
+    return _StatusContext(
+        done=done,
+        skipped=skipped,
+        current=current,
+        is_focus=is_focus,
+        upcoming=upcoming,
+    )
+
+
+def _render_local_status(ck: ContextKeeper, tl: TaskList,
+                         *, palette: Optional["ui.Palette"] = None,
+                         source: str = "local") -> str:
     """Render the compact single-project status block.
 
-    Structure (spec-exact):
+    Structure (spec-exact in plain-text mode, PURE ASCII — no emoji
+    or box-drawing glyphs, so no terminal font fallback is ever
+    needed). The WORK CONTEXT section is a strict 4-element vertical
+    list: every active section renders a header line with its task
+    items indented on new lines below it, one ``- [ID] Title [st]``
+    per line::
 
-    ::
+        =============================================================
+         > <project_name> [v<version>]
+         [%] Progress: <done>/<total> tasks done (<pct>%)
 
-        ═════════════════════════════════════════════════════════════
-         🚀 <project_name> [v<version>]
-         📊 Прогресс: <done>/<total> задач сделано (<pct>%)
+         -> WORK CONTEXT:
+            << Done (N tasks):               last 2, closest to focus
+               - [<id>] <title> [x]
+               - [<id>] <title> [x]
+               ... (+<N> more done)
+            [!] Skipped (N tasks):                by name, capped
+               - [<id>] <title> [ ]
+               - [<id>] <title> [ ]
+               ... (+<N> more skipped)
+            [>] Focus:                          (focus set via ck start)
+               - [<id>] <title>
+            [>] Next:                        (auto-candidate, no focus;
+               - [<id>] <title> [ ]              never mutates)
+            >> Upcoming:                          (follows Focus/Next)
+               - [<id>] <title> [ ]
+            * Note: <process note>                    (only when set)
+        =============================================================
 
-         🎯 КОНТЕКСТ РАБОТЫ:
-            ⏮️  [<id>] <prev_text> [x]
-            👉 [<id>] [>] <focus_text>
-            ⏭️  [<id>] <next_text> [ ]
-        ═════════════════════════════════════════════════════════════
+    DISPLAY LIMITS: ``<< Done`` and ``[!] Skipped`` show at most
+    ``_CONTEXT_SHOWN_LIMIT`` (2) tasks each — the ones closest to the
+    active focus. When a section holds more than 2 tasks its header
+    gains a ``(N tasks)`` count and the item list ends with an
+    overflow line: ``... (+N more done)`` / ``... (+N more skipped)``.
+    ``[>] Focus`` / ``[>] Next`` / ``>> Upcoming`` carry a single item
+    and never overflow. Empty sections keep the inline hint form
+    (``<< Done: (none completed)``) on the header line.
 
-    Gap IDs fold into the progress line (``(gaps: 3-8)``) and are
-    omitted entirely when there are none.
+    Skipped tasks are the opens left behind — passed over before the
+    focus/next progress point, or stranded after the last completed
+    task — so gaps surface BY NAME instead of the abstract
+    ``(gaps: X-Y)`` range (which still summarizes the progress
+    line).
+
+    ``source`` mirrors :class:`ProjectContext` resolution: a
+    ``"global"`` fallback appends an accent ``<- <path>`` hint to the
+    header so the user sees WHICH registered project was loaded from
+    an unrelated directory.
+
+    COLOR / CONTRAST: when the output stream supports ANSI (TTY, or
+    FORCE_COLOR/CLICOLOR_FORCE; never under NO_COLOR), the palette
+    from :mod:`cklib.ui` highlights the hierarchy — bold cyan
+    project name, bold section header, green done line, yellow
+    skipped line, bold yellow focus/next line, bold cyan note.
+    Secondary text (hints, progress labels, ratios at 0%), structural
+    borders and accent metadata INHERIT the terminal's native text
+    color by default — no DIM, no hardcoded dark gray — and remain
+    restyleable via the ``colors`` mapping in the project's
+    ``.ck.json`` (see :meth:`ContextKeeper.color_overrides`). The
+    plain-text fallback is byte-identical to the colorless rendering
+    (a disabled palette is the identity transform). ``palette``
+    overrides auto-detection (tests pin a deterministic palette).
     """
-    bar = "═" * 61
+    if palette is not None:
+        p = palette
+    else:
+        p = ui.get_palette(colors=ck.color_overrides())
+    bar = "=" * 61
     lines: list[str] = []
-    lines.append(bar)
-    lines.append(f" \U0001f680 {ck.root.name} [v{VERSION}]")
+    lines.append(p.border(bar))
+    header = (
+        f" > {p.bold_cyan(ck.root.name)} "
+        f"{p.accent(f'[v{VERSION}]')}"
+    )
+    if source == "global":
+        header += f" {p.accent(f'<- {ck.root}')}"
+    lines.append(header)
 
     done_count = len(tl.done)
     total = tl.total
     pct = tl.completion_pct
-    progress = f" \U0001f4ca Прогресс: {done_count}/{total} задач сделано ({pct}%)"
+    pct_str = f"({pct}%)"
+    progress = (
+        f" {p.muted('[%] Progress:')} {p.bold(f'{done_count}/{total}')} "
+        f"tasks done {p.green(pct_str) if done_count else p.muted(pct_str)}"
+    )
     gap_ids = tl.gap_ids()
     if gap_ids:
-        progress += f" (gaps: {_collapse_ids(gap_ids)})"
+        progress += f" {p.muted(f'(gaps: {_collapse_ids(gap_ids)})')}"
     lines.append(progress)
 
     lines.append("")
-    lines.append(" \U0001f3af КОНТЕКСТ РАБОТЫ:")
+    lines.append(p.bold(" -> WORK CONTEXT:"))
 
-    prev, focus, nxt = _status_triad(tl)
-    if prev is not None:
-        lines.append(f"    \u23ee\ufe0f  [{prev.id}] {prev.title} [x]")
+    ctx = _status_context(tl)
+
+    # 1) << Done: the completions immediately before the progress
+    #    point — last 2 shown, the rest folded into count + overflow.
+    if ctx.done:
+        shown = ctx.done[-_CONTEXT_SHOWN_LIMIT:]
+        hidden = len(ctx.done) - len(shown)
+        if hidden > 0:
+            lines.append(
+                p.green(f"    << Done ({len(ctx.done)} tasks):"))
+        else:
+            lines.append(p.green("    << Done:"))
+        for t in shown:
+            lines.append(p.green(f"       - [{t.id}] {t.title} [x]"))
+        if hidden > 0:
+            lines.append(p.green(f"       ... (+{hidden} more done)"))
     else:
-        lines.append("    \u23ee\ufe0f  (нет завершенных)")
-    if focus is not None:
-        lines.append(f"    \U0001f449 [{focus.id}] [>] {focus.title}")
+        lines.append(p.muted("    << Done: (none completed)"))
+
+    # 2) [!] Skipped: passed-over / stranded opens, BY NAME (capped,
+    #    closest to the focus first).
+    if ctx.skipped:
+        shown = ctx.skipped[:_CONTEXT_SHOWN_LIMIT]
+        hidden = len(ctx.skipped) - len(shown)
+        if hidden > 0:
+            lines.append(
+                p.yellow(f"    [!] Skipped ({len(ctx.skipped)} tasks):"))
+        else:
+            lines.append(p.yellow("    [!] Skipped:"))
+        for t in shown:
+            lines.append(p.yellow(f"       - [{t.id}] {t.title} [ ]"))
+        if hidden > 0:
+            lines.append(
+                p.yellow(f"       ... (+{hidden} more skipped)"))
     else:
+        lines.append(p.muted("    [!] Skipped: (none)"))
+
+    # 3) [>] Focus (explicit) or Next (auto-resolved candidate —
+    #    display only, the plan is never mutated).
+    if ctx.is_focus and ctx.current is not None:
+        lines.append("    [>] Focus:")
         lines.append(
-            "    \U0001f449 (фокус не выбран — используйте 'ck start <id>')"
+            f"       - "
+            f"{p.bold_yellow(f'[{ctx.current.id}] {ctx.current.title}')}"
         )
-    if nxt is not None:
-        lines.append(f"    \u23ed\ufe0f  [{nxt.id}] {nxt.title} [ ]")
+    elif ctx.current is not None:
+        t = ctx.current
+        lines.append("    [>] Next:")
+        lines.append(
+            f"       - {p.bold_yellow(f'[{t.id}] {t.title}')} [ ]"
+        )
     else:
-        lines.append("    \u23ed\ufe0f  (нет открытых задач)")
+        lines.append(p.muted("    [>] Next: (no open tasks)"))
 
-    lines.append(bar)
+    # 4) >> Upcoming: the next pending task after Focus/Next.
+    if ctx.upcoming is not None:
+        lines.append(p.muted("    >> Upcoming:"))
+        lines.append(
+            p.muted(
+                f"       - [{ctx.upcoming.id}] "
+                f"{ctx.upcoming.title} [ ]"
+            )
+        )
+    else:
+        lines.append(p.muted("    >> Upcoming: (none)"))
+
+    # Active-task process note (ck note "..."): displayed while the
+    # noted task still exists in the plan; purged by ck done.
+    note = _active_task_note(ck, tl)
+    if note:
+        lines.append(p.bold_cyan(f"    * Note: {note}"))
+
+    lines.append(p.border(bar))
     return "\n".join(lines)
 
 
+def _active_task_note(ck: ContextKeeper, tl: TaskList) -> str:
+    """Return the active-task process note text, or "".
+
+    The stored note is shown only while its referenced task still
+    exists in the current plan — an externally removed task never
+    surfaces a stale note.
+    """
+    data = ck.get_note()
+    if data is None:
+        return ""
+    if tl.by_id(data["id"]) is None:
+        return ""
+    return data["note"]
+
+
 def _render_tasks_listing(tl: TaskList) -> str:
-    """Render the local task list for ``ck tasks`` (STDOUT output).
+    """Render the local task list for ``ck list`` (STDOUT output).
 
     Format (grep/cut-friendly, no editor involved):
 
@@ -1415,21 +2392,22 @@ def _truncate(text: str, width: int) -> str:
 
 
 def _truncate_ellipsis(text: str, width: int) -> str:
-    """Fit ``text`` into ``width`` columns with a middle ellipsis.
+    """Fit ``text`` into ``width`` columns with a middle ASCII ellipsis.
 
     Used by the dashboard table: long project names and focus-task
     titles keep both their start and their end (the informative
-    parts) — e.g. ``[3] [>] implement the very long…eaturing module``
+    parts) — e.g. ``[3] [>] implement the very long...ring module``
     → the ``[<id>] [>]`` prefix and the title tail survive.
-    Never returns a string longer than ``width``.
+    Never returns a string longer than ``width``; the ellipsis is
+    plain ``...`` (three ASCII dots), not a Unicode glyph.
     """
     if len(text) <= width:
         return text
-    if width <= 1:
-        return "…"[:width] if width >= 0 else text
-    half = (width - 1) // 2
-    keep_end = width - 1 - half
-    return f"{text[:half]}…{text[len(text) - keep_end:]}"
+    if width <= 3:
+        return "." * width
+    keep_start = (width - 3) // 2
+    keep_end = width - 3 - keep_start
+    return f"{text[:keep_start]}...{text[len(text) - keep_end:]}"
 
 
 def _relative_time(iso: str, *, now: Optional[datetime] = None) -> str:
@@ -1493,13 +2471,13 @@ def _render_dashboard(ck: Optional[ContextKeeper], *, list_projects,
     entries = list_projects()
     if not entries:
         return (
-            "\U0001f4ed Global Dashboard\n"
-            "\u2139\ufe0f  No registered projects. Run `ck register` "
+            "Global Dashboard\n"
+            "[i] No registered projects. Run `ck register` "
             "in a project directory to begin.\n"
         )
 
     cwd = None
-    if ck is not None:
+    if ck is not None and ck.root is not None:
         try:
             cwd = str(Path(ck.root).resolve())
         except (OSError, ValueError):
@@ -1534,7 +2512,7 @@ def _render_dashboard(ck: Optional[ContextKeeper], *, list_projects,
     )
     if missing_count:
         rendered += (
-            f"\n\n\U0001f4a1 Found {missing_count} missing project(s). "
+            f"\n\n[i] Found {missing_count} missing project(s). "
             "Run 'ck prune' to cleanup."
         )
     return rendered
@@ -1601,7 +2579,7 @@ def _render_dashboard_table(states: list) -> str:
         ]
         return "|" + "|".join(cells) + "|"
 
-    out: list[str] = ["\U0001f4ed GLOBAL DASHBOARD"]
+    out: list[str] = ["GLOBAL DASHBOARD"]
     out.append(_hr())
     out.append(_row(_DASH_HEADERS))
     out.append(_hr())
@@ -1619,27 +2597,27 @@ def _render_dashboard_table(states: list) -> str:
 def _render_dashboard_verbose(states: list) -> str:
     """One isolated block per project with the full triad context.
 
-    Structure (spec-exact)::
+    Structure (spec-exact, pure ASCII)::
 
-        📭 МОИ ПРОЕКТЫ (<count>)
+        MY PROJECTS (<count>)
 
-         🚀 <project_name> [<active_marker>]     ([*] cwd, [ ] other)
-            📍 <path>
-            📊 Прогресс: <done>/<total> (<pct>%)
-            🎯 Контекст:
-               ⏮️  [<id>] <prev_text> [x]
-               👉 [<id>] [>] <focus_text>
-               ⏭️  [<id>] <next_text> [ ]
+         > <project_name> [<active_marker>]     ([*] cwd, [ ] other)
+            @ <path>
+            [%] Progress: <done>/<total> (<pct>%)
+            -> Context:
+               << [<id>] <prev_text> [x]
+               [>] [<id>] <focus_text>
+               >> [<id>] <next_text> [ ]
 
-        ═════════════════════════════════════════════════════════════
+        =============================================================
 
     When every task in a project is done, the triad collapses to a
-    single line: ``🎯 Контекст: (все задачи выполнены 🎉)``. Missing
-    folders and unparseable plans render a ⚠️ label instead of the
-    progress/triad lines.
+    single line: ``-> Context: (all tasks completed)``. Missing
+    folders and unparseable plans render a ``[!]`` label instead of
+    the progress/triad lines.
     """
-    bar = "═" * 61
-    out: list[str] = [f"\U0001f4ed МОИ ПРОЕКТЫ ({len(states)})", ""]
+    bar = "=" * 61
+    out: list[str] = [f"MY PROJECTS ({len(states)})", ""]
 
     for s in states:
         entry = s["entry"]
@@ -1648,37 +2626,37 @@ def _render_dashboard_verbose(states: list) -> str:
         name = entry.name
         if s["condition"] == "missing":
             name = f"[MISSING] {name}"
-        out.append(f" \U0001f680 {name} [{marker}]")
-        out.append(f"    \U0001f4cd {entry.path}")
+        out.append(f" > {name} [{marker}]")
+        out.append(f"    @ {entry.path}")
 
         if s["condition"] != "ok":
             label = "missing" if s["condition"] == "missing" else "corrupt"
-            out.append(f"    \u26a0\ufe0f  {label}")
+            out.append(f"    [!] {label}")
         else:
             done_count = len(tl_local.done)
             out.append(
-                f"    \U0001f4ca Прогресс: {done_count}/{tl_local.total} "
+                f"    [%] Progress: {done_count}/{tl_local.total} "
                 f"({tl_local.completion_pct}%)"
             )
             if tl_local.total > 0 and done_count == tl_local.total:
                 out.append(
-                    "    \U0001f3af Контекст: (все задачи выполнены \U0001f389)"
+                    "    -> Context: (all tasks completed)"
                 )
             else:
-                out.append("    \U0001f3af Контекст:")
+                out.append("    -> Context:")
                 prev, focus, nxt = _status_triad(tl_local)
                 if prev is not None:
-                    out.append(f"       \u23ee\ufe0f  [{prev.id}] {prev.title} [x]")
+                    out.append(f"       << [{prev.id}] {prev.title} [x]")
                 else:
-                    out.append("       \u23ee\ufe0f  (нет завершенных)")
+                    out.append("       << (none completed)")
                 if focus is not None:
-                    out.append(f"       \U0001f449 [{focus.id}] [>] {focus.title}")
+                    out.append(f"       [>] [{focus.id}] {focus.title}")
                 else:
-                    out.append("       \U0001f449 (фокус не выбран)")
+                    out.append("       [>] (no focus selected)")
                 if nxt is not None:
-                    out.append(f"       \u23ed\ufe0f  [{nxt.id}] {nxt.title} [ ]")
+                    out.append(f"       >> [{nxt.id}] {nxt.title} [ ]")
                 else:
-                    out.append("       \u23ed\ufe0f  (нет открытых задач)")
+                    out.append("       >> (no open tasks)")
 
         # Each project is an isolated block: trailing blank line +
         # separator bar close it off before the next block.
@@ -1731,6 +2709,7 @@ def _default_readme(project_name: str) -> str:
 __all__ = [
     "ContextKeeper",
     "FocusResult",
+    "ProjectContext",
     "UpdateResult",
     "_parse_id_spec",
     "TRACKED_GITIGNORE_PROTECTIONS",

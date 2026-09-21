@@ -281,7 +281,7 @@ class TestDashboardTable(_IsolatedRegistry, unittest.TestCase):
             self.assertIn("ghost", out)
             self.assertIn("[MISSING] ghost", out)
             self.assertIn(
-                "💡 Found 1 missing project(s). Run 'ck prune' to cleanup.",
+                "[i] Found 1 missing project(s). Run 'ck prune' to cleanup.",
                 out,
             )
 
@@ -294,12 +294,12 @@ class TestDashboardTable(_IsolatedRegistry, unittest.TestCase):
 
             output = io.StringIO()
             with redirect_stdout(output):
-                code = main(["list", "-g"])
+                code = main(["dashboard"])
 
             self.assertEqual(code, 0)
             self.assertIn("[MISSING] gone-project", output.getvalue())
             self.assertIn(
-                "💡 Found 1 missing project(s). Run 'ck prune' to cleanup.",
+                "[i] Found 1 missing project(s). Run 'ck prune' to cleanup.",
                 output.getvalue(),
             )
 
@@ -379,7 +379,7 @@ class TestDashboardVerbose(_IsolatedRegistry, unittest.TestCase):
             ck.register(path=td_path / "alpha", name="alpha")
             ck.register(path=td_path / "beta", name="beta")
             out = self._render(ck)
-            self.assertIn("📭 МОИ ПРОЕКТЫ (2)", out)
+            self.assertIn("MY PROJECTS (2)", out)
 
     def test_verbose_block_layout_and_triad(self):
         """Spec-exact block: header, path, progress, triad, separator."""
@@ -397,21 +397,21 @@ class TestDashboardVerbose(_IsolatedRegistry, unittest.TestCase):
 
             out = self._render(ck)
             lines = out.splitlines()
-            self.assertEqual(lines[0], "📭 МОИ ПРОЕКТЫ (1)")
+            self.assertEqual(lines[0], "MY PROJECTS (1)")
             # cwd marker: the project block carries [*]
-            self.assertIn("🚀 alpha [*]", out)
-            self.assertIn(f"    📍 {target.resolve()}", out)
-            self.assertIn("    📊 Прогресс: 1/4 (25.0%)", out)
-            self.assertIn("    🎯 Контекст:", out)
+            self.assertIn("> alpha [*]", out)
+            self.assertIn(f"    @ {target.resolve()}", out)
+            self.assertIn("    [%] Progress: 1/4 (25.0%)", out)
+            self.assertIn("    -> Context:", out)
             # Vertical triad order: PREV < FOCUS < NEXT.
-            idx_prev = out.index("⏮️  [2] prev task [x]")
-            idx_focus = out.index("👉 [3] [>] focus task")
-            idx_next = out.index("⏭️  [4] next task [ ]")
+            idx_prev = out.index("<< [2] prev task [x]")
+            idx_focus = out.index("[>] [3] focus task")
+            idx_next = out.index(">> [4] next task [ ]")
             self.assertLess(idx_prev, idx_focus)
             self.assertLess(idx_focus, idx_next)
             # Each block is isolated by a 61-char separator bar.
-            self.assertIn("═" * 61, out)
-            self.assertTrue(out.rstrip().endswith("═" * 61))
+            self.assertIn("=" * 61, out)
+            self.assertTrue(out.rstrip().endswith("=" * 61))
 
     def test_verbose_all_done_project(self):
         """All-done projects collapse the triad to a single line."""
@@ -425,9 +425,9 @@ class TestDashboardVerbose(_IsolatedRegistry, unittest.TestCase):
 
             out = self._render(ck)
             self.assertIn(
-                "🎯 Контекст: (все задачи выполнены 🎉)", out
+                "-> Context: (all tasks completed)", out
             )
-            self.assertNotIn("👉", out)
+            self.assertNotIn("[>]", out)
 
     def test_verbose_no_focus_hint(self):
         with tempfile.TemporaryDirectory() as td:
@@ -441,8 +441,8 @@ class TestDashboardVerbose(_IsolatedRegistry, unittest.TestCase):
             # (non-cwd); the cwd variant is covered by the triad test.
             elsewhere = ContextKeeper(root=td_path / "elsewhere")
             out = self._render(elsewhere)
-            self.assertIn("🚀 nofocus [ ]", out)
-            self.assertIn("👉 (фокус не выбран)", out)
+            self.assertIn("> nofocus [ ]", out)
+            self.assertIn("[>] (no focus selected)", out)
 
     def test_verbose_missing_and_corrupt_blocks(self):
         with tempfile.TemporaryDirectory() as td:
@@ -458,11 +458,11 @@ class TestDashboardVerbose(_IsolatedRegistry, unittest.TestCase):
             ck.register(path=corrupt, name="corrupt")
 
             out = self._render(ck)
-            self.assertIn("⚠️  missing", out)
-            self.assertIn("⚠️  corrupt", out)
-            self.assertIn("🚀 [MISSING] ghost [ ]", out)
+            self.assertIn("[!] missing", out)
+            self.assertIn("[!] corrupt", out)
+            self.assertIn("> [MISSING] ghost [ ]", out)
             # Degraded blocks still render the header + separator.
-            self.assertEqual(out.count("═" * 61), 2)
+            self.assertEqual(out.count("=" * 61), 2)
 
     def test_verbose_no_truncation_of_titles(self):
         """Unlike the table, the block view never truncates titles."""
@@ -475,7 +475,7 @@ class TestDashboardVerbose(_IsolatedRegistry, unittest.TestCase):
             ck.register(path=target, name="longtitle")
 
             out = self._render(ck)
-            self.assertIn(f"👉 [2] [>] {title}", out)
+            self.assertIn(f"[>] [2] {title}", out)
 
 
 # A local copy of the safe parse helper that doesn't depend on core's

@@ -61,9 +61,9 @@ def _quarantine_corrupt(target: Path) -> None:
     real registry.
     """
     try:
-        from .sandbox import is_dev_mode, resolve_write_path
-        if is_dev_mode():
-            target = resolve_write_path(target)
+        from .sandbox import dev_context_active, resolve_write_path
+        if dev_context_active():
+            target = resolve_write_path(target, force=True)
     except Exception:
         pass  # interception is best-effort; quarantine must still work
     ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -76,7 +76,7 @@ def _quarantine_corrupt(target: Path) -> None:
             f"backed up ({e}); aborting to avoid data loss"
         ) from e
     print(
-        f"\u26a0\ufe0f  Corrupt registry detected; original moved to "
+        f"[!] Corrupt registry detected; original moved to "
         f"{backup}",
         file=sys.stderr,
     )
@@ -98,11 +98,15 @@ def _resolve_registry_read_path(target: Path) -> Path:
     ``ContextKeeper._load_plan``. With no sandboxed copy the read
     falls back to the real registry (production view). Path selection
     only; the caller performs the actual I/O.
+
+    The mirror is resolved with ``create=False`` — a READ-side
+    probe must never materialize the ``.sandbox/`` skeleton.
     """
     try:
-        from .sandbox import is_dev_mode, resolve_write_path
-        if is_dev_mode():
-            sandboxed = resolve_write_path(target)
+        from .sandbox import dev_context_active, resolve_write_path
+        if dev_context_active():
+            sandboxed = resolve_write_path(
+                target, create=False, force=True)
             if sandboxed.exists():
                 return sandboxed
     except Exception:
@@ -185,9 +189,9 @@ class Registry:
         """
         target = path or GLOBAL_REGISTRY_FILE
         try:
-            from .sandbox import is_dev_mode, resolve_write_path
-            if is_dev_mode():
-                target = resolve_write_path(target)
+            from .sandbox import dev_context_active, resolve_write_path
+            if dev_context_active():
+                target = resolve_write_path(target, force=True)
         except Exception:
             pass  # interception must never break a real write
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -263,8 +267,8 @@ class Registry:
         if target.exists():
             return None
         try:
-            from .sandbox import is_dev_mode
-            if is_dev_mode():
+            from .sandbox import dev_context_active
+            if dev_context_active():
                 return None
         except Exception:
             pass
@@ -315,9 +319,9 @@ def ensure_global_dir() -> Path:
     session.
     """
     try:
-        from .sandbox import is_dev_mode, resolve_write_path
-        if is_dev_mode():
-            d = resolve_write_path(GLOBAL_CONFIG_DIR)
+        from .sandbox import dev_context_active, resolve_write_path
+        if dev_context_active():
+            d = resolve_write_path(GLOBAL_CONFIG_DIR, force=True)
             d.mkdir(parents=True, exist_ok=True)
             return d
     except Exception:
@@ -427,6 +431,20 @@ def remove_project_by_name(name: str) -> bool:
     return result["removed_any"]
 
 
+def has_registry() -> bool:
+    """True when a registry file exists (dev-mode read path aware).
+
+    A lock-free existence probe: lets read-only callers (e.g. the
+    ``ck st`` global-registry fallback) skip the registry entirely —
+    no lock files, no ``~/.config/ck/`` directory creation — on a
+    machine where nothing was ever registered.
+    """
+    try:
+        return _resolve_registry_read_path(GLOBAL_REGISTRY_FILE).exists()
+    except OSError:
+        return False
+
+
 def list_projects() -> List[ProjectEntry]:
     """All registered projects, sorted by ``last_seen`` (newest first)
     with a stable secondary sort by ``name`` ascending.
@@ -513,9 +531,9 @@ def _atomic_write_json(path: Path, payload: dict) -> None:
     """
     real = path
     try:
-        from .sandbox import is_dev_mode, resolve_write_path
-        if is_dev_mode():
-            real = resolve_write_path(path)
+        from .sandbox import dev_context_active, resolve_write_path
+        if dev_context_active():
+            real = resolve_write_path(path, force=True)
     except Exception:
         real = path  # interception must never break a real write
     try:
@@ -551,6 +569,7 @@ __all__ = [
     "Registry",
     "RegistryCorruptError",
     "ensure_global_dir",
+    "has_registry",
     "register_project",
     "update_active_task",
     "remove_project",

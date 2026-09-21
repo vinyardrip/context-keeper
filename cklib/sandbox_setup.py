@@ -64,6 +64,7 @@ from .sandbox import (
     CONFIG_SUBDIR,
     PROJECTS_SUBDIR,
     clean_sandbox,
+    is_within_sandbox,
     sandbox_root,
 )
 
@@ -369,21 +370,66 @@ def _build_project_gamma(projects_dir: Path) -> Path:
 # --------------------------------------------------------------------------- #
 
 
-def setup_sandbox(*, printer: Callable[[str], None] = print) -> bool:
+def _cwd_inside_sandbox() -> bool:
+    """True when the current working directory lies inside the
+    sandbox tree.
+
+    Conservative on I/O trouble: a dangling cwd (``Path.cwd()``
+    raising — e.g. the directory descriptor was already lost to a
+    previous destructive rebuild) is treated as INSIDE, so a rebuild
+    can never make a bad situation worse.
+    """
+    try:
+        cwd = Path.cwd()
+    except OSError:
+        return True
+    try:
+        return is_within_sandbox(cwd)
+    except OSError:
+        return True
+
+
+def setup_sandbox(*, printer: Callable[[str], None] = print,
+                  force: bool = False) -> bool:
     """Build the isolated mock environment in ``.sandbox/``.
 
-    Rebuilds the sandbox from scratch (any previous sandbox content
-    is removed first — it is disposable by design). All writes stay
-    inside ``sandbox_root()``; the host's real registry and project
-    trees are never read or modified.
+    SAFE RE-INITIALIZATION: when the current working directory lies
+    inside the sandbox tree (the user's shell may be sitting in
+    ``.sandbox/projects/<name>``), the rebuild happens IN PLACE —
+    the fixture files are overwritten idempotently and NO
+    ``rmtree`` touches ``.sandbox/`` itself, keeping every directory
+    descriptor valid. A delete-and-recreate cycle would otherwise
+    dangle the shell's (and other processes') working-directory
+    handles, making subsequent ``ck`` invocations crash with
+    ``FileNotFoundError: [Errno 2] No such file or directory``.
+
+    ``force=True`` restores the wipe-and-rebuild semantics even from
+    inside the sandbox (explicit override; prefer
+    ``sandbox clean`` for a full purge).
+
+    All writes stay inside ``sandbox_root()``; the host's real
+    registry and project trees are never read or modified.
 
     Returns True on success; OSError failures are reported to stderr
     and return False.
     """
     root = sandbox_root()
     now = datetime.now(timezone.utc)
+    in_place = (not force) and _cwd_inside_sandbox()
     try:
-        clean_sandbox(quiet=True)
+        if in_place:
+            printer(
+                "[i] cwd is inside the sandbox: re-initializing IN PLACE "
+                "(no destructive wipe — your working directory stays valid)"
+            )
+        else:
+            if force and _cwd_inside_sandbox():
+                printer(
+                    "[!] Forced rebuild from INSIDE the sandbox: the wipe "
+                    "will invalidate working directories under .sandbox/ "
+                    "(re-enter with `ck-dev` afterwards)"
+                )
+            clean_sandbox(quiet=True)
         config_dir = root / CONFIG_SUBDIR
         projects_dir = root / PROJECTS_SUBDIR
         projects_dir.mkdir(parents=True, exist_ok=True)
@@ -399,23 +445,23 @@ def setup_sandbox(*, printer: Callable[[str], None] = print) -> bool:
         )
         return False
 
-    printer(f"✅ Sandbox mock environment built at {root}")
+    printer(f"[ok] Sandbox mock environment built at {root}")
     printer(
-        f"   ├─ config/projects.json — registered: {ALPHA_PROJECT}, "
+        f"   ├── config/projects.json - registered: {ALPHA_PROJECT}, "
         f"{ORPHANED_PROJECT} (registry-only)"
     )
     printer(
-        f"   ├─ projects/{ALPHA_PROJECT} — active: 6 tasks (gap at 5), "
+        f"   ├── projects/{ALPHA_PROJECT} - active: 6 tasks (gap at 5), "
         f"{BULK_HISTORY_LOG_ENTRIES} history.log entries, "
         f"{ARCHIVE_FILE_COUNT}+{LEGACY_ARCHIVE_COUNT} archives"
     )
-    printer(f"   ├─ projects/{BETA_PROJECT} — initialized, NOT registered")
-    printer(f"   ├─ projects/{GAMMA_PROJECT} — plain dir (no .ck/)")
+    printer(f"   ├── projects/{BETA_PROJECT} - initialized, NOT registered")
+    printer(f"   ├── projects/{GAMMA_PROJECT} - plain dir (no .ck/)")
     printer(
-        f"   └─ projects/{ORPHANED_PROJECT} — missing on disk → "
+        f"   └── projects/{ORPHANED_PROJECT} - missing on disk -> "
         "[MISSING] tag / ck prune target"
     )
-    printer("Next: CK_SANDBOX=1 ./ck-dev list -g")
+    printer("Next: `ck-dev` to enter, type 'exit' to return to production")
     return True
 
 

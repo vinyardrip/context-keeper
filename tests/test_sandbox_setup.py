@@ -12,7 +12,7 @@ Covers:
   config dir; dev-mode reads/writes after setup never touch it
   either.
 - Dev-mode registry read-your-writes: with the fixture registry in
-  place, ``list -g`` shows ``alpha`` and ``[MISSING] orphaned-deleted``;
+  place, ``dashboard`` shows ``alpha`` and ``[MISSING] orphaned-deleted``;
   without it, reads still come from the real registry (Step 3
   semantics preserved).
 - ``ck prune`` / standalone ``ck register`` operate on the SANDBOX
@@ -22,6 +22,12 @@ Covers:
 """
 
 from __future__ import annotations
+
+# Filesystem isolation safety net: importing the tests package
+# pins CK_SANDBOX_ROOT to an OS-temp directory (see tests/__init__),
+# so no test in this module can create or wipe the repository's own
+# .sandbox/ — under ANY runner, including bare `unittest discover`.
+import tests  # noqa: F401
 
 import io
 import json
@@ -48,6 +54,8 @@ from cklib.sandbox_setup import (
     LEGACY_ARCHIVE_COUNT,
     setup_sandbox,
 )
+
+from tests._isolated_checkout import make_checkout_copy
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -413,20 +421,45 @@ class TestSandboxCli(_SandboxFixtureBase):
 class TestCkDevEndToEnd(_SandboxFixtureBase):
     """The Step 4.1 verification flow, run as real subprocesses:
 
-    ``./ck-dev sandbox setup`` then ``CK_SANDBOX=1 ./ck-dev list -g``.
+    ``./ck-dev sandbox setup`` then ``CK_SANDBOX=1 ./ck-dev dashboard``.
+
+    ISOLATION: the subprocesses run against a throwaway CHECKOUT COPY
+    (see tests/_isolated_checkout.py) whose git root — and therefore
+    ``ck-dev``-anchored ``.sandbox/`` — lives inside this test's OS
+    temp directory. The repository's own ``.sandbox/`` (the manual
+    dev environment) is snapshotted and asserted byte-identical: the
+    automated suite never builds into it or wipes it.
     """
+
+    def setUp(self):
+        super().setUp()
+        try:
+            self._checkout = make_checkout_copy(
+                Path(self._tmp.name) / "checkout-copy")
+        except RuntimeError as e:
+            self.skipTest(f"cannot build isolated checkout copy: {e}")
+        self._sandbox = self._checkout / ".sandbox"
+        self._repo_sandbox_before = _snapshot_tree(REPO_ROOT / ".sandbox")
+
+    def _assert_repo_sandbox_untouched(self):
+        after = _snapshot_tree(REPO_ROOT / ".sandbox")
+        self.assertEqual(
+            after, self._repo_sandbox_before,
+            "the repository's manual .sandbox/ was modified by a test",
+        )
 
     def _run_ck_dev(self, args: list, extra_env: dict) -> tuple:
         env = {
             **os.environ,
             "HOME": str(Path(self._tmp.name)),
             "GIT_TERMINAL_PROMPT": "0",
+            "CK_SANDBOX_ROOT": str(self._sandbox),
             **extra_env,
         }
         return subprocess.run(
-            [sys.executable, str(REPO_ROOT / "ck-dev"), *args],
+            [sys.executable, str(self._checkout / "ck-dev"), *args],
             capture_output=True, text=True, timeout=90,
-            cwd=str(REPO_ROOT), env=env,
+            cwd=str(self._checkout), env=env,
         )
 
     def test_setup_then_list_global(self):
@@ -435,7 +468,7 @@ class TestCkDevEndToEnd(_SandboxFixtureBase):
         self.assertIn("Sandbox mock environment built", result.stdout)
 
         result = self._run_ck_dev(
-            ["list", "-g"], {"CK_SANDBOX": "1"})
+            ["dashboard"], {"CK_SANDBOX": "1"})
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("alpha", result.stdout)
         self.assertIn("[MISSING] orphaned-deleted", result.stdout)
@@ -445,13 +478,32 @@ class TestCkDevEndToEnd(_SandboxFixtureBase):
         # STRICT host isolation: the fake HOME global registry was
         # never created by either command.
         self.assertFalse(self.host_config_dir.exists())
+        # The fixtures landed in the COPY's sandbox — never the
+        # repository's manual one.
+        self.assertTrue(
+            (self._sandbox / "config" / "projects.json").is_file())
+        self._assert_repo_sandbox_untouched()
 
     def test_setup_then_sandbox_clean(self):
         self._run_ck_dev(["sandbox", "setup"], {})
-        self.assertTrue(sandbox_root().exists())
+        self.assertTrue(self._sandbox.exists())
         result = self._run_ck_dev(["sandbox", "clean"], {})
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse(sandbox_root().exists())
+        self.assertFalse(self._sandbox.exists())
+        # The copy's clean removed the COPY sandbox only.
+        self._assert_repo_sandbox_untouched()
+
+
+def _snapshot_tree(root: Path) -> dict:
+    """content + mtime_ns for every file under ``root`` (or {})."""
+    snap: dict = {}
+    if not root.exists():
+        return snap
+    for p in sorted(root.rglob("*")):
+        if p.is_file():
+            st = p.stat()
+            snap[str(p)] = (p.read_bytes(), st.st_mtime_ns)
+    return snap
 
 
 class TestVersionBump(unittest.TestCase):
@@ -465,6 +517,60 @@ class TestVersionBump(unittest.TestCase):
         with open(REPO_ROOT / "pyproject.toml", "rb") as fh:
             data = tomllib.load(fh)
         self.assertEqual(data["project"]["version"], ckconfig.VERSION)
+
+
+class TestSetupSandboxSafeReinit(unittest.TestCase):
+    """Safe re-initialization (FileNotFoundError regression).
+
+    A rebuild triggered while a process sits INSIDE ``.sandbox/``
+    used to ``rmtree`` the tree out from under the caller, dangling
+    its working-directory descriptor — every later ``os.getcwd()``
+    (i.e. any subsequent ``ck`` invocation) then crashed with
+    ``FileNotFoundError: [Errno 2] No such file or directory``.
+    """
+
+    def _chdir(self, target: Path) -> None:
+        self._saved_cwd = Path.cwd()
+        self.addCleanup(os.chdir, self._saved_cwd)
+        os.chdir(target)
+
+    def test_reinit_from_inside_is_in_place_no_wipe(self):
+        setup_sandbox(printer=lambda *_: None)
+        proj = sandbox_root() / "projects" / "alpha"
+        self._chdir(proj)
+
+        marker = proj / "sentinel.txt"
+        marker.write_text("keep me", encoding="utf-8")
+        buf = io.StringIO()
+        self.assertTrue(setup_sandbox(printer=buf.write))
+        self.assertIn("IN PLACE", buf.getvalue())
+        # The working directory (and its inode) survived untouched.
+        self.assertTrue(marker.is_file(), "fixture dir was wiped")
+        self.assertTrue(Path.cwd().is_dir())
+        self.assertEqual(Path.cwd(), proj)
+
+    def test_reinit_from_outside_still_wipes(self):
+        setup_sandbox(printer=lambda *_: None)
+        marker = sandbox_root() / "projects" / "alpha" / "sentinel.txt"
+        marker.write_text("gone", encoding="utf-8")
+        # The suite runs from the repo root, OUTSIDE the pinned
+        # sandbox anchor — the full rebuild semantics are preserved.
+        self.assertTrue(
+            sandbox_root() not in Path.cwd().parents
+            and Path.cwd() != sandbox_root()
+        )
+        self.assertTrue(setup_sandbox(printer=lambda *_: None))
+        self.assertFalse(
+            marker.exists(), "stale fixture survived a full rebuild")
+
+    def test_forced_rebuild_from_inside_warns(self):
+        setup_sandbox(printer=lambda *_: None)
+        proj = sandbox_root() / "projects" / "alpha"
+        self._chdir(proj)
+        buf = io.StringIO()
+        self.assertTrue(setup_sandbox(printer=buf.write, force=True))
+        # Explicit override still wipes — but says so first.
+        self.assertIn("Forced rebuild", buf.getvalue())
 
 
 if __name__ == "__main__":

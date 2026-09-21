@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.2.5-blue)]()
+[![version](https://img.shields.io/badge/version-0.3.0-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -43,7 +43,7 @@ Context Keeper (ck) acts as a bridge between your brain, AI agents, and Git, per
 - Strict Parsing: Task statuses `- [ ]` / `- [>]` / `- [x]` (legacy `- []` input is accepted and canonicalized on write)
 - AI-Ready: Optimized context preservation for AI workflows
 - Self-Contained: Templates embedded in the package
-- Self-Installer: ck install / ck uninstall (user-level symlink, no sudo)
+- Self-Installer: ck install / ck uninstall (user-level physical copy — a regular executable file, never a symlink; no sudo)
 - Self-Updater: ck update (git fetch + `pull --ff-only`, refuses on dirty work tree)
 - CLI Task Management: ck add <text>, ck start <ID>, ck done <ID|range|list>
 - Global Registry: Cross-project dashboard (ck dashboard) backed by `~/.config/ck/projects.json`; registration is explicit
@@ -67,7 +67,7 @@ Context Keeper (ck) acts as a bridge between your brain, AI agents, and Git, per
 git clone https://github.com/vinyardrip/context-keeper.git
 cd context-keeper
 ./ck init      # optional: try it out
-./install.sh   # symlinks ck into ~/.local/bin (no sudo)
+./install.sh   # copies ck into ~/.local/bin + cklib snapshot (no sudo)
 ```
 
 ### Option 2 — Built-in installer
@@ -75,14 +75,15 @@ cd context-keeper
 git clone https://github.com/vinyardrip/context-keeper.git
 cd context-keeper
 chmod +x ck
-./ck install
+./ck install   # physical copy to ~/.local/bin/ck + cklib snapshot
 ```
 
+> Production isolation: `ck install` writes a **physical copy** of the launcher to `~/.local/bin/ck` (regular executable file, 0755 — never a symlink) and snapshots the `cklib/` package to `~/.local/share/ck/cklib`. The installed command is a static snapshot: editing this checkout does not change `~/.local/bin/ck` until you explicitly re-run `ck install` (or `ck update`).
 > Note: `ck` is a thin wrapper over the `cklib/` package — install from the repository (or via `pip install .`), not as a standalone single file.
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.2.5
+ck -v    # → ck version 0.3.0
 ```
 
 ---
@@ -114,20 +115,27 @@ ck -v    # → ck version 0.2.5
 | ck save | Task completion workflow: optional note + optional **local** commit |
 | ck log | Open HISTORY.md in your editor (see [Editor Resolution](#editor-resolution)) |
 | ck st | Status overview (tri-state: Previous / Focus / Next) |
+| ck st -l / --list | Print the task list to STDOUT (same as `ck list`) |
+| ck st -e / --edit | Open PLAN.md in your editor (same as `ck edit`) |
+| ck st -g / --global | Cross-project dashboard (same as `ck dashboard`) |
 | ck st --all | Full status incl. full PLAN.md |
-| ck tasks | Print the local project task list to STDOUT (no editor, pipe-friendly) |
-| ck list | Local view: same as `ck tasks` |
-| ck st --global / ck dashboard | Cross-project dashboard (compact table: Project \| Focus Task \| Progress \| Last Active) |
+| ck -l / --list | Top-level shorthand for `ck st -l` (list tasks) |
+| ck -e / --edit | Top-level shorthand for `ck st -e` (edit plan) |
+| ck -g / --global | Top-level shorthand for `ck st -g` (global dashboard) |
+| ck list | Print the task list to STDOUT (pipe-friendly) |
+| ck dashboard | Cross-project dashboard (compact table: Project \| Focus Task \| Progress \| Last Active) |
 | ck dashboard -v / --verbose | Detailed block view: full PREV/FOCUS/NEXT triad context per project |
-| ck list -g / ck list --global | Global view: same as `ck dashboard` |
 | ck register [-n NAME] [--path PATH] | Add a project to the global registry |
 | ck unregister [--path PATH \| NAME] | Remove a project from the registry |
 | ck prune | Purge registry entries whose folders no longer exist; reports each purged path and a summary count |
 | ck info | Installation diagnostics (version, branch, paths) |
-| ck install | Symlink ck to ~/.local/bin (no sudo) |
-| ck uninstall | Remove the ~/.local/bin symlink |
+| ck install | Copy ck to ~/.local/bin/ck (physical executable file, no symlink) + cklib snapshot to ~/.local/share/ck; no sudo |
+| ck uninstall | Remove ~/.local/bin/ck, the cklib snapshot and any legacy ~/.local/bin/ck-dev |
 | ck update | Self-update via git fetch + pull --ff-only (refuses if dirty) |
 | ck-dev \<command\> | Run any command in isolated sandbox mode (writes → `.sandbox/`) |
+| ck-dev (bare) | Enter sandbox mode: warning banner (dynamically sized, with the resolved active binary), Global Dashboard, then an interactive session subshell |
+| ck dev setup | Build an isolated mock environment in `.sandbox/` (bulk test data) |
+| ck dev clean / ck sandbox clean | Remove the `.sandbox/` directory |
 | ck-dev sandbox setup | Build an isolated mock environment in `.sandbox/` (bulk test data) |
 | ck-dev sandbox clean | Purge the `.sandbox/` dev environment |
 | ck-clean / ck dev clean / ck sandbox clean | Purge the `.sandbox/` dev environment |
@@ -147,7 +155,7 @@ to the registry at any time with the standalone command `ck register` (use
 
 ### Global Registry Hygiene
 
-`ck list -g` and `ck dashboard` keep registered projects visible even when a
+`ck dashboard` keeps registered projects visible even when a
 project directory has been deleted or moved. Such entries are labeled
 `[MISSING]`, and the output ends with an actionable tip:
 
@@ -220,7 +228,7 @@ When HISTORY.md reaches limit → rotates to `HISTORY_*.md.bak` (rotation is cra
 - The renderer never overwrites non-task lines (headers/prose are preserved on every mutation)
 
 ### VCS Integration
-Local commits only. `ck save` commits if you confirm; `ck` never pushes. `ck update` fast-forwards the installation itself only when the work tree is clean.
+Local commits only. `ck save` commits if you confirm; `ck` never pushes. `ck update` fast-forwards the installation itself only when the work tree is clean, then refreshes an installed copy (`~/.local/bin/ck`) so production stays in sync with the checkout.
 
 ---
 
@@ -250,6 +258,30 @@ Local commits only. `ck save` commits if you confirm; `ck` never pushes. `ck upd
 
 - **Reads are real** (with sandbox read-your-writes): dashboards, status, and task lists reflect your actual projects — unless a sandboxed copy exists (seeded by a previous dev-mode write or `sandbox setup`), in which case that copy is read so chained dev commands compose.
 - **Writes are intercepted**: ALL write operations — task mutations (`add` / `start` / `done`), `PLAN.md` edits, `state.json` updates, lock files, backups, registry changes — are redirected strictly into `.sandbox/`.
+
+Bare `ck-dev` enters an interactive **session subshell**. On entry the warning banner reports the **active binary**, resolved dynamically at runtime (`command -v ck` semantics — never hardcoded), and after you leave by typing `exit` (or pressing Ctrl+D) the exit handler reports the global binary that takes over:
+
+```text
+┌──────────────────────────────────────────────────────────────┐
+│ ⚠️  SANDBOX MODE ACTIVE                                      │
+│ Active binary: /home/you/projects/context-keeper/ck          │
+│ Type 'exit' or press Ctrl+D to return to production          │
+└──────────────────────────────────────────────────────────────┘
+...
+[ok] Exited sandbox mode. Active binary is now: /home/you/.local/bin/ck
+```
+
+The banner width is **dynamic** — it expands or contracts to fit the active binary path without wrapping or breaking the borders.
+
+The sandbox path is pinned to the **front of `PATH`** for the session (and self-healed on every resolution inside the session shell), so `command -v ck` inside the sandbox returns the checkout's local dev binary even when a globally installed `ck` or a shell rc re-export would otherwise shadow it.
+
+A top-level `exit` argument (e.g. `./ck-dev exit`) is a **safeguard**, not an exit: a subshell session is a real shell process that only your typed `exit` / Ctrl+D can close, so the wrapper refuses with exit code 1 and no new subshell:
+
+```text
+$ ./ck-dev exit
+[!] 'ck-dev exit' cannot close an active subshell.
+[!] To exit sandbox mode, type 'exit' or press Ctrl+D.
+```
 
 Production state stays immutable while `IS_DEV` is active: the real `~/.config/context-keeper/` and real `PLAN.md` files are never modified (verified byte-for-byte, including mtime, in the test suite). Two extra guardrails are enforced in dev mode:
 
@@ -291,7 +323,7 @@ Because a sandboxed registry copy now exists, dev-mode reads (dashboards, `prune
 
 ```bash
 ./ck-dev sandbox setup
-CK_SANDBOX=1 ./ck-dev list -g   # → alpha + [MISSING] orphaned-deleted
+CK_SANDBOX=1 ./ck-dev dashboard   # → alpha + [MISSING] orphaned-deleted
 CK_SANDBOX=1 ./ck-dev prune     # → purges orphaned-deleted (sandbox only)
 ./ck-dev sandbox clean          # → reset the workspace
 ```
@@ -309,7 +341,7 @@ Isolated commands use the explicit form `CK_SANDBOX=1 ./ck-dev <command>`: the e
 ./ck-dev sandbox setup
 
 # 2. Global view — registered + missing projects at a glance
-CK_SANDBOX=1 ./ck-dev list -g
+CK_SANDBOX=1 ./ck-dev dashboard
 # | alpha                      | [3] [>] Active focus task | 2/6 (33.3%) | 1h ago |
 # | [MISSING] orphaned-deleted | n/a                       | missing     | 12d ago |
 
@@ -325,7 +357,7 @@ cd ../../..
 # 4. Registry flows — mutate the MOCK registry only
 CK_SANDBOX=1 ./ck-dev prune                     # drops orphaned-deleted
 CK_SANDBOX=1 ./ck-dev register --path .sandbox/projects/beta
-CK_SANDBOX=1 ./ck-dev list -g                   # beta now on the dashboard
+CK_SANDBOX=1 ./ck-dev dashboard                   # beta now on the dashboard
 
 # 5. Non-ck behavior — gamma has no .ck/ (empty status, no crash)
 cd .sandbox/projects/gamma
@@ -454,7 +486,7 @@ chmod +x ck
 
 ### Гигиена глобального реестра
 
-Команды `ck list -g` и `ck dashboard` не скрывают зарегистрированные проекты,
+Команда `ck dashboard` не скрывает зарегистрированные проекты,
 если их каталоги были удалены или перемещены. Такие записи помечаются тегом
 `[MISSING]`, а в конце вывода появляется подсказка:
 
@@ -574,7 +606,7 @@ export EDITOR="nano"  # используется, если VISUAL не зада�
 
 ```bash
 ./ck-dev sandbox setup
-CK_SANDBOX=1 ./ck-dev list -g   # → alpha + [MISSING] orphaned-deleted
+CK_SANDBOX=1 ./ck-dev dashboard   # → alpha + [MISSING] orphaned-deleted
 CK_SANDBOX=1 ./ck-dev prune     # → удаляет orphaned-deleted (только в песочнице)
 ./ck-dev sandbox clean          # → сброс рабочего окружения
 ```
@@ -592,7 +624,7 @@ CK_SANDBOX=1 ./ck-dev prune     # → удаляет orphaned-deleted (толь�
 ./ck-dev sandbox setup
 
 # 2. Глобальный обзор — зарегистрированные и отсутствующие проекты
-CK_SANDBOX=1 ./ck-dev list -g
+CK_SANDBOX=1 ./ck-dev dashboard
 # | alpha                      | [3] [>] Active focus task | 2/6 (33.3%) | 1h ago |
 # | [MISSING] orphaned-deleted | n/a                       | missing     | 12d ago |
 
@@ -608,7 +640,7 @@ cd ../../..
 # 4. Сценарии реестра — меняется ТОЛЬКО макет реестра
 CK_SANDBOX=1 ./ck-dev prune                     # удаляет orphaned-deleted
 CK_SANDBOX=1 ./ck-dev register --path .sandbox/projects/beta
-CK_SANDBOX=1 ./ck-dev list -g                   # beta теперь на дашборде
+CK_SANDBOX=1 ./ck-dev dashboard                   # beta теперь на дашборде
 
 # 5. Не-ck поведение — в gamma нет .ck/ (пустой статус, без падений)
 cd .sandbox/projects/gamma
