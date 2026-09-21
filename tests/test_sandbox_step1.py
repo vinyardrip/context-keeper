@@ -280,7 +280,7 @@ class TestCleanViaCli(unittest.TestCase):
         with redirect_stdout(buf):
             code = cli._run_dev_command(None)
         self.assertEqual(code, 2)
-        self.assertIn("Usage: ck dev <setup|clean>", buf.getvalue())
+        self.assertIn("Usage: ck dev <setup|clean|emulate>", buf.getvalue())
 
     def test_dev_unknown_action_prints_usage(self):
         buf = io.StringIO()

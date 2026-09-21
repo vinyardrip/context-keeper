@@ -100,6 +100,11 @@ Dev mode (ck-dev / CK_SANDBOX=1 / --sandbox):
                              To exit: type 'exit' or press Ctrl+D.
   ck dev setup               Build an isolated mock environment in .sandbox/
   ck dev clean               Remove the .sandbox/ directory (alias: ck sandbox clean)
+  ck dev emulate             Interactive history-rotation stress emulator:
+                             3 generate/rotate cycles in
+                             .sandbox/projects/sandbox_stress with tiny
+                             limits (.md.gz archives, FIFO purge), then
+                             prints how to inspect via `ck log --all`
   sandbox setup              Build an isolated mock environment in .sandbox/
                              (registered/unregistered/missing projects, bulk
                              history + archive data)
@@ -276,6 +281,11 @@ def build_parser() -> "argparse.ArgumentParser":
              "(bulk test data generation)",
     )
     dev_sub.add_parser("clean", help="Remove the .sandbox/ directory")
+    dev_sub.add_parser(
+        "emulate",
+        help="Interactive history-rotation stress emulator "
+             "(sandbox only)",
+    )
 
     p_sandbox = sub.add_parser(
         "sandbox",
@@ -882,13 +892,34 @@ def _run_dev_command(action: Optional[str]) -> int:
         return 0 if setup_sandbox() else 1
     if action == "clean":
         return 0 if clean_sandbox() else 1
+    if action == "emulate":
+        return _run_emulate_command()
     if action is None:
-        print("Usage: ck dev <setup|clean>")
+        print("Usage: ck dev <setup|clean|emulate>")
         return 2
     print(
-        f"Unknown dev action: {action!r}. Usage: ck dev <setup|clean>"
+        f"Unknown dev action: {action!r}. "
+        "Usage: ck dev <setup|clean|emulate>"
     )
     return 2
+
+
+def _run_emulate_command() -> int:
+    """Guarded entry for ``ck dev emulate`` (history stress emulator).
+
+    SAFETY GUARD: the emulator writes ONLY under ``sandbox_root()``;
+    it is refused unless a sandbox context is actually present —
+    either an active dev session (``CK_SANDBOX``/``CK_DEV``) or an
+    existing ``.sandbox/`` directory. Outside a sandbox the command
+    terminates with a warning and exit code 1, creating nothing.
+    """
+    from .emulate import run_emulation
+    from .sandbox import is_dev_mode, sandbox_root
+
+    if not is_dev_mode() and not sandbox_root().is_dir():
+        print("[i] Not in sandbox mode — emulator aborted.")
+        return 1
+    return run_emulation()
 
 
 def clean_sandbox_entrypoint() -> int:
