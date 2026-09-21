@@ -92,6 +92,79 @@ def _read_global_state() -> dict:
 # ---------------------------------------------------------------------------
 
 
+class TestDevModeGlobalMutationGuard(unittest.TestCase):
+    """DEV-MODE GUARDRAIL: sandbox sessions never mutate global state.
+
+    ``ck install`` / ``ck uninstall`` attempted under ``CK_SANDBOX=1``
+    refuse with a clean message and never touch ``~/.local/bin/ck``
+    or the package snapshot (``ck update`` already aborts in
+    :class:`ContextKeeper.update`).
+    """
+
+    def _run_blocked(self, argv: list) -> tuple[int, str]:
+        from cklib.cli import main
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, {"CK_SANDBOX": "1"},
+                             clear=False):
+            with redirect_stdout(buf):
+                code = main(argv)
+        return code, buf.getvalue()
+
+    def test_install_refused_in_dev_mode(self):
+        code, out = self._run_blocked(["install"])
+        self.assertEqual(code, 0)  # clean refusal, not a crash
+        self.assertIn("[!] Dev mode: `install` would mutate the global",
+                      out)
+        self.assertIn("Sandbox sessions never touch global state", out)
+
+    def test_uninstall_refused_in_dev_mode(self):
+        code, out = self._run_blocked(["uninstall"])
+        self.assertEqual(code, 0)
+        self.assertIn("[!] Dev mode: `uninstall` would mutate the global",
+                      out)
+
+    def test_update_aborts_in_dev_mode(self):
+        code, out = self._run_blocked(["update"])
+        self.assertEqual(code, 1)
+        self.assertIn("Dev mode: self-update disabled", out)
+
+
+class TestSemVerParsing(unittest.TestCase):
+    """SemVer contract of :func:`cklib.config.parse_version`.
+
+    All version checks (update comparisons, notifier, tests) must
+    follow the established semantic-versioning rules: three numeric
+    components, dotted; unparseable input degrades to (0, 0, 0)
+    rather than raising.
+    """
+
+    def test_parse_release(self):
+        self.assertEqual(ckconfig.parse_version("0.3.0"), (0, 3, 0))
+
+    def test_parse_partial(self):
+        self.assertEqual(ckconfig.parse_version("1.2"), (1, 2))
+
+    def test_parse_garbage_degrades_to_zero(self):
+        self.assertEqual(ckconfig.parse_version("not-a-version"),
+                         (0, 0, 0))
+        self.assertEqual(ckconfig.parse_version(""), (0, 0, 0))
+        self.assertEqual(ckconfig.parse_version(None), (0, 0, 0))
+
+    def test_ordering_is_semver(self):
+        self.assertLess(ckconfig.parse_version("0.2.5"),
+                        ckconfig.parse_version("0.3.0"))
+        self.assertLess(ckconfig.parse_version("0.3.0"),
+                        ckconfig.parse_version("0.10.0"))
+
+    def test_packaged_version_is_semver(self):
+        # "cklib.config.VERSION" itself must stay SemVer-clean.
+        parts = ckconfig.VERSION.split(".")
+        self.assertEqual(len(parts), 3)
+        for part in parts:
+            self.assertTrue(part.isdigit(),
+                            f"VERSION {ckconfig.VERSION!r} not SemVer")
+
+
 class TestUpdateNonGitDirectory(unittest.TestCase):
     def test_non_git_install_dir_aborts_gracefully(self):
         """If install_dir is not a Git work tree, abort with the
