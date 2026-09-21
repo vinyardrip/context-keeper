@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.4.2-blue)]()
+[![version](https://img.shields.io/badge/version-0.5.0-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -84,7 +84,7 @@ chmod +x ck
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.4.2
+ck -v    # → ck version 0.5.0
 ```
 
 ---
@@ -542,9 +542,35 @@ Logs go **exclusively** to `stderr` and `.sandbox/dev.log` — `stdout` stays co
 ---
 
 ## 🗺 Roadmap
-- **Context Injection**: Mechanism to inject project context into external AI prompts and tools
-- **Archive Management**: Advanced history control and search across history archives (cross-archive viewing is shipped today via `ck log --all`)
-- **Interactive Workflow**: Real-time plan updates during `ck save`
+
+### Active / Pending Features
+- [ ] Write additional prompt.md templates for different AI roles
+- [ ] Context export/injection into external AI tools
+
+### Ideas & Discussion (Backlog v0.5+)
+- [ ] `ck diff`: show context/plan changes since the last save
+- [ ] `ck undo`: safely undo the last `ck save` and revert the commit
+- [ ] AI-summary (`ck suggest` / `ck summarize`): AI-generated commit messages / notes
+- [ ] Interactive Plan: manage PLAN.md tasks directly from the CLI / TUI
+- [ ] Shell Completion: command autocompletion for Bash / Zsh
+- [ ] Unit Testing: baseline pytest coverage (`cklib/core.py`, `cklib/history.py`)
+
+### Completed
+- [x] Basic project structure (`.ck/`) initialization
+- [x] Object-oriented task parser model (CommonMark + legacy `- []`)
+- [x] Three task statuses: `- [ ]`, `- [x]`, `- [>]` (Focus)
+- [x] Task management commands: `ck add`, `ck start <ID>`, `ck done <ID|range|list>`
+- [x] Task triad display (`ck st`): Past → Current → Future
+- [x] Progress calculation (%) and task counters (Total/Done/Left)
+- [x] ID gap detector
+- [x] Process notes (`ck note <text>`) and the `Unfocused / Paused Context` block
+- [x] Global project registry and dashboard (`ck dashboard`, `ck dashboard -v`, `ck prune`)
+- [x] Atomic writes and fail-closed file locking (`*.lock`)
+- [x] History rotation system: `HISTORY_LIMIT` threshold, `.md.gz` compression (`COMPRESS_ARCHIVES`), FIFO purge (`MAX_BAK_FILES`)
+- [x] Cross-archive history viewing: `ck log --all` with transparent decompression
+- [x] Isolated dev mode (`ck-dev`), sandbox (`.sandbox/`) and fixtures (`ck dev setup`)
+- [x] Interactive history-rotation stress emulator (`ck dev emulate`)
+- [x] Install and update utilities (`ck install`, `ck update`, `ck uninstall`)
 
 ---
 
@@ -843,6 +869,32 @@ CK_DEBUG=1 ./ck-dev add "traced"    # или: ./ck-dev -v add "traced"
 ---
 
 ## 🗺 Roadmap
-- **Context Injection**: Механизм внедрения контекста в сторонние инструменты и ИИ-запросы
-- **Archive Management**: Расширенное управление архивами и поиск по архивам истории (просмотр уже доступен через `ck log --all`)
-- **Interactive Workflow**: Правка плана прямо во время `ck save`
+
+### Активные / запланированные задачи
+- [ ] Написать дополнительные шаблоны prompt.md для разных ролей ИИ
+- [ ] Настроить механизмы экспорта/инжекции контекста в сторонние ИИ-инструменты
+
+### Идеи и обсуждения (бэклог v0.5+)
+- [ ] `ck diff`: вывод изменений в контексте/плане с момента последнего сохранения
+- [ ] `ck undo`: безопасная отмена последнего `ck save` и откат коммита
+- [ ] AI-summary (`ck suggest` / `ck summarize`): генерация commit message / заметки через ИИ
+- [ ] Interactive Plan: управление задачами в PLAN.md прямо из CLI / TUI
+- [ ] Shell Completion: автодополнение команд в Bash / Zsh
+- [ ] Unit Testing: базовое покрытие тестами через pytest (`cklib/core.py`, `cklib/history.py`)
+
+### Завершённые
+- [x] Инициализировать базовую структуру проекта (.ck/)
+- [x] Реализовать объектную модель парсера задач (CommonMark + legacy `- []`)
+- [x] Поддержка трех статусов: `- [ ]`, `- [x]`, `- [>]` (Focus)
+- [x] Команды управления задачами: `ck add`, `ck start <ID>`, `ck done <ID|range|list>`
+- [x] Триада отображения задач (`ck st`): Прошлое -> Текущее -> Будущее
+- [x] Расчет прогресса (%) и счетчики задач (Всего/Done/Left)
+- [x] Детектор пропусков ID (gaps)
+- [x] Процессные заметки (`ck note <text>`) и блок `Unfocused / Paused Context`
+- [x] Глобальный реестр проектов и дашборд (`ck dashboard`, `ck dashboard -v`, `ck prune`)
+- [x] Атомарная запись и fail-closed блокировка файлов (`*.lock`)
+- [x] Система ротации истории: порог `HISTORY_LIMIT`, сжатие `.md.gz` (`COMPRESS_ARCHIVES`), FIFO-очистка (`MAX_BAK_FILES`)
+- [x] Сквозной просмотр истории: `ck log --all` с прозрачной декомпрессией
+- [x] Изолированный dev-режим (`ck-dev`), песочница (`.sandbox/`) и фикстуры (`ck dev setup`)
+- [x] Интерактивный стресс-эмулятор ротации истории (`ck dev emulate`)
+- [x] Утилиты установки и обновления (`ck install`, `ck update`, `ck uninstall`)
