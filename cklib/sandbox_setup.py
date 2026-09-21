@@ -23,7 +23,7 @@ Fixture layout (Step 4.1 spec)::
         ├── alpha/               # active, REGISTERED, bulk data target
         │   └── .ck/
         │       ├── PLAN.md      # tasks 1,2,3,4,6,7 (gap at 5)
-        │       ├── HISTORY.md   # exactly HISTORY_LIMIT entries
+        │       ├── HISTORY.md   # exactly history_limit() entries
         │       ├── history.log  # 120 archived entries (bulk)
         │       ├── archive/     # 5 mock archive files
         │       ├── HISTORY_*.md.bak   (2 legacy rotation artifacts)
@@ -53,7 +53,7 @@ from .config import (
     DEFAULT_PROMPT,
     GITIGNORE_FILENAME,
     HISTORY_FILENAME,
-    HISTORY_LIMIT,
+    history_limit,
     PLAN_FILENAME,
     PROMPT_FILENAME,
     README_FILENAME,
@@ -139,10 +139,14 @@ def _render_entry(stamp: str, task_id: int, title: str, comment: str,
 def _render_history_md(now: datetime) -> str:
     """Current HISTORY.md for alpha — EXACTLY at the rotation limit.
 
-    With ``HISTORY_LIMIT`` entries, the very next ``ck save`` append
+    With ``history_limit()`` entries, the very next ``ck save`` append
     pushes the count over the limit and must trigger the
     auto-rotation routine — the boundary the fixtures exist to test.
+    Entry count follows the EFFECTIVE limit (``CK_HISTORY_LIMIT`` env
+    override honored) so the fixture stays at the boundary whatever
+    the configured default is.
     """
+    limit = history_limit()
     parts = [f"# History {ALPHA_PROJECT}\n"]
     comments = (
         "Refactored parser hot path",
@@ -151,9 +155,12 @@ def _render_history_md(now: datetime) -> str:
         "Reviewed archive cleanup routine",
         "Prepared bulk fixture generation",
     )
-    for i, comment in enumerate(comments):
-        stamp = (now - timedelta(hours=2 * (len(comments) - i))
-                 ).strftime("%Y-%m-%d %H:%M")
+    for i in range(limit):
+        comment = comments[i % len(comments)]
+        # Fresh entries every 2 hours counting back from ``now``;
+        # continues seamlessly into the archives' older clock.
+        stamp = (now - timedelta(hours=2 * (limit - i)))
+        stamp = stamp.strftime("%Y-%m-%d %H:%M")
         task_id = ALPHA_TASK_REFS[i % len(ALPHA_TASK_REFS)]
         parts.append(_render_entry(
             stamp, task_id, ALPHA_TITLES[task_id], comment,
@@ -214,21 +221,27 @@ def _render_archive(now: datetime, *, days_ago: int, entry_count: int,
 
 def _archive_specs() -> list[tuple[int, int]]:
     """(days_ago, entry_count) per archive file — 5 files in
-    ``.ck/archive/`` with counts below/at/above ``HISTORY_LIMIT``."""
+    ``.ck/archive/`` with counts straddling the EFFECTIVE history
+    limit (below / at / above): boundary data for limit checks and
+    cleanup routines.
+    """
+    limit = history_limit()
     return [
-        (33, 3),   # below limit
-        (26, HISTORY_LIMIT),   # at limit
-        (19, HISTORY_LIMIT),   # at limit
-        (12, 8),   # above limit
-        (5, 12),   # well above limit
+        (33, max(1, limit // 2)),        # below limit
+        (26, limit),                     # at limit
+        (19, limit),                     # at limit
+        (12, limit + 8),                 # above limit
+        (5, limit + 12),                 # well above limit
     ]
 
 
 def _legacy_archive_specs() -> list[tuple[int, int]]:
     """Legacy rotation artifacts stored directly in ``.ck/`` (the
     current rotation layout) — data for cleanup routines that must
-    handle both layouts."""
-    return [(47, 6), (40, HISTORY_LIMIT)]
+    handle both layouts. Counts straddle the EFFECTIVE history
+    limit."""
+    limit = history_limit()
+    return [(47, max(1, limit // 3)), (40, limit)]
 
 
 def _mock_state(project_name: str, now: datetime) -> dict:

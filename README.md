@@ -39,7 +39,7 @@ Context Keeper (ck) acts as a bridge between your brain, AI agents, and Git, per
 ## ✨ Features
 - Plain Text Storage: All data stored in human-readable Markdown files — no databases, no lock-in
 - Git Integration: Local commits only — `ck` never pushes, clones, or touches remotes without an explicit `ck update` (fast-forward pull)
-- Auto-Archiving: Automatic rotation of history files when reaching the configurable HISTORY_LIMIT
+- Auto-Archiving: Automatic rotation of history files when reaching the configurable HISTORY_LIMIT, with gzip-compressed `.md.gz` archives (COMPRESS_ARCHIVES) and FIFO retention via MAX_BAK_FILES
 - Strict Parsing: Task statuses `- [ ]` / `- [>]` / `- [x]` (legacy `- []` input is accepted and canonicalized on write)
 - AI-Ready: Optimized context preservation for AI workflows
 - Self-Contained: Templates embedded in the package
@@ -98,7 +98,8 @@ ck -v    # → ck version 0.4.2
 ├── prompt.md
 ├── README.md
 ├── .gitignore
-└── HISTORY_*.md.bak
+├── HISTORY_*.md.gz      (compressed rotation archives — default)
+└── HISTORY_*.md.bak     (legacy uncompressed archives)
 ```
 
 ---
@@ -116,6 +117,7 @@ ck -v    # → ck version 0.4.2
 | ck edit | Open PLAN.md in your editor (see [Editor Resolution](#editor-resolution)) |
 | ck save | Task completion workflow: optional note + optional **local** commit |
 | ck log | Open HISTORY.md in your editor (see [Editor Resolution](#editor-resolution)) |
+| ck log --all | View the full history: every rotation archive (`.md.gz` decompressed / legacy `.md.bak`, oldest first) concatenated with the current HISTORY.md |
 | ck st | Status overview (tri-state: Previous / Focus / Next); an explicit focus is duplicated at the top as `-> CURRENT FOCUS: [#<id>] <title>` (with its note) |
 | ck notes | List all active process notes: `[>] Active Focus:` plus `[!] Unfocused / Paused Context:` with each paused task's bound note (`[i] No active process notes found.` when none) |
 | ck st -l / --list | Print the task list to STDOUT (same as `ck list`) |
@@ -176,7 +178,7 @@ and a summary count, so the registry cleanup is auditable.
 - Display current active task
 - Enter commit description + optional note (inline or via your editor — see [Editor Resolution](#editor-resolution))
 - Optional **local** Git commit (never pushes; skips gracefully if Git is unavailable or declined)
-- Auto-archive HISTORY.md when limit reached (gapless rotation, original preserved as .bak)
+- Auto-archive HISTORY.md when limit reached (gapless rotation, original preserved as a compressed `.md.gz` archive by default)
 
 ---
 
@@ -327,7 +329,15 @@ The parser accepts both canonical CommonMark and the legacy no-space form; the w
 ```
 
 ### Auto-Archive
-When HISTORY.md reaches limit → rotates to `HISTORY_*.md.bak` (rotation is crash-safe: the new content is staged before the old file is renamed).
+When `HISTORY.md` reaches `HISTORY_LIMIT` entries it is rotated into a timestamped archive and a fresh file is started. Rotation is crash-safe: the new content is staged before the old file is renamed.
+
+| Parameter | Default | Meaning |
+|-----------|---------|---------|
+| `HISTORY_LIMIT` | `1000` | Entry count in `HISTORY.md` that triggers rotation |
+| `MAX_BAK_FILES` | `100` | Maximum retained archives; the oldest are purged FIFO after each rotation |
+| `COMPRESS_ARCHIVES` | `True` | Rotate into gzip-compressed `HISTORY_<date>_<time>.md.gz` (Python's built-in `gzip` module — fully cross-platform, no external binaries) instead of legacy `HISTORY_<date>_<time>.md.bak` |
+
+`ck log --all` shows the combined history: every archive (`.md.gz` transparently decompressed and legacy `.md.bak`, oldest first) followed by the current `HISTORY.md`. A corrupted archive is skipped with a warning instead of breaking the view.
 
 ### Data Integrity & Concurrency
 - All writes are atomic (temp file + rename) — readers never see torn files
@@ -504,7 +514,7 @@ Logs go **exclusively** to `stderr` and `.sandbox/dev.log` — `stdout` stays co
 
 ## 🗺 Roadmap
 - **Context Injection**: Mechanism to inject project context into external AI prompts and tools
-- **Archive Management**: Advanced history control and search across HISTORY.md.bak files
+- **Archive Management**: Advanced history control and search across history archives (cross-archive viewing is shipped today via `ck log --all`)
 - **Interactive Workflow**: Real-time plan updates during `ck save`
 
 ---
@@ -539,7 +549,7 @@ Context Keeper (ck) служит мостом между вашим разумо
 ## ✨ Возможности
 - Хранение в тексте
 - Интеграция с Git (только локальные коммиты, без push)
-- Авто-архивация
+- Авто-архивация: ротация HISTORY.md по лимиту HISTORY_LIMIT со сжатыми `.md.gz`-архивами (COMPRESS_ARCHIVES) и FIFO-очисткой по MAX_BAK_FILES
 - Парсинг `- [ ]` / `- [>]` / `- [x]` (устаревший `- []` нормализуется)
 - Поддержка AI
 - Глобальный реестр проектов и панель мониторинга
@@ -574,7 +584,8 @@ chmod +x ck
 ├── prompt.md
 ├── README.md
 ├── .gitignore
-└── HISTORY_*.md.bak
+├── HISTORY_*.md.gz      # сжатые архивы ротации (по умолчанию)
+└── HISTORY_*.md.bak     # устаревшие несжатые архивы
 ```
 
 ---
@@ -613,7 +624,7 @@ chmod +x ck
 - Отображение задачи
 - Ввод коммита и опциональной заметки
 - Локальный коммит (push не выполняется никогда)
-- Авто-архивация
+- Авто-архивация HISTORY.md при превышении лимита (бесшовная ротация, оригинал сохраняется как сжатый `.md.gz`-архив)
 
 ---
 
@@ -642,7 +653,7 @@ export EDITOR="nano"  # используется, если VISUAL не зада�
 
 ## 🔧 Механика работы
 - Формат задач: `- [ ]` / `- [>]` / `- [x]` (устаревший `- []` принимается и нормализуется)
-- Ротация истории (безопасная при сбоях)
+- Ротация истории (безопасная при сбоях): `HISTORY_LIMIT` записей → архив `HISTORY_*.md.gz` (`COMPRESS_ARCHIVES`, сжатие встроенным модулем `gzip`), удержание `MAX_BAK_FILES` архивов (FIFO-очистка старых); весь журнал — `ck log --all` (архивы `.md.gz` и legacy `.md.bak` читаются прозрачно, повреждённые пропускаются с предупреждением)
 - Локальные коммиты Git (без push)
 - Fail-closed блокировка файлов и атомарная запись
 
@@ -787,5 +798,5 @@ CK_DEBUG=1 ./ck-dev add "traced"    # или: ./ck-dev -v add "traced"
 
 ## 🗺 Roadmap
 - **Context Injection**: Механизм внедрения контекста в сторонние инструменты и ИИ-запросы
-- **Archive Management**: Расширенное управление архивами и поиск по HISTORY.md.bak
+- **Archive Management**: Расширенное управление архивами и поиск по архивам истории (просмотр уже доступен через `ck log --all`)
 - **Interactive Workflow**: Правка плана прямо во время `ck save`

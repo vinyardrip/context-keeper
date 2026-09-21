@@ -10,9 +10,59 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-VERSION = "0.4.2"
+VERSION = "0.4.3"
 CK_DIR_NAME = ".ck"
-HISTORY_LIMIT = 5
+# Entries in HISTORY.md before rotation archives it. Runtime
+# override: CK_HISTORY_LIMIT environment variable.
+HISTORY_LIMIT = 1000
+# Maximum retained history archives (HISTORY_*.md.gz / .md.bak) in
+# .ck/ — FIFO cleanup deletes the oldest beyond this. Runtime
+# override: CK_MAX_BAK_FILES environment variable.
+MAX_BAK_FILES = 100
+# Compress rotated history archives to .md.gz (Python's built-in
+# ``gzip`` module — fully cross-platform, no external binaries).
+# ``False`` preserves the legacy uncompressed ``.md.bak`` naming.
+# Runtime override: CK_COMPRESS_ARCHIVES (0/false/no/off disable).
+COMPRESS_ARCHIVES = True
+
+
+def history_limit() -> int:
+    """Effective ``HISTORY_LIMIT`` (``CK_HISTORY_LIMIT`` env override).
+
+    A malformed or empty override falls back to the module default;
+    values below 1 are clamped to 1. Never raises.
+    """
+    raw = os.environ.get("CK_HISTORY_LIMIT", "")
+    try:
+        return max(1, int(raw)) if raw.strip() else HISTORY_LIMIT
+    except ValueError:
+        return HISTORY_LIMIT
+
+
+def max_bak_files() -> int:
+    """Effective ``MAX_BAK_FILES`` (``CK_MAX_BAK_FILES`` env override).
+
+    A malformed or empty override falls back to the module default;
+    negative values are clamped to 0 (keep no archives). Never raises.
+    """
+    raw = os.environ.get("CK_MAX_BAK_FILES", "")
+    try:
+        return max(0, int(raw)) if raw.strip() else MAX_BAK_FILES
+    except ValueError:
+        return MAX_BAK_FILES
+
+
+def compress_archives_enabled() -> bool:
+    """Effective ``COMPRESS_ARCHIVES`` (env override honored).
+
+    ``CK_COMPRESS_ARCHIVES`` unset/empty → module default (True).
+    Accepted false spellings: ``0`` / ``false`` / ``no`` / ``off``
+    (case-insensitive); any other value enables compression.
+    """
+    raw = os.environ.get("CK_COMPRESS_ARCHIVES")
+    if raw is None or not raw.strip():
+        return COMPRESS_ARCHIVES
+    return raw.strip().lower() not in ("0", "false", "no", "off")
 
 PLAN_FILENAME = "PLAN.md"
 HISTORY_FILENAME = "HISTORY.md"
@@ -44,6 +94,7 @@ REMOTE_URL = "https://raw.githubusercontent.com/vinyardrip/context-keeper/main/c
 
 LOCAL_GITIGNORE_ENTRIES: tuple[str, ...] = (
     ".ck/*.bak",
+    ".ck/*.md.gz",
     ".ck/state.json",
 )
 
@@ -97,6 +148,7 @@ DEFAULT_CK_GITIGNORE = """# Context Keeper - Auto-generated
 
 # History archives (rotated backups)
 *.bak
+*.md.gz
 
 # Dynamic state (regenerated automatically)
 state.json
