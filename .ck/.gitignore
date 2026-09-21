@@ -1,0 +1,14 @@
+# Context Keeper - Auto-generated
+# Exclude backups and dynamic state from Git tracking
+
+# History archives (rotated backups)
+*.bak
+
+# Dynamic state (regenerated automatically)
+state.json
+
+# Transient cross-process lock files
+*.lock
+
+# Local config overrides
+config.local.json

@@ -11,7 +11,10 @@ and it is gated by:
 - the user actually invoking ``ck update``.
 
 Routine non-blocking update notifier uses ``git rev-parse`` and
-``git ls-remote`` (read-only).
+``git ls-remote`` (read-only). The ``ls-remote`` probe is capped by
+a HARD sub-second timeout (:data:`NETWORK_CHECK_TIMEOUT`) so a slow
+or unreachable remote can never stall the CLI execution loop: on
+timeout the check fails silently (no traceback, no stderr noise).
 """
 
 from __future__ import annotations
@@ -20,6 +23,11 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import Optional, Tuple
+
+# Hard sub-second cap for network-bound update-check probes. A
+# background notifier must never block the CLI: if the remote cannot
+# answer within this window, the check silently fails.
+NETWORK_CHECK_TIMEOUT = 0.8
 
 
 def _resolve_git() -> Optional[str]:
@@ -54,6 +62,30 @@ def is_git_repo(path: Path | None = None) -> bool:
     cwd = str(path) if path else None
     result = _run(["rev-parse", "--is-inside-work-tree"], cwd=cwd, timeout=5.0)
     return result.returncode == 0 and result.stdout.strip() == "true"
+
+
+def repo_root(path: Path | None = None) -> Optional[Path]:
+    """Absolute top-level directory of the Git work tree containing
+    ``path`` (default: cwd), or None when Git is unavailable / ``path``
+    is outside any work tree.
+
+    Read-only: a single ``git rev-parse --show-toplevel`` probe. Used
+    to BOUND upward project-context traversal (``ck st`` must not
+    escape the repository boundary when looking for a PLAN.md).
+    """
+    if not _resolve_git():
+        return None
+    cwd = str(path) if path else None
+    result = _run(["rev-parse", "--show-toplevel"], cwd=cwd, timeout=5.0)
+    if result.returncode != 0:
+        return None
+    top = result.stdout.strip()
+    if not top or top.startswith("-"):
+        return None
+    try:
+        return Path(top).resolve()
+    except (OSError, ValueError):
+        return None
 
 
 def current_branch(path: Path | None = None) -> Optional[str]:
@@ -104,6 +136,49 @@ def remote_sha(path: Path | None, remote: str, branch: str) -> Optional[str]:
     if result.returncode != 0:
         return None
     return result.stdout.strip() or None
+
+
+def ls_remote(remote: str, branch: str, path: Path | None = None,
+              *, timeout: float = NETWORK_CHECK_TIMEOUT) -> Optional[str]:
+    """``git ls-remote <remote> <branch>`` with a HARD sub-second timeout.
+
+    Read-only network probe used by the non-blocking update notifier.
+    Returns the remote tip SHA, or ``None`` on ANY failure (git
+    missing, invalid refspec, timeout, network error). Never raises,
+    never prints: a slow or unreachable remote must fail silently
+    instead of stalling the CLI or polluting stderr.
+    """
+    git = _resolve_git()
+    if not git:
+        return None
+    if not remote or not branch:
+        return None
+    if remote.startswith("-") or branch.startswith("-"):
+        # Option-injection guard (mirrors _assert_safe_remote_write):
+        # a "remote" such as ``--upload-pack=...`` would be parsed by
+        # git as an option, not a refspec.
+        return None
+    cwd = str(path) if path else None
+    try:
+        result = subprocess.run(
+            [git, "ls-remote", remote, branch],
+            capture_output=True, text=True, cwd=cwd,
+            timeout=timeout, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        # Hard deadline hit: fail silently, no traceback, no stderr.
+        return None
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    lines = (result.stdout or "").strip().splitlines()
+    if not lines:
+        return None
+    parts = lines[0].split()
+    if not parts:
+        return None
+    return parts[0].strip() or None
 
 
 def is_dirty(path: Path | None = None) -> bool:

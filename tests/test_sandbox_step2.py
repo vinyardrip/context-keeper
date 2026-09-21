@@ -17,6 +17,12 @@ Covers:
 
 from __future__ import annotations
 
+# Filesystem isolation safety net: importing the tests package
+# pins CK_SANDBOX_ROOT to an OS-temp directory (see tests/__init__),
+# so no test in this module can create or wipe the repository's own
+# .sandbox/ — under ANY runner, including bare `unittest discover`.
+import tests  # noqa: F401
+
 import io
 import os
 import tempfile

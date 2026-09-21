@@ -8,8 +8,9 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
+from typing import Optional
 
-VERSION = "0.2.5"
+VERSION = "0.3.0"
 CK_DIR_NAME = ".ck"
 HISTORY_LIMIT = 5
 
@@ -30,6 +31,13 @@ UPDATE_CHECK_INTERVAL_HOURS = 24
 
 INSTALL_PATH = "/usr/local/bin/ck"
 USER_INSTALL_PATH = Path.home() / ".local" / "bin" / "ck"
+# Physical package snapshot written by `ck install` (production
+# isolation): the installed launcher at USER_INSTALL_PATH is a regular
+# file with no adjacent cklib, so it resolves THIS static copy at
+# runtime. NOTE: the `ck` launcher duplicates this computation (it
+# cannot import cklib before the source root is resolved) — keep the
+# two in sync.
+SNAPSHOT_INSTALL_DIR = Path.home() / ".local" / "share" / "ck"
 DEFAULT_REPO_URL = "https://github.com/vinyardrip/context-keeper.git"
 DEFAULT_REPO_BRANCH = "main"
 REMOTE_URL = "https://raw.githubusercontent.com/vinyardrip/context-keeper/main/ck"
@@ -48,10 +56,14 @@ TRACKED_GITIGNORE_PROTECTIONS: tuple[str, ...] = (
 
 PROJECT_CONFIG_FILENAME = ".ck.json"
 
+# Palette slots read from the project config's optional "colors"
+# mapping (see cklib.ui.PALETTE_SLOTS).
+COLOR_CONFIG_KEY = "colors"
+
 DEFAULT_PLAN = """# {project_name}
 
 ## Current Sprint
-- [] Описать первую задачу
+- [] Describe the first task
 
 ## Completed
 """
@@ -133,10 +145,10 @@ def warn_if_sensitive_root(root: Path) -> bool:
     if sensitive:
         try:
             print(
-                f"\u26a0\ufe0f  Warning: initializing a Context Keeper project "
-                f"in {root} is unusual — this affects every command run "
-                f"from anywhere beneath it. Consider using a dedicated "
-                f"project directory instead.",
+                f"Warning: initializing a Context Keeper project "
+                f"in {root} is unusual - this affects every command "
+                f"run from anywhere beneath it. Consider using a "
+                f"dedicated project directory instead.",
                 file=sys.stderr,
             )
         except OSError:
@@ -145,14 +157,33 @@ def warn_if_sensitive_root(root: Path) -> bool:
     return False
 
 
-def find_project_root(start: Path | None = None) -> Path:
+def find_project_root(start: Path | None = None) -> Optional[Path]:
     """Walk up from ``start`` (default: cwd) until ``.ck/`` is found.
 
     If no ``.ck/`` exists, returns ``start`` (or cwd). The caller can
     pass the result through :func:`warn_if_sensitive_root` when a
     NEW project is about to be created there (``ck init``).
+
+    DANGLING WORKING DIRECTORY: when the process cwd no longer
+    exists on disk (the directory was wiped/rebuilt underneath the
+    caller — e.g. a sandbox re-initialization or an external
+    ``rm -rf``), ``Path.cwd()``/``os.getcwd()`` raise
+    ``FileNotFoundError``. Instead of crashing, returns ``None`` so
+    callers can degrade gracefully: global commands (``ck st -g``,
+    ``ck dashboard``, ``ck register``) do not need a local root at
+    all, and local commands surface a clean "not in a valid
+    project directory" message instead of a traceback.
     """
-    curr = (start or Path.cwd()).resolve()
+    try:
+        curr = (start or Path.cwd()).resolve()
+    except FileNotFoundError:
+        # The cwd descriptor itself is dangling; nothing to walk.
+        return None
+    except (OSError, RuntimeError):
+        # Other resolution failures (permission loops, symlink
+        # cycles) degrade the same way — a broken environment is
+        # treated as "no resolvable root", never a crash.
+        return None
     for parent in [curr, *curr.parents]:
         if (parent / CK_DIR_NAME).is_dir():
             return parent
@@ -182,6 +213,45 @@ def _read_project_editor_config(root: Path | None = None) -> str:
     if isinstance(editor, str) and editor.strip():
         return editor.strip()
     return ""
+
+
+def read_color_config(root: Path | None = None) -> dict:
+    """Read the optional ``"colors"`` palette overrides from ``.ck.json``.
+
+    Looks for the Context Keeper project root (the directory
+    containing ``.ck/``, found by walking up from ``root`` or the
+    cwd) and reads its ``.ck.json``::
+
+        {"colors": {"text": "cyan", "muted": "blue",
+                    "border": "bold black", "accent": "magenta"}}
+
+    Returns a dict of slot name -> config value for the known slots
+    only (``text``, ``muted``, ``border``, ``accent``); non-string
+    values are dropped. Value *contents* are validated later by
+    :func:`cklib.ui.resolve_color` — anything unrecognised degrades
+    gracefully to the terminal's native text color. Never raises:
+    a missing/unreadable/malformed config yields ``{}``.
+    """
+    try:
+        project_root = find_project_root(root)
+        config_path = project_root / PROJECT_CONFIG_FILENAME
+        if not config_path.is_file():
+            return {}
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    colors = data.get(COLOR_CONFIG_KEY)
+    if not isinstance(colors, dict):
+        return {}
+    from .ui import PALETTE_SLOTS
+
+    return {
+        slot: colors[slot]
+        for slot in PALETTE_SLOTS
+        if isinstance(colors.get(slot), str)
+    }
 
 
 def get_editor(root: Path | None = None,
@@ -262,12 +332,14 @@ def file_lock(path: Path | str, *, timeout: float = 5.0,
       (or the lock file cannot be opened at all), raises
       :class:`LockTimeoutError` instead of proceeding unlocked.
     - The lock is always released on exit, even if the body raises.
-    - DEV MODE: when sandbox interception is active
-      (``ck-dev`` / ``CK_SANDBOX`` / ``--sandbox``), the lock is taken
-      on the SANDBOX sibling of the redirected path so ``*.lock``
-      files are never created inside real production directories
-      (``.ck/`` or ``~/.config/ck/``). The import is lazy to avoid a
-      config <-> sandbox import cycle.
+    - DEV MODE: when the sandbox context is active
+      (``ck-dev`` / ``CK_SANDBOX`` / ``--sandbox`` / cwd inside
+      ``.sandbox/``), the lock is taken on the SANDBOX sibling of the
+      redirected path so ``*.lock`` files are never created inside
+      real production directories (``.ck/`` or ``~/.config/ck/``)
+      and dev-context writers serialise on the same files they
+      actually write. The import is lazy to avoid a config <->
+      sandbox import cycle.
 
     Usage::
 
@@ -278,9 +350,9 @@ def file_lock(path: Path | str, *, timeout: float = 5.0,
     """
     p = Path(path)
     try:
-        from .sandbox import is_dev_mode, resolve_write_path
-        if is_dev_mode():
-            p = resolve_write_path(p)
+        from .sandbox import dev_context_active, resolve_write_path
+        if dev_context_active():
+            p = resolve_write_path(p, force=True)
     except Exception:
         pass  # interception is best-effort for locks; never block I/O
     lock_path = p.with_name(p.name + ".lock")
