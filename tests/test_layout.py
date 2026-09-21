@@ -575,6 +575,8 @@ class TestWorkContext(_IsolatedHome, unittest.TestCase):
             f" > project [v{VERSION}]",
             " [%] Progress: 2/4 tasks done (50.0%)",
             "",
+            " -> CURRENT FOCUS: [#2] focus task",
+            "",
             " -> WORK CONTEXT:",
             "    << Done:",
             "       - [1] prev task [x]",

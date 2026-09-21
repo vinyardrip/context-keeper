@@ -1254,6 +1254,21 @@ class ContextKeeper:
             "has_note": self._note_for_task(focus.id) != "",
         }
 
+    def is_already_focused(self, task_id: int) -> bool:
+        """True when ``task_id`` is the currently focused task.
+
+        Read-only check used by the CLI to make ``ck start <ID>``
+        idempotent: re-focusing the already-focused task must be a
+        clean no-op (no note prompt, no plan mutation)."""
+        if self.plan_file is None or not self.plan_file.exists():
+            return False
+        try:
+            tl = self._load_plan()
+        except (OSError, ValueError):
+            return False
+        focus = tl.focused[0] if tl.focused else None
+        return focus is not None and focus.id == task_id
+
     def _note_for_task(self, task_id: int) -> str:
         """Return the stored process-note text when it belongs to
         ``task_id`` (structurally valid entry only), else ""."""
@@ -1503,6 +1518,29 @@ class ContextKeeper:
         keeper = self._keeper_for(ctx.root)
         tl = load_repaired_plan(keeper._plan_display_path())[0]
         return _render_tasks_listing(tl)
+
+    def notes(self) -> str:
+        """Return all active process notes for the resolved project.
+
+        Structured two-section listing:
+
+            [>] Active Focus:
+               - [<id>] <title>
+                 * Note: <text>          (when a note is attached)
+            [!] Unfocused / Paused Context:
+               - [<id>] <title>
+                 * Note: <text>          (each paused task's note)
+
+        With no notes anywhere (active or paused) a single ``[i] No
+        active process notes found.`` line is returned. The plan
+        context is resolved through the same hierarchy as ``ck st``.
+        """
+        ctx = self.resolve_context()
+        if ctx is None:
+            return "No tasks. Add one with `ck add <text>`."
+        keeper = self._keeper_for(ctx.root)
+        tl = parse_plan_file(keeper._plan_display_path())
+        return _render_notes_listing(keeper, tl)
 
     def full_plan_text(self) -> Optional[str]:
         """Full PLAN.md text of the resolved context (None if missing).
@@ -2402,6 +2440,8 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
         =============================================================
          > <project_name> [v<version>]
          [%] Progress: <done>/<total> tasks done (<pct>%)
+         -> CURRENT FOCUS: [#<id>] <title>   (explicit focus only)
+            * Note: <process note>            (only when set)
 
          -> WORK CONTEXT:
             << Done (N tasks):               last 2, closest to focus
@@ -2491,6 +2531,30 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
     if gap_ids:
         progress += f" {p.muted(f'(gaps: {_collapse_ids(gap_ids)})')}"
     lines.append(progress)
+
+    # 0) Top-level focus visibility: the active task is duplicated at
+    #    the very top (immediately below header/progress) so the user
+    #    never has to scan the list blocks for it. Explicit focus
+    #    only — the auto-resolved Next candidate is NOT advertised
+    #    as a focus (the [>] Next section keeps that nuance).
+    top_focus = tl.focused[0] if tl.focused else None
+    if top_focus is not None:
+        top_note = ""
+        note_data = ck.get_note()
+        if note_data is not None and note_data.get("id") == top_focus.id \
+                and note_data.get("note"):
+            top_note = note_data["note"]
+        else:
+            for entry in ck._paused_tasks():
+                if entry["id"] == top_focus.id and entry["note"]:
+                    top_note = entry["note"]
+                    break
+        lines.append("")
+        lines.append(
+            " -> CURRENT FOCUS: "
+            + p.bold_yellow(f"[#{top_focus.id}] {top_focus.title}"))
+        if top_note:
+            lines.append(p.bold_cyan(f"    * Note: {top_note}"))
 
     lines.append("")
     lines.append(p.bold(" -> WORK CONTEXT:"))
@@ -2663,6 +2727,76 @@ def _render_tasks_listing(tl: TaskList) -> str:
         marker = t.status.canonical_marker
         lines.append(f"[{marker}] {t.id}. {t.title}")
     return "\n".join(lines)
+
+
+def _render_notes_listing(ck: ContextKeeper, tl: TaskList) -> str:
+    """Render all active process notes (``ck notes``).
+
+    Two structured sections: the focused task's note (``[>] Active
+    Focus:``) and every paused task's bound note (``[!] Unfocused /
+    Paused Context:``). A paused entry WITHOUT a note is still
+    listed (with a muted ``(no note)`` marker) so the paused context
+    stays fully visible; the section itself is omitted only when no
+    paused tasks exist. No notes anywhere -> the single ``[i] No
+    active process notes found.`` line.
+    """
+    p = ui.get_palette(colors=ck.color_overrides())
+    note_data = ck.get_note()
+    note_id = note_data["id"] if note_data is not None else None
+    note_text = note_data["note"] if note_data is not None else ""
+
+    focus = tl.focused[0] if tl.focused else None
+    active_note = ""
+    if focus is not None:
+        if note_id == focus.id and note_text:
+            active_note = note_text
+        else:
+            for entry in ck._paused_tasks():
+                if entry["id"] == focus.id and entry["note"]:
+                    active_note = entry["note"]
+                    break
+
+    paused_entries: list = []
+    for entry in ck._paused_tasks():
+        p_task = tl.by_id(entry["id"])
+        if p_task is None or p_task.status != TaskStatus.OPEN:
+            continue
+        if focus is not None and p_task.id == focus.id:
+            continue
+        paused_entries.append((p_task.id, p_task.title, entry["note"]))
+    # Legacy bridge: an active_task note pointing at a non-focused
+    # open task (state written by an older version) renders as a
+    # paused entry here too.
+    if note_id is not None and note_text \
+            and (focus is None or note_id != focus.id):
+        noted = tl.by_id(note_id)
+        if (noted is not None and noted.status == TaskStatus.OPEN
+                and all(pid != noted.id for pid, _, _ in paused_entries)):
+            paused_entries.append((noted.id, noted.title, note_text))
+
+    has_any = bool(active_note) or any(
+        note for _, _, note in paused_entries)
+    if not has_any and focus is None and not paused_entries:
+        return "[i] No active process notes found."
+    if not has_any:
+        # Focus/paused tasks exist but carry no notes at all.
+        return "[i] No active process notes found."
+
+    out: list[str] = []
+    if focus is not None:
+        out.append(p.bold_yellow("[>] Active Focus:"))
+        out.append(f"   - [{focus.id}] {focus.title}")
+        if active_note:
+            out.append(p.bold_cyan(f"     * Note: {active_note}"))
+    if paused_entries:
+        out.append(p.bold_yellow("[!] Unfocused / Paused Context:"))
+        for pid, ptitle, pnote in paused_entries:
+            out.append(f"   - [{pid}] {ptitle}")
+            if pnote:
+                out.append(p.bold_cyan(f"     * Note: {pnote}"))
+            else:
+                out.append(p.muted("     (no note)"))
+    return "\n".join(out)
 
 
 def _collapse_ids(ids: list) -> str:

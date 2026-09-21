@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.4.1-blue)]()
+[![version](https://img.shields.io/badge/version-0.4.2-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -84,7 +84,7 @@ chmod +x ck
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.4.1
+ck -v    # → ck version 0.4.2
 ```
 
 ---
@@ -116,7 +116,8 @@ ck -v    # → ck version 0.4.1
 | ck edit | Open PLAN.md in your editor (see [Editor Resolution](#editor-resolution)) |
 | ck save | Task completion workflow: optional note + optional **local** commit |
 | ck log | Open HISTORY.md in your editor (see [Editor Resolution](#editor-resolution)) |
-| ck st | Status overview (tri-state: Previous / Focus / Next) |
+| ck st | Status overview (tri-state: Previous / Focus / Next); an explicit focus is duplicated at the top as `-> CURRENT FOCUS: [#<id>] <title>` (with its note) |
+| ck notes | List all active process notes: `[>] Active Focus:` plus `[!] Unfocused / Paused Context:` with each paused task's bound note (`[i] No active process notes found.` when none) |
 | ck st -l / --list | Print the task list to STDOUT (same as `ck list`) |
 | ck st -e / --edit | Open PLAN.md in your editor (same as `ck edit`) |
 | ck st -g / --global | Cross-project dashboard (same as `ck dashboard`) |
@@ -252,12 +253,36 @@ carries a note:
   completing it with `ck done 2` archives the note into HISTORY.md and clears
   it.)
 
+- **Idempotency** — `ck start <ID>` on the already-focused task is a clean
+  no-op: it prints `Task #<ID> is already focused.`, never prompts for a note,
+  and does not re-assign focus.
+
 Every open task that previously held focus — with or without a note — stays
 listed under **Unfocused / Paused Context** in `ck st` and `ck dashboard -v`
 until it is re-focused or completed; paused tasks are excluded from the generic
 `[!] Skipped` list so they are never buried there. A paused task's note stays
 bound to it across further focus switches and is restored as the active note
 when the task is re-focused.
+
+### Viewing notes: `ck notes`
+
+`ck notes` lists every active process note in the project in two sections —
+the focused task's note and each paused task's bound note (paused entries
+without a note are shown with a `(no note)` marker so the paused context stays
+fully visible):
+
+```text
+$ ck notes
+[>] Active Focus:
+   - [3] write docs
+[!] Unfocused / Paused Context:
+   - [2] implement API mapping
+     * Note: paused mid-refactor — mapping layer half done
+   - [4] refactor parser
+     (no note)
+```
+
+When nothing carries a note: `[i] No active process notes found.`
 
 ---
 

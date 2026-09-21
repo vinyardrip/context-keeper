@@ -178,11 +178,13 @@ class TestNoteDisplay(_NoteHarness):
         ck.set_note("checking API mapping")
         out = ck.status()
         self.assertIn("* Note: checking API mapping", out)
-        # The note sits inside the status block, above the closing bar.
+        # The note appears twice by design: once in the top-level
+        # CURRENT FOCUS block and once under the task in WORK CONTEXT.
         lines = out.splitlines()
         note_lines = [i for i, l in enumerate(lines) if "* Note:" in l]
-        self.assertEqual(len(note_lines), 1)
-        self.assertLess(note_lines[0], len(lines) - 1)
+        self.assertEqual(len(note_lines), 2)
+        self.assertLess(note_lines[0], note_lines[1])
+        self.assertLess(note_lines[1], len(lines) - 1)
 
     def test_status_without_note_has_no_note_line(self):
         ck = self._ck()
@@ -638,6 +640,194 @@ class TestPausedLedger(_NoteHarness):
         ck = self._ck()
         ck.state_file.write_text("{not json", encoding="utf-8")
         self.assertEqual(ck._paused_tasks(), [])
+
+
+# ---------------------------------------------------------------------------
+# ck start idempotency, CURRENT FOCUS line, and the ck notes command
+# ---------------------------------------------------------------------------
+
+
+class TestStartIdempotency(_NoteHarness):
+    """Re-focusing the already-focused task is a clean no-op."""
+
+    def _run(self, argv, cwd: Path, *, stdin_tty=True, stdout_tty=True,
+             inputs=None):
+        buf = io.StringIO()
+        prompts: list[str] = []
+        scripted = list(inputs or [])
+
+        def fake_input(prompt=""):
+            prompts.append(prompt)
+            if scripted:
+                item = scripted.pop(0)
+                if isinstance(item, Exception):
+                    raise item
+                return item
+            raise EOFError("stdin closed")
+
+        orig_cwd = Path.cwd()
+        os.chdir(cwd)
+        try:
+            with _clean_env(), redirect_stdout(buf):
+                with mock.patch("sys.stdin.isatty", return_value=stdin_tty), \
+                        mock.patch("sys.stdout.isatty",
+                                   return_value=stdout_tty), \
+                        mock.patch("builtins.input", side_effect=fake_input):
+                    code = main(argv)
+            self.assertEqual(code, 0, f"exit {code} for {argv!r}")
+        finally:
+            os.chdir(orig_cwd)
+        return buf.getvalue(), prompts
+
+    def test_already_focused_prints_notice_and_skips_prompt(self):
+        ck = self._ck()  # plan has task 2 focused
+        out, prompts = self._run(["start", "2"], ck.root)
+        self.assertEqual(prompts, [])
+        self.assertIn("Task #2 is already focused.", out)
+        self.assertNotIn("-> Focused", out)
+        self.assertNotIn("lost focus", out)
+        self.assertEqual(ck.get_note(), None)
+
+    def test_already_focused_even_when_task_carries_note(self):
+        ck = self._ck()
+        ck.set_note("wip")
+        out, prompts = self._run(["start", "2"], ck.root)
+        self.assertEqual(prompts, [])
+        self.assertIn("Task #2 is already focused.", out)
+        self.assertEqual(ck.get_note()["note"], "wip")
+
+    def test_already_focused_is_a_plan_noop(self):
+        ck = self._ck()
+        before = ck.plan_file.read_text(encoding="utf-8")
+        self._run(["start", "2"], ck.root)
+        self.assertEqual(
+            ck.plan_file.read_text(encoding="utf-8"), before)
+
+    def test_switching_to_a_different_task_still_works(self):
+        ck = self._ck()
+        out, _ = self._run(["start", "3"], ck.root)
+        self.assertIn("-> Focused [3]: write docs", out)
+
+    def test_idempotent_reset_zero_still_demotes(self):
+        """The no-op guard covers only a positive already-focused ID;
+        `ck start 0` keeps its reset semantics."""
+        ck = self._ck()
+        out, _ = self._run(["start", "0"], ck.root)
+        self.assertIn("[ok] Focus reset.", out)
+
+
+class TestCurrentFocusLine(_NoteHarness):
+    """Top-level focus visibility in `ck st`."""
+
+    def test_current_focus_line_under_progress(self):
+        ck = self._ck()
+        out = ck.status()
+        lines = out.splitlines()
+        focus_idx = next(
+            i for i, l in enumerate(lines)
+            if "-> CURRENT FOCUS:" in l)
+        progress_idx = next(
+            i for i, l in enumerate(lines) if "[%] Progress:" in l)
+        work_idx = next(
+            i for i, l in enumerate(lines) if "-> WORK CONTEXT:" in l)
+        self.assertGreater(focus_idx, progress_idx)
+        self.assertLess(focus_idx, work_idx)
+        self.assertIn("[#2] implement API mapping", lines[focus_idx])
+
+    def test_current_focus_line_includes_note(self):
+        ck = self._ck()
+        ck.set_note("mid-refactor")
+        lines = ck.status().splitlines()
+        focus_idx = next(
+            i for i, l in enumerate(lines)
+            if "-> CURRENT FOCUS:" in l)
+        self.assertIn("* Note: mid-refactor", lines[focus_idx + 1])
+
+    def test_no_current_focus_line_without_explicit_focus(self):
+        ck = self._ck("# P\n- [ ] alpha\n- [ ] beta\n")
+        self.assertNotIn("-> CURRENT FOCUS:", ck.status())
+
+    def test_focus_restored_from_ledger_shows_in_current_focus(self):
+        ck = self._ck()
+        ck.set_note("wip")
+        ck.start(3)
+        ck.start(2)  # re-focus: note restored from the paused ledger
+        lines = ck.status().splitlines()
+        focus_idx = next(
+            i for i, l in enumerate(lines)
+            if "-> CURRENT FOCUS:" in l)
+        self.assertIn("* Note: wip", lines[focus_idx + 1])
+
+
+class TestNotesCommand(_NoteHarness):
+    """`ck notes`: structured listing of all active process notes."""
+
+    def _run(self, argv, cwd: Path) -> str:
+        buf = io.StringIO()
+        orig_cwd = Path.cwd()
+        os.chdir(cwd)
+        try:
+            with _clean_env(), redirect_stdout(buf):
+                code = main(argv)
+            self.assertEqual(code, 0, f"exit {code} for {argv!r}")
+        finally:
+            os.chdir(orig_cwd)
+        return buf.getvalue()
+
+    def test_empty_state_message(self):
+        ck = self._ck("# P\n- [ ] alpha\n- [ ] beta\n")
+        out = self._run(["notes"], ck.root)
+        self.assertEqual(out.strip(), "[i] No active process notes found.")
+
+    def test_focused_but_noteless_also_reports_empty(self):
+        ck = self._ck()
+        out = self._run(["notes"], ck.root)
+        self.assertEqual(out.strip(), "[i] No active process notes found.")
+
+    def test_active_focus_section_with_note(self):
+        ck = self._ck()
+        ck.set_note("checking API mapping")
+        out = self._run(["notes"], ck.root)
+        self.assertIn("[>] Active Focus:", out)
+        self.assertIn("- [2] implement API mapping", out)
+        self.assertIn("* Note: checking API mapping", out)
+        self.assertNotIn("Unfocused / Paused Context:", out)
+
+    def test_paused_section_lists_all_paused_tasks(self):
+        ck = self._ck("# P\n- [>] a\n- [ ] b\n- [ ] c\n- [ ] d\n")
+        ck.set_note("a note")
+        ck.start(2)  # a paused w/ note
+        ck.start(3)  # b paused noteless
+        out = self._run(["notes"], ck.root)
+        self.assertIn("[>] Active Focus:", out)
+        self.assertIn("- [3] c", out)
+        self.assertIn("[!] Unfocused / Paused Context:", out)
+        self.assertIn("- [1] a", out)
+        self.assertIn("* Note: a note", out)
+        self.assertIn("- [2] b", out)
+        self.assertIn("(no note)", out)
+
+    def test_note_survives_intermediate_switches_in_notes_view(self):
+        ck = self._ck("# P\n- [>] a\n- [ ] b\n- [ ] c\n- [ ] d\n")
+        ck.set_note("a note")
+        ck.start(2)
+        ck.start(3)
+        ck.start(4)
+        out = self._run(["notes"], ck.root)
+        self.assertIn("* Note: a note", out)
+        self.assertIn("- [1] a", out)
+
+    def test_help_documents_notes(self):
+        from cklib.cli import HELP_TEXT
+        self.assertIn("notes", HELP_TEXT)
+        self.assertIn("No active process notes found", HELP_TEXT)
+
+    def test_notes_via_argparse_path(self):
+        ck = self._ck()
+        ck.set_note("via argparse")
+        out = self._run(["notes"], ck.root)
+        self.assertIn("[>] Active Focus:", out)
+        self.assertIn("* Note: via argparse", out)
 
 
 # ---------------------------------------------------------------------------
