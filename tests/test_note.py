@@ -435,6 +435,212 @@ class TestUnfocusedPausedContext(_NoteHarness):
 
 
 # ---------------------------------------------------------------------------
+# Interactive note prompt on focus switch (TTY / non-TTY / flags)
+# ---------------------------------------------------------------------------
+
+
+class TestInteractiveNotePrompt(_NoteHarness):
+    """``ck start <NEW_ID>`` offers to capture context before demoting
+    a noteless focused task — but only on an interactive TTY."""
+
+    def _run(self, argv, cwd: Path, *, stdin_tty=True, stdout_tty=True,
+             inputs=None):
+        buf = io.StringIO()
+        prompts: list[str] = []
+        scripted = list(inputs or [])
+
+        def fake_input(prompt=""):
+            prompts.append(prompt)
+            if scripted:
+                item = scripted.pop(0)
+                if isinstance(item, Exception):
+                    raise item
+                return item
+            raise EOFError("stdin closed")
+
+        orig_cwd = Path.cwd()
+        os.chdir(cwd)
+        try:
+            with _clean_env(), redirect_stdout(buf):
+                with mock.patch("sys.stdin.isatty", return_value=stdin_tty), \
+                        mock.patch("sys.stdout.isatty",
+                                   return_value=stdout_tty), \
+                        mock.patch("builtins.input", side_effect=fake_input):
+                    code = main(argv)
+            self.assertEqual(code, 0, f"exit {code} for {argv!r}")
+        finally:
+            os.chdir(orig_cwd)
+        return buf.getvalue(), prompts
+
+    def test_tty_yes_saves_note_then_switches(self):
+        ck = self._ck()
+        out, prompts = self._run(
+            ["start", "3"], ck.root,
+            inputs=["y", "paused mid-refactor"])
+        self.assertIn(
+            "Task #2 lost focus. Add a process note? [y/N]: ", prompts)
+        self.assertIn("Note text: ", prompts)
+        self.assertIn("* Note saved for [2]: paused mid-refactor", out)
+        self.assertIn("-> Focused [3]: write docs", out)
+        self.assertNotIn("lost focus without a note", out)
+        # The note moved into the paused registry with the task.
+        paused = ck._paused_tasks()
+        self.assertEqual(paused[0]["id"], 2)
+        self.assertEqual(paused[0]["note"], "paused mid-refactor")
+
+    def test_tty_no_falls_back_to_soft_hint(self):
+        ck = self._ck()
+        out, prompts = self._run(["start", "3"], ck.root, inputs=["n"])
+        self.assertIn(
+            "Task #2 lost focus. Add a process note? [y/N]: ", prompts)
+        self.assertIn("-> Focused [3]: write docs", out)
+        self.assertIn(
+            "[!] Task #2 lost focus without a note. "
+            "Attach one via `ck note <text>`.", out)
+        self.assertEqual(prompts, [prompts[0]])  # no Note text prompt
+        # Still recorded in the ledger (noteless pause).
+        self.assertEqual(ck._paused_tasks()[0]["id"], 2)
+
+    def test_bare_enter_declines(self):
+        ck = self._ck()
+        out, _ = self._run(["start", "3"], ck.root, inputs=[""])
+        self.assertIn("-> Focused [3]: write docs", out)
+        self.assertIn("lost focus without a note", out)
+
+    def test_eof_declines_without_crash(self):
+        ck = self._ck()
+        out, _ = self._run(["start", "3"], ck.root)
+        self.assertIn("-> Focused [3]: write docs", out)
+        self.assertIn("lost focus without a note", out)
+
+    def test_non_tty_never_prompts(self):
+        ck = self._ck()
+        for stdin_tty, stdout_tty in ((False, True), (True, False),
+                                      (False, False)):
+            # Reset focus so each round starts from the same state.
+            self._run(["start", "2"], ck.root,
+                      stdin_tty=stdin_tty, stdout_tty=stdout_tty)
+            out, prompts = self._run(["start", "3"], ck.root,
+                                     stdin_tty=stdin_tty,
+                                     stdout_tty=stdout_tty)
+            self.assertEqual(prompts, [])
+            self.assertIn("lost focus without a note", out)
+
+    def test_no_input_flag_skips_prompt_even_on_tty(self):
+        ck = self._ck()
+        out, prompts = self._run(["start", "--no-input", "3"], ck.root)
+        self.assertEqual(prompts, [])
+        self.assertIn("-> Focused [3]: write docs", out)
+
+    def test_y_flag_asks_text_only(self):
+        ck = self._ck()
+        out, prompts = self._run(["start", "-y", "3"], ck.root,
+                                 inputs=["from -y flag"])
+        self.assertNotIn("Add a process note?", "\n".join(prompts))
+        self.assertIn("Note text: ", prompts)
+        self.assertIn("* Note saved for [2]: from -y flag", out)
+
+    def test_prompt_not_shown_when_task_has_note(self):
+        ck = self._ck()
+        ck.set_note("already noted")
+        out, prompts = self._run(["start", "3"], ck.root, inputs=["y", "x"])
+        self.assertEqual(prompts, [])
+        self.assertIn("-> Focused [3]: write docs", out)
+
+    def test_prompt_not_shown_on_reset_without_prior_focus(self):
+        ck = self._ck("# P\n- [ ] alpha\n- [ ] beta\n")
+        out, prompts = self._run(["start", "0"], ck.root)
+        self.assertEqual(prompts, [])
+
+    def test_blank_note_text_aborts_capture(self):
+        ck = self._ck()
+        out, prompts = self._run(["start", "3"], ck.root,
+                                 inputs=["y", "  "])
+        self.assertIn("-> Focused [3]: write docs", out)
+        self.assertNotIn("* Note saved", out)
+
+
+# ---------------------------------------------------------------------------
+# Paused ledger: registry semantics and multi-task rendering
+# ---------------------------------------------------------------------------
+
+
+class TestPausedLedger(_NoteHarness):
+
+    def test_multiple_pauses_all_render_in_paused_block(self):
+        ck = self._ck("# P\n- [>] a\n- [ ] b\n- [ ] c\n- [ ] d\n")
+        ck.set_note("a note")
+        ck.start(2)  # a paused w/ note
+        ck.start(3)  # b paused noteless
+        ck.start(4)  # c paused noteless
+        out = ck.status()
+        self.assertEqual(out.count("Unfocused / Paused Context:"), 1)
+        self.assertIn("- [1] a", out)
+        self.assertIn("* Note: a note", out)
+        self.assertIn("- [2] b", out)
+        self.assertIn("- [3] c", out)
+        # Paused tasks excluded from the generic skipped list.
+        self.assertNotIn("[!] Skipped (2 tasks):", out)
+        for tid in (1, 2, 3):
+            self.assertNotIn(f"       - [{tid}] ",
+                             out.split("[!] Skipped")[1].split(
+                                 "Unfocused")[0])
+
+    def test_paused_note_survives_intermediate_switches(self):
+        ck = self._ck("# P\n- [>] a\n- [ ] b\n- [ ] c\n- [ ] d\n")
+        ck.set_note("a note")
+        ck.start(2)
+        ck.start(3)
+        ck.start(4)
+        ck.start(5 if False else 4)  # switch among non-noted tasks
+        st = ck.status()
+        self.assertIn("* Note: a note", st)
+        self.assertIn("- [1] a", st)
+
+    def test_refocus_restores_note_and_removes_ledger_entry(self):
+        ck = self._ck("# P\n- [>] a\n- [ ] b\n- [ ] c\n")
+        ck.set_note("a note")
+        ck.start(2)
+        ck.start(3)
+        ck.start(1)
+        self.assertEqual(ck.get_note()["note"], "a note")
+        # Tasks 2 and 3 were both paused along the way; only task 1's
+        # entry was consumed by the restore.
+        self.assertEqual(
+            [e["id"] for e in ck._paused_tasks()], [3, 2])
+        st = ck.status()
+        # The restored note renders inline under Focus.
+        self.assertIn("* Note: a note", st)
+
+    def test_done_purges_completed_tasks_from_ledger(self):
+        ck = self._ck("# P\n- [>] a\n- [ ] b\n- [ ] c\n")
+        ck.set_note("a note")
+        ck.start(2)
+        ck.start(3)
+        ck.done("1")  # complete the paused, noted task
+        self.assertEqual(
+            [e["id"] for e in ck._paused_tasks()], [2])
+        self.assertIn("a note", ck.history_file.read_text())
+
+    def test_peek_reports_focus_loss(self):
+        # No focus set -> nothing would be demoted.
+        ck = self._ck("# P\n- [ ] alpha\n- [ ] beta\n")
+        self.assertIsNone(ck.pending_focus_loss())
+        ck.start(1)
+        ck.set_note("wip")
+        info = ck.pending_focus_loss()
+        self.assertEqual(info["id"], 1)
+        self.assertTrue(info["has_note"])
+        ck.start(2)
+        self.assertFalse(ck.pending_focus_loss()["has_note"])
+
+    def test_corrupt_state_degrades_to_empty_ledger(self):
+        ck = self._ck()
+        ck.state_file.write_text("{not json", encoding="utf-8")
+        self.assertEqual(ck._paused_tasks(), [])
+
+
+# ---------------------------------------------------------------------------
 # CLI dispatch: ck note / ck st / ck done lifecycle
 # ---------------------------------------------------------------------------
 
