@@ -140,6 +140,7 @@ ck -v    # → ck version 0.4.2
 | ck-dev \<command\> | Run any command in isolated sandbox mode (writes → `.sandbox/`) |
 | ck-dev (bare) | Enter sandbox mode: warning banner (dynamically sized, with the resolved active binary), Global Dashboard, then an interactive session subshell |
 | ck dev setup | Build an isolated mock environment in `.sandbox/` (bulk test data) |
+| ck dev emulate | Interactive history-rotation stress emulator (sandbox only): 3 generate → rotate cycles in `.sandbox/projects/sandbox_stress` with tiny limits, then prints how to inspect via `ck log --all` |
 | ck dev clean / ck sandbox clean | Remove the `.sandbox/` directory |
 | ck-dev sandbox setup | Build an isolated mock environment in `.sandbox/` (bulk test data) |
 | ck-dev sandbox clean | Purge the `.sandbox/` dev environment |
@@ -447,6 +448,34 @@ CK_SANDBOX=1 ./ck-dev prune     # → purges orphaned-deleted (sandbox only)
 ./ck-dev sandbox clean          # → reset the workspace
 ```
 
+### History Rotation Stress Emulator (`ck dev emulate`)
+
+`ck dev emulate` is a developer-only, interactive demonstration of the history
+machinery end to end. It is strictly sandbox-guarded: without an active dev
+session or an existing `.sandbox/` directory it aborts with
+`[i] Not in sandbox mode — emulator aborted.` and creates nothing.
+
+The emulator works inside a dedicated `.sandbox/projects/sandbox_stress/`
+project (isolated from the `alpha`/`beta` fixtures), writes a LOCAL `.ck.json`
+config override (`HISTORY_LIMIT=5`, `MAX_BAK_FILES=2`, `COMPRESS_ARCHIVES=true`)
+and runs **3 cycles**, each pausing ~1.7s between steps:
+
+1. Generate a batch of tasks + history entries (`[info] Generating task batch
+   for cycle N...`);
+2. Log the threshold hit (`[info] HISTORY.md threshold reached`) and the
+   pre-archive state;
+3. Rotate into a compressed archive (`[+] Rotated HISTORY.md →
+   HISTORY_<timestamp>.md.gz`), enforce FIFO purge at `MAX_BAK_FILES`
+   (`[fifo] purged …`), pause, repeat;
+4. Finish with a summary panel: retained archives (gz vs raw sizes), the
+   `ck log --all` viewing command, and the `ck dev clean` cleanup hint.
+
+```bash
+./ck-dev dev emulate                                   # or: ck dev emulate
+cd .sandbox/projects/sandbox_stress && ck log --all    # full merged history
+./ck-dev dev clean                                     # reset when done
+```
+
 ### Manual Testing Walkthrough (Contributors)
 
 **Safety first — zero host impact.** The moment a sandbox session starts, every global registry interaction — `register` / `unregister` / `prune` mutations and dashboard reads alike — is re-routed from your host machine's `~/.config/ck/projects.json` to `.sandbox/config/projects.json`, and every project write (`PLAN.md`, `state.json`, `HISTORY.md`, lock files, rotation archives) lands under `.sandbox/projects/`. The host registry is never opened for writing, never created, and never quarantined — the test suite verifies it stays byte-identical (content and mtime) across full dev sessions. `sandbox setup` writes only inside `.sandbox/` by construction, and `sandbox clean` removes only `.sandbox/` itself.
@@ -554,7 +583,7 @@ Context Keeper (ck) служит мостом между вашим разумо
 - Поддержка AI
 - Глобальный реестр проектов и панель мониторинга
 - Fail-closed блокировка файлов, атомарная запись
-- Дев-режим с песочницей: `ck-dev` выполняет команды в режиме «только чтение» реальных данных, все записи уходят в git-ignored `.sandbox/` (`ck-clean` очищает её); `ck-dev sandbox setup` строит одноразовое окружение-макет с объёмными тестовыми данными
+- Дев-режим с песочницей: `ck-dev` выполняет команды в режиме «только чтение» реальных данных, все записи уходят в git-ignored `.sandbox/` (`ck-clean` очищает её); `ck-dev sandbox setup` строит одноразовое окружение-макет с объёмными тестовыми данными, `ck dev emulate` — интерактивный стресс-эмулятор ротации истории (3 цикла, `.md.gz`-архивы, FIFO-очистка) внутри `.sandbox/projects/sandbox_stress`
 
 ---
 
@@ -729,6 +758,23 @@ export EDITOR="nano"  # используется, если VISUAL не зада�
 CK_SANDBOX=1 ./ck-dev dashboard   # → alpha + [MISSING] orphaned-deleted
 CK_SANDBOX=1 ./ck-dev prune     # → удаляет orphaned-deleted (только в песочнице)
 ./ck-dev sandbox clean          # → сброс рабочего окружения
+```
+
+### Стресс-эмулятор ротации истории (`ck dev emulate`)
+
+`ck dev emulate` — dev-only интерактивная демонстрация механизма истории end-to-end. Команда строго защищена песочницей: без активной dev-сессии или существующего каталога `.sandbox/` она прерывается сообщением `[i] Not in sandbox mode — emulator aborted.` и ничего не создаёт.
+
+Эмулятор работает в отдельном проекте `.sandbox/projects/sandbox_stress/` (изолирован от фикстур `alpha`/`beta`), пишет ЛОКАЛЬНЫЙ переопределяющий конфиг `.ck.json` (`HISTORY_LIMIT=5`, `MAX_BAK_FILES=2`, `COMPRESS_ARCHIVES=true`) и выполняет **3 цикла** с паузами ~1.7s между шагами:
+
+1. Генерация порции задач и записей истории (`[info] Generating task batch for cycle N...`);
+2. Логирование превышения лимита (`[info] HISTORY.md threshold reached`) и состояния перед архивацией;
+3. Ротация в сжатый архив (`[+] Rotated HISTORY.md → HISTORY_<timestamp>.md.gz`), FIFO-очистка по `MAX_BAK_FILES` (`[fifo] purged …`), пауза, повтор;
+4. Итоговая панель: удерживаемые архивы (размеры gz/raw), команда просмотра `ck log --all` и подсказка очистки `ck dev clean`.
+
+```bash
+./ck-dev dev emulate                                   # или: ck dev emulate
+cd .sandbox/projects/sandbox_stress && ck log --all    # полная объединённая история
+./ck-dev dev clean                                     # сброс после проверки
 ```
 
 ### Ручное тестирование (для контрибьюторов)
