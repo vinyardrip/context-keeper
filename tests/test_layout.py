@@ -540,6 +540,70 @@ class TestWorkContext(_IsolatedHome, unittest.TestCase):
 
     # ---- element 3: [>] Focus / Next ------------------------------- #
 
+    def test_note_renders_under_focus_task(self):
+        """A note on the FOCUSED task is shown inline under ``[>]
+        Focus:`` (plus duplicated at the top ``CURRENT FOCUS``)."""
+        with tempfile.TemporaryDirectory() as td:
+            ck = self._ck(Path(td), "# P\n- [x] done\n- [>] alpha\n- [ ] beta\n")
+            ck.set_note("checking API mapping")
+            tl = parse_plan(ck.plan_file.read_text(encoding="utf-8"))
+            out = _render_local_status(ck, tl, palette=ckui.Palette(False))
+        self.assertIn("[>] Focus:", out)
+        self.assertIn("- [2] alpha", out)
+        self.assertIn("* Note: checking API mapping", out)
+        # The note sits BELOW the focus item line (slice from the
+        # WORK CONTEXT header so the top CURRENT FOCUS copy of the
+        # task title cannot skew the ordering check).
+        work = out[out.index("-> WORK CONTEXT:"):]
+        self.assertGreater(work.index("* Note: checking API mapping"),
+                           work.index("- [2] alpha"))
+
+    def test_note_renders_under_next_candidate(self):
+        """A note on the auto-resolved ``[>] Next`` candidate is NOT
+        hidden by the focus state — it renders under the task line."""
+        with tempfile.TemporaryDirectory() as td:
+            ck = self._ck(Path(td), "# P\n- [ ] alpha\n- [ ] beta\n")
+            ck.set_note("backing later")
+            tl = parse_plan(ck.plan_file.read_text(encoding="utf-8"))
+            out = _render_local_status(ck, tl, palette=ckui.Palette(False))
+        self.assertIn("[>] Next:", out)
+        self.assertIn("- [1] alpha [ ]", out)
+        self.assertIn("* Note: backing later", out)
+        self.assertGreater(out.index("* Note: backing later"),
+                           out.index("- [1] alpha [ ]"))
+
+    def test_note_survives_focus_switch_and_renders_under_paused(self):
+        """Focusing another task never swallows the note: it travels
+        into ``Unfocused / Paused Context`` with its task."""
+        with tempfile.TemporaryDirectory() as td:
+            ck = self._ck(
+                Path(td), "# P\n- [x] done\n- [ ] alpha\n- [ ] beta\n")
+            ck.set_note("backing later")   # binds to the active task
+            ck.start(3)                    # focus moves to beta
+            tl = parse_plan(ck.plan_file.read_text(encoding="utf-8"))
+            out = _render_local_status(ck, tl, palette=ckui.Palette(False))
+        self.assertIn("Unfocused / Paused Context:", out)
+        self.assertIn("- [2] alpha", out)
+        self.assertIn("* Note: backing later", out)
+        # The Next block must NOT be silenced by the switch: the note
+        # is still visible (under the paused block).
+        self.assertIn("[>] Focus:", out)
+        self.assertIn("- [3] beta", out)
+
+    def test_note_binds_to_focused_task_over_next_candidate(self):
+        """``ck start <NEW_ID>`` AFTER ``ck note`` re-binds the note to
+        the newly focused task — the active slot is the single source
+        of truth and the note stays visible under Focus."""
+        with tempfile.TemporaryDirectory() as td:
+            ck = self._ck(
+                Path(td), "# P\n- [x] done\n- [ ] alpha\n- [ ] beta\n")
+            ck.set_note("backing later")   # active task = alpha (2)
+            ck.start(3)                    # re-binds the note to beta
+            tl = parse_plan(ck.plan_file.read_text(encoding="utf-8"))
+            out = _render_local_status(ck, tl, palette=ckui.Palette(False))
+        self.assertIn("* Note: backing later", out)
+        self.assertIn("- [3] beta", out)
+
     def test_focus_renders_focus_label(self):
         out = self._status("# P\n- [>] focused task\n")
         self.assertIn("[>] Focus:", out)
