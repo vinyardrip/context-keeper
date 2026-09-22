@@ -460,6 +460,135 @@ class TestCliDispatch(_IsolatedHome, unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# `ck done` implicit focus target (bare `ck done`)
+# ---------------------------------------------------------------------------
+
+
+class TestDoneImplicitFocus(_IsolatedHome, unittest.TestCase):
+    """Bare ``ck done`` (no arguments) completes the CURRENT FOCUS.
+
+    Without a focus (and without arguments) the standard usage error
+    is printed and the exit code is non-zero.
+    """
+
+    def _make_project(self, tmp: Path, name: str = "project") -> ContextKeeper:
+        root = tmp / name
+        root.mkdir()
+        ck = ContextKeeper(root=root)
+        ck.init(register=True)
+        return ck
+
+    def _run(self, argv, cwd: Path) -> tuple[int, str]:
+        """Run main() returning (exit_code, stdout) — codes asserted
+        by the caller (the usage-error path exits non-zero)."""
+        buf = io.StringIO()
+        orig_cwd = Path.cwd()
+        os.chdir(cwd)
+        try:
+            with redirect_stdout(buf):
+                code = main(argv)
+        finally:
+            os.chdir(orig_cwd)
+        return code, buf.getvalue()
+
+    def test_bare_done_completes_current_focus(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            ck = self._make_project(tmp)
+            self._run(["add", "alpha task"], ck.root)
+            self._run(["add", "beta task"], ck.root)
+            self._run(["start", "1"], ck.root)
+
+            code, out = self._run(["done"], ck.root)
+            self.assertEqual(code, 0)
+            self.assertIn("[ok] Marked done: 1", out)
+
+            text = ck.plan_file.read_text(encoding="utf-8")
+            self.assertIn("- [x] Describe the first task", text)
+            self.assertIn("- [ ] alpha task", text)
+            self.assertIn("- [ ] beta task", text)
+
+    def test_bare_done_via_legacy_dispatch(self):
+        """Both parsers (argparse + legacy positional) share the
+        implicit-focus behavior."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            ck = self._make_project(tmp)
+            self._run(["add", "alpha task"], ck.root)
+            self._run(["start", "2"], ck.root)  # alpha (init seed = 1)
+
+            code, out = self._run(["done"], ck.root)
+            self.assertEqual(code, 0)
+            self.assertIn("[ok] Marked done: 2", out)
+            text = ck.plan_file.read_text(encoding="utf-8")
+            self.assertIn("- [x] alpha task", text)
+            self.assertIn("- [ ] Describe the first task", text)
+
+    def test_bare_done_without_focus_prints_usage_and_fails(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            ck = self._make_project(tmp)
+            self._run(["add", "alpha task"], ck.root)
+
+            code, out = self._run(["done"], ck.root)
+            self.assertEqual(code, 2)
+            self.assertIn("Usage: ck done <ID|range|list>", out)
+            # Nothing was mutated.
+            self.assertIn("- [ ] alpha task",
+                          ck.plan_file.read_text(encoding="utf-8"))
+
+    def test_bare_done_all_done_plan_prints_usage_and_fails(self):
+        """No open tasks at all -> no focus -> usage error, no crash."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            ck = self._make_project(tmp)
+
+            code, out = self._run(["done"], ck.root)
+            self.assertEqual(code, 2)
+            self.assertIn("Usage: ck done <ID|range|list>", out)
+
+    def test_explicit_id_still_works(self):
+        """The classic ``ck done <ID>`` form is unchanged."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            ck = self._make_project(tmp)
+            self._run(["add", "alpha task"], ck.root)
+            self._run(["add", "beta task"], ck.root)
+
+            code, out = self._run(["done", "3"], ck.root)
+            self.assertEqual(code, 0)
+            self.assertIn("[ok] Marked done: 3", out)
+            self.assertIn("- [x] beta task",
+                          ck.plan_file.read_text(encoding="utf-8"))
+
+    def test_bare_done_ignores_next_candidate_without_focus(self):
+        """Without an explicit focus the auto-resolved ``[>] Next``
+        candidate is NOT completed — usage error instead."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            ck = self._make_project(tmp)
+            self._run(["add", "alpha task"], ck.root)
+
+            code, out = self._run(["done"], ck.root)
+            self.assertEqual(code, 2)
+            self.assertNotIn("[ok] Marked done", out)
+            self.assertIn("- [ ] alpha task",
+                          ck.plan_file.read_text(encoding="utf-8"))
+
+    def test_current_focus_id_helper(self):
+        """The core read-only helper resolves the focus (or None)."""
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            ck = self._make_project(tmp)
+            self._run(["add", "alpha task"], ck.root)
+            self.assertIsNone(ck.current_focus_id())
+            self._run(["start", "1"], ck.root)
+            self.assertEqual(ck.current_focus_id(), 1)
+            self._run(["start", "0"], ck.root)
+            self.assertIsNone(ck.current_focus_id())
+
+
+# ---------------------------------------------------------------------------
 # Help text
 # ---------------------------------------------------------------------------
 

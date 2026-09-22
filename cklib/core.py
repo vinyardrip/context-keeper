@@ -1337,6 +1337,23 @@ class ContextKeeper:
         focus = tl.focused[0] if tl.focused else None
         return focus is not None and focus.id == task_id
 
+    def current_focus_id(self) -> Optional[int]:
+        """Return the explicitly focused task's ID, or None.
+
+        Read-only lookup used by ``ck done`` (no arguments): the
+        implicit completion target is the CURRENT FOCUS — never the
+        auto-resolved ``[>] Next`` candidate. A missing/corrupt plan
+        degrades to None (the CLI then prints the usage error).
+        """
+        if self.plan_file is None or not self.plan_file.exists():
+            return None
+        try:
+            tl = self._load_plan()
+        except (OSError, ValueError):
+            return None
+        focus = tl.focused[0] if tl.focused else None
+        return focus.id if focus is not None else None
+
     def _note_for_task(self, task_id: int) -> str:
         """Return the stored process-note text when it belongs to
         ``task_id`` (structurally valid entry only), else ""."""
