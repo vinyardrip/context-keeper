@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.5.0-blue)]()
+[![version](https://img.shields.io/badge/version-0.5.1-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -84,7 +84,7 @@ chmod +x ck
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.5.0
+ck -v    # → ck version 0.5.1
 ```
 
 ---
@@ -118,7 +118,7 @@ ck -v    # → ck version 0.5.0
 | ck save | Task completion workflow: optional note + optional **local** commit |
 | ck log | Open HISTORY.md in your editor (see [Editor Resolution](#editor-resolution)) |
 | ck log --all | View the full history: every rotation archive (`.md.gz` decompressed / legacy `.md.bak`, oldest first) concatenated with the current HISTORY.md |
-| ck st | Status overview (tri-state: Previous / Focus / Next); an explicit focus is duplicated at the top as `-> CURRENT FOCUS: [#<id>] <title>` (with its note) |
+| ck st | Status overview (tri-state: Previous / Focus / Next); an explicit focus is duplicated at the top as `-> CURRENT FOCUS: [#<id>] <title>` (with its note). WORK CONTEXT shows `<< Done`, a conditional `[!] Skipped` (only on a real execution gap), `[>] Focus` / `Next`, `>> Upcoming`, and a `>> Backlog: +N tasks remaining` count |
 | ck notes | List all active process notes: `[>] Active Focus:` plus `[!] Unfocused / Paused Context:` with each paused task's bound note (`[i] No active process notes found.` when none) |
 | ck st -l / --list | Print the task list to STDOUT (same as `ck list`) |
 | ck st -e / --edit | Open PLAN.md in your editor (same as `ck edit`) |
@@ -212,10 +212,10 @@ carries a note:
   -> WORK CONTEXT:
      << Done:
         - [1] setup repo [x]
-     [!] Skipped: (none)
      [>] Focus:
         - [3] write docs
      >> Upcoming: (none)
+     >> Backlog: (none)
      Unfocused / Paused Context:
         - [2] implement API mapping
           * Note: paused mid-refactor — mapping layer half done
@@ -266,6 +266,32 @@ until it is re-focused or completed; paused tasks are excluded from the generic
 `[!] Skipped` list so they are never buried there. A paused task's note stays
 bound to it across further focus switches and is restored as the active note
 when the task is re-focused.
+
+### Status layout (`ck st`)
+
+`ck st` renders a strict, PURE-ASCII WORK CONTEXT block. Sections appear in
+this order:
+
+1. **`<< Done`** — the completed tasks closest to the progress point (last 2
+   shown, with a `(N tasks)` count and `... (+N more done)` overflow when more).
+2. **`[!] Skipped`** — shown **only** when an explicit focus sits after the
+   last completed task and open tasks were passed over *between* that
+   completion and the focus (a literal gap in execution order). Sequential
+   upcoming tasks are **never** labelled Skipped, and the section is omitted
+   entirely when there is no real execution gap.
+3. **`[>] Focus`** (explicit focus via `ck start`) or **`[>] Next`** (the
+   auto-resolved first pending task — display only, `PLAN.md` is never
+   mutated).
+4. **`>> Upcoming`** — exactly one next pending task after Focus/Next.
+5. **`>> Backlog`** — a single count line (`+N tasks remaining`) for the
+   remaining unstarted tasks, i.e. the opens not already shown as
+   Focus/Next, Upcoming, or Skipped. No task is ever listed twice.
+6. **`Unfocused / Paused Context`** — still-open tasks that lost focus while
+   carrying a process note (rendered last, with the note attached).
+
+When no task is focused but pending work remains, `ck st` prints a read-only
+hint banner — `[!] No active focus set. Run 'ck start <ID>'` — and points at
+`[>] Next`. It never auto-focuses or writes to `PLAN.md`.
 
 ### Viewing notes: `ck notes`
 
@@ -431,7 +457,7 @@ Production state stays immutable while `IS_DEV` is active: the real `~/.config/c
 ├── config/
 │   └── projects.json          # registry mock: alpha + orphaned-deleted
 └── projects/
-    ├── alpha/                 # registered & active: 6 tasks (gap at 5),
+    ├── alpha/                 # registered & active: 6 tasks (title numbering skips 5),
     │   └── .ck/               # 120 history.log entries, 5+2 archives,
     │                          # HISTORY.md exactly at the rotation limit
     ├── beta/                  # initialized, NOT registered (ck register)
@@ -496,7 +522,7 @@ CK_SANDBOX=1 ./ck-dev dashboard
 # 3. Work inside a fixture project — commands edit fixtures IN PLACE
 #    (they already live in .sandbox/, so no further redirection happens)
 cd .sandbox/projects/alpha
-CK_SANDBOX=1 ../../ck-dev st        # progress + triad, gap shown as "gaps: 4-6"
+CK_SANDBOX=1 ../../ck-dev st        # progress + WORK CONTEXT triad
 CK_SANDBOX=1 ../../ck-dev done 4    # complete a pending task
 CK_SANDBOX=1 ../../ck-dev start 6   # move the focus marker
 CK_SANDBOX=1 ../../ck-dev add "fresh idea from manual testing"
@@ -520,7 +546,7 @@ What each fixture is for:
 
 | Fixture | State | Manual-test targets |
 | --- | --- | --- |
-| `alpha` | registered, active | dashboards, focus triad, gap detection (`5` is missing), bulk `history.log` (120 entries), archive inspection, rotation limit boundary |
+| `alpha` | registered, active | dashboards, focus triad, title-numbering gap (`5` is missing), bulk `history.log` (120 entries), archive inspection, rotation limit boundary |
 | `beta` | initialized, **not** registered | `ck register` without `--register`, standalone registration |
 | `gamma` | plain directory, no `.ck/` | CLI behavior in non-ck environments |
 | `orphaned-deleted` | registry-only, no folder | `[MISSING]` tags, `ck prune` |
@@ -823,7 +849,7 @@ CK_SANDBOX=1 ./ck-dev dashboard
 # 3. Работа внутри фикстурного проекта — команды правят фикстуры НА МЕСТЕ
 #    (они уже внутри .sandbox/, дальнейшего перенаправления не происходит)
 cd .sandbox/projects/alpha
-CK_SANDBOX=1 ../../ck-dev st        # прогресс + триада, пропуск виден как "gaps: 4-6"
+CK_SANDBOX=1 ../../ck-dev st        # прогресс + триада WORK CONTEXT
 CK_SANDBOX=1 ../../ck-dev done 4    # закрыть ожидающую задачу
 CK_SANDBOX=1 ../../ck-dev start 6   # переместить маркер фокуса
 CK_SANDBOX=1 ../../ck-dev add "свежая идея из ручного теста"

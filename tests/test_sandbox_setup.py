@@ -198,8 +198,8 @@ class TestSetupFixtures(_SandboxFixtureBase):
         # Focus is task 3 (matches the registry active_task_id).
         self.assertEqual(tl.focused[0].id, 3)
         self.assertEqual(tl.focused[0].title, "Active focus task")
-        # Gap detection fires: open tasks follow the done block.
-        self.assertTrue(tl.gap_ids())
+        # IDs are sequential 1..6 → no literal gap (status ignored).
+        self.assertEqual(tl.gap_ids(), [])
 
     def test_history_log_bulk_entries(self):
         setup_sandbox(printer=lambda *_: None)

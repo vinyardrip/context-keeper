@@ -5,8 +5,10 @@
    the WORK CONTEXT block lists skipped tasks by NAME.
 2. Dashboard table — priority columns (Project | Focus Task |
    Progress | Last Active) with content-capped widths.
-3. WORK CONTEXT — strict 4-element structure (Done / Skipped /
-   Focus|Next / Upcoming).
+3. WORK CONTEXT — ordered structure (Done / conditional Skipped /
+   Focus|Next / Upcoming / Backlog count) where ``Skipped`` only
+   appears on a real execution gap and sequential pending tasks are
+   counted as backlog.
 """
 
 from __future__ import annotations
@@ -102,7 +104,8 @@ class TestGapDisplay(_IsolatedHome, unittest.TestCase):
         ck.plan_file.write_text(plan, encoding="utf-8")
         return ck
 
-    def test_status_shows_collapsed_gap_range(self):
+    def test_status_no_gaps_for_sequential_pending(self):
+        """Sequential IDs 1..9 (pending after done) are NOT gaps."""
         plan = (
             "# P\n## Current Sprint\n"
             + "\n".join(f"- [ ] task {i}" for i in range(1, 3))
@@ -115,13 +118,20 @@ class TestGapDisplay(_IsolatedHome, unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             ck = self._ck(Path(td), plan)
             tl = parse_plan(ck.plan_file.read_text(encoding="utf-8"))
-            gaps = tl.gap_ids()
-            self.assertEqual(gaps, [4, 5, 6, 7, 8, 9])
+            self.assertEqual(tl.gap_ids(), [])
             out = _render_local_status(ck, tl, palette=ckui.Palette(False))
-            # Gaps fold compactly into the progress line.
-            self.assertIn("(gaps: 4-9)", out)
+            self.assertNotIn("(gaps:", out)
             self.assertNotIn("GAPS detected", out)
-            self.assertNotIn("4, 5, 6, 7, 8, 9", out)
+
+    def test_status_shows_collapsed_gap_range(self):
+        """A literal missing ID still folds into the progress line."""
+        with tempfile.TemporaryDirectory() as td:
+            ck = self._ck(Path(td), "# P\n- [ ] a\n- [ ] b\n- [ ] c\n")
+            tl = parse_plan(ck.plan_file.read_text(encoding="utf-8"))
+            tl.remove(2)  # IDs become 1, 3
+            self.assertEqual(tl.gap_ids(), [2])
+            out = _render_local_status(ck, tl, palette=ckui.Palette(False))
+            self.assertIn("(gaps: 2)", out)
 
     def test_status_no_gaps_when_clean(self):
         plan = "# P\n## Current Sprint\n- [ ] a\n- [x] b\n"
@@ -317,15 +327,20 @@ class TestTruncateEllipsis(unittest.TestCase):
 
 
 class TestWorkContext(_IsolatedHome, unittest.TestCase):
-    """``ck st`` renders the 4-element WORK CONTEXT block:
+    """``ck st`` renders the ordered WORK CONTEXT block:
 
     1. ``<< Done``      — the completed tasks (last 2 shown, count +
        overflow line when more)
-    2. ``[!] Skipped``  — passed-over/stranded opens, BY NAME, capped
-       at 2 (count header + ``... (+N more skipped)`` when more)
+    2. ``[!] Skipped``  — opens genuinely passed over between the last
+       completion and an *explicit* focus, BY NAME, capped at 2
+       (count header + ``... (+N more skipped)`` when more). Omitted
+       entirely when there is no real execution gap; sequential
+       pending tasks are never labelled Skipped.
     3. ``[>] Focus`` / ``[>] Next`` — explicit focus, or the
        auto-resolved first pending candidate (no mutation)
     4. ``>> Upcoming``  — the next pending task after Focus/Next
+    5. ``>> Backlog``   — a single ``+N tasks remaining`` count for
+       the unstarted tail (never duplicates a named task above)
 
     Every active section is a header line with its task items
     indented on new lines below it (``- [ID] Title [st]`` per line).
@@ -382,9 +397,9 @@ class TestWorkContext(_IsolatedHome, unittest.TestCase):
 
     # ---- element 2: [!] Skipped (named gaps, capped at 2) --------- #
 
-    def test_skipped_lists_gap_tasks_by_name_with_more_suffix(self):
-        """The motivating case: opens stranded after a done task
-        surface BY NAME instead of the abstract (gaps: 4-9) range."""
+    def test_sequential_after_done_is_backlog_not_skipped(self):
+        """The motivating case: opens following a done task are just
+        the unstarted backlog — NEVER labelled Skipped."""
         plan = (
             "# P\n## Current Sprint\n"
             + "\n".join(f"- [ ] task {i}" for i in range(1, 3))
@@ -393,14 +408,13 @@ class TestWorkContext(_IsolatedHome, unittest.TestCase):
             + "\n"
         )
         out = self._status(plan)
-        self.assertIn("[!] Skipped (6 tasks):", out)
-        self.assertIn("- [4] late 4 [ ]", out)
-        self.assertIn("- [5] late 5 [ ]", out)
-        self.assertIn("... (+4 more skipped)", out)
-        # The (+N more) line counts exactly the hidden remainder.
-        self.assertNotIn("late 7", out.split("WORK CONTEXT")[1])
+        self.assertNotIn("[!] Skipped", out)
+        # current=task1(1), upcoming=task2(2) -> 6 opens remain.
+        self.assertIn(">> Backlog: +6 tasks remaining", out)
+        self.assertIn("- [1] task 1 [ ]", out)
+        self.assertIn("- [2] task 2 [ ]", out)
 
-    def test_skipped_capped_at_two(self):
+    def test_backlog_count_excludes_current_and_upcoming(self):
         plan = (
             "# P\n- [x] done\n"
             + "\n".join(f"- [ ] t{i}" for i in range(1, 7))
@@ -408,12 +422,11 @@ class TestWorkContext(_IsolatedHome, unittest.TestCase):
         )
         out = self._status(plan)
         # done=1, t1..t6=2..7: current=t1(2), upcoming=t2(3),
-        # skipped=t3..t6 → 2 shown + 2 more.
-        self.assertIn("[!] Skipped (4 tasks):", out)
-        self.assertIn("- [4] t3 [ ]", out)
-        self.assertIn("- [5] t4 [ ]", out)
-        self.assertIn("... (+2 more skipped)", out)
-        self.assertNotIn("t6", out.split("WORK CONTEXT")[1])
+        # backlog=t3..t6 → +4 tasks remaining, no Skipped block.
+        self.assertNotIn("[!] Skipped", out)
+        self.assertIn(">> Backlog: +4 tasks remaining", out)
+        self.assertIn("- [2] t1 [ ]", out)
+        self.assertIn("- [3] t2 [ ]", out)
 
     def test_skipped_under_limit_has_no_count_header(self):
         out = self._status("# P\n- [ ] a\n- [ ] b\n- [>] c\n")
@@ -429,17 +442,17 @@ class TestWorkContext(_IsolatedHome, unittest.TestCase):
         self.assertIn("- [1] a [ ]", out)
         self.assertIn("- [2] b [ ]", out)
 
-    def test_skipped_excludes_opens_after_focus(self):
-        """Regression: opens AFTER the focus are Pending/Upcoming —
+    def test_skipped_absent_when_opens_follow_the_focus(self):
+        """Regression: opens AFTER the focus are Pending/Upcoming,
         never Skipped, even when a completion sits before them."""
         out = self._status(
             "# P\n- [x] one\n- [>] two\n- [ ] three\n- [ ] four\n")
-        skipped_block = out.split("[!] Skipped")[1].split("[>] Focus")[0]
-        self.assertIn("(none)", skipped_block)
-        self.assertNotIn("[4] four", skipped_block)
+        self.assertNotIn("[!] Skipped", out)
         # The first open after the focus is still the Upcoming slot.
         self.assertIn(">> Upcoming:", out)
         self.assertIn("- [3] three [ ]", out)
+        # The remaining task is backlog, not skipped.
+        self.assertIn(">> Backlog: +1 tasks remaining", out)
 
     def test_skipped_only_before_focus(self):
         """An open before the focus is Skipped; opens after it stay
@@ -454,20 +467,21 @@ class TestWorkContext(_IsolatedHome, unittest.TestCase):
         self.assertIn(">> Upcoming:", out)
         self.assertIn("- [4] d [ ]", out)
 
-    def test_skipped_none_when_clean(self):
+    def test_skipped_section_omitted_when_clean(self):
         out = self._status("# P\n- [ ] a\n- [x] b\n")
-        self.assertIn("[!] Skipped: (none)", out)
+        self.assertNotIn("[!] Skipped", out)
+        self.assertIn(">> Backlog: (none)", out)
 
-    def test_skipped_excludes_current_and_upcoming(self):
-        """When NO focus is set, the first two opens become the
-        Next candidate and Upcoming — never Skipped."""
+    def test_sequential_opens_are_backlog_not_skipped(self):
+        """With NO focus the first two opens become the Next candidate
+        and Upcoming; the rest is backlog — not Skipped."""
         out = self._status("# P\n- [x] d\n- [ ] one\n- [ ] two\n- [ ] three\n")
         self.assertIn("[>] Next:", out)
         self.assertIn("- [2] one [ ]", out)
         self.assertIn(">> Upcoming:", out)
         self.assertIn("- [3] two [ ]", out)
-        self.assertIn("[!] Skipped:", out)
-        self.assertIn("- [4] three [ ]", out)
+        self.assertNotIn("[!] Skipped", out)
+        self.assertIn(">> Backlog: +1 tasks remaining", out)
 
     # ---- element 3: [>] Focus / Next ------------------------------- #
 
@@ -527,7 +541,7 @@ class TestWorkContext(_IsolatedHome, unittest.TestCase):
 
     # ---- structure -------------------------------------------------- #
 
-    def test_strict_four_element_vertical_order(self):
+    def test_strict_vertical_order(self):
         plan = (
             "# P\n## Current Sprint\n"
             "- [x] finished first\n"
@@ -538,24 +552,28 @@ class TestWorkContext(_IsolatedHome, unittest.TestCase):
         out = self._status(plan)
         self.assertIn("-> WORK CONTEXT:", out)
         idx_done = out.index("<< Done:")
-        idx_skipped = out.index("[!] Skipped:")
         idx_focus = out.index("[>] Focus:")
         idx_focus_item = out.index("- [3] focused task")
         idx_upcoming = out.index(">> Upcoming:")
-        for a, b in ((idx_done, idx_skipped), (idx_skipped, idx_focus),
-                     (idx_focus, idx_focus_item),
-                     (idx_focus_item, idx_upcoming)):
+        idx_backlog = out.index(">> Backlog:")
+        for a, b in ((idx_done, idx_focus), (idx_focus, idx_focus_item),
+                     (idx_focus_item, idx_upcoming),
+                     (idx_upcoming, idx_backlog)):
             self.assertLess(a, b)
+        # No execution gap -> the Skipped section is absent.
+        self.assertNotIn("[!] Skipped", out)
         # Done items sit on indented lines under the header.
         self.assertIn("- [1] finished first [x]", out)
         self.assertIn("- [2] finished second [x]", out)
 
-    def test_empty_plan_renders_all_four_hints(self):
+    def test_empty_plan_renders_section_hints(self):
         out = self._status("# P\n")
         self.assertIn("<< Done: (none completed)", out)
-        self.assertIn("[!] Skipped: (none)", out)
         self.assertIn("[>] Next: (no open tasks)", out)
         self.assertIn(">> Upcoming: (none)", out)
+        self.assertIn(">> Backlog: (none)", out)
+        # No Skipped section without an execution gap.
+        self.assertNotIn("[!] Skipped", out)
 
     def test_exact_spec_layout(self):
         """Byte-exact rendering of the vertical-list spec structure
@@ -580,14 +598,64 @@ class TestWorkContext(_IsolatedHome, unittest.TestCase):
             " -> WORK CONTEXT:",
             "    << Done:",
             "       - [1] prev task [x]",
-            "    [!] Skipped: (none)",
             "    [>] Focus:",
             "       - [2] focus task",
             "    >> Upcoming:",
             "       - [3] next task [ ]",
+            "    >> Backlog: (none)",
             bar,
         ])
         self.assertEqual(out, expected)
+
+
+# ---------------------------------------------------------------------------
+# 4. No active focus: hint banner (read-only, never mutates)
+# ---------------------------------------------------------------------------
+
+
+class TestNoFocusHint(_IsolatedHome, unittest.TestCase):
+    """``ck st`` guides the user to ``ck start`` when nothing is focused."""
+
+    def _ck(self, tmp: Path, plan: str) -> ContextKeeper:
+        root = tmp / "project"
+        root.mkdir()
+        ck = ContextKeeper(root=root)
+        ck.ck_path.mkdir(parents=True, exist_ok=True)
+        ck.plan_file.write_text(plan, encoding="utf-8")
+        return ck
+
+    def _status(self, plan: str) -> str:
+        with tempfile.TemporaryDirectory() as td:
+            ck = self._ck(Path(td), plan)
+            tl = parse_plan(ck.plan_file.read_text(encoding="utf-8"))
+            return _render_local_status(ck, tl, palette=ckui.Palette(False))
+
+    def test_hint_banner_when_no_focus(self):
+        out = self._status("# P\n- [ ] alpha\n- [ ] beta\n")
+        self.assertIn("[!] No active focus set.", out)
+        self.assertIn("'ck start <ID>'", out)
+        self.assertIn("'ck start 1'", out)
+
+    def test_hint_uses_first_pending_id(self):
+        out = self._status("# P\n- [x] done\n- [ ] alpha\n- [ ] beta\n")
+        self.assertIn("'ck start 2'", out)
+
+    def test_no_hint_when_focus_set(self):
+        out = self._status("# P\n- [>] focused\n- [ ] alpha\n")
+        self.assertNotIn("No active focus set", out)
+
+    def test_no_hint_when_no_pending_tasks(self):
+        out = self._status("# P\n- [x] done\n")
+        self.assertNotIn("No active focus set", out)
+
+    def test_hint_never_mutates_plan(self):
+        with tempfile.TemporaryDirectory() as td:
+            ck = self._ck(Path(td), "# P\n- [ ] alpha\n- [ ] beta\n")
+            before = ck.plan_file.read_bytes()
+            out = ck.status()
+            self.assertEqual(ck.plan_file.read_bytes(), before)
+            self.assertIn("No active focus set", out)
+            self.assertNotIn("- [>]", ck.plan_file.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

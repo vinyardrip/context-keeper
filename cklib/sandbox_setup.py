@@ -86,9 +86,10 @@ LEGACY_ARCHIVE_COUNT = 2
 ARCHIVE_SUBDIR = "archive"
 HISTORY_LOG_FILENAME = "history.log"
 
-# Alpha task numbering: the deliberate GAP at 5 exercises gap
-# detection (both the positional done→open detector and any routine
-# correlating task IDs with title numbering).
+# Alpha task numbering: the deliberate TITLE gap at 5 exercises any
+# routine correlating task IDs with title numbering. Parsed AST IDs
+# are still sequential (1..6): gap detection only reports literal
+# missing integer IDs, never status-based "opens after done".
 ALPHA_TASK_REFS = (1, 2, 3, 4, 6, 7)
 ALPHA_TITLES = {
     1: "Completed task 1",

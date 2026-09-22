@@ -199,21 +199,24 @@ class TestStatusRenderingColors(unittest.TestCase):
         self.assertIn("       - [3] next task [ ]", out)
         self.assertNotIn(
             f"\033[90m       - [3] next task [ ]{ui.RESET}", out)
-        # Skipped (empty here) hint is native too.
-        self.assertIn("    [!] Skipped: (none)", out)
+        # No execution gap here -> the Skipped section is omitted;
+        # the backlog count line is native too.
+        self.assertNotIn("[!] Skipped", out)
+        self.assertIn("    >> Backlog: (none)", out)
         # Section header is bold.
         self.assertIn(f"{ui.BOLD} -> WORK CONTEXT:{ui.RESET}", out)
 
     def test_colored_skipped_line_is_yellow(self):
-        plan = "# P\n- [x] done\n- [ ] a\n- [ ] b\n- [ ] c\n- [ ] d\n"
+        # Opens passed over before an explicit focus are a real gap.
+        plan = "# P\n- [ ] a\n- [ ] b\n- [>] c\n- [ ] d\n"
         out = self._render(ui.Palette(True), plan=plan)
         # Skipped tasks render by name, capped, in standard yellow.
         self.assertIn(
-            f"{ui.YELLOW}       - [4] c [ ]{ui.RESET}",
+            f"{ui.YELLOW}       - [1] a [ ]{ui.RESET}",
             out,
         )
         self.assertIn(
-            f"{ui.YELLOW}       - [5] d [ ]{ui.RESET}",
+            f"{ui.YELLOW}       - [2] b [ ]{ui.RESET}",
             out,
         )
 
