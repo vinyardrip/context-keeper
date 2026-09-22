@@ -64,6 +64,13 @@ YELLOW = "\033[33m"
 CYAN = "\033[36m"
 RED = "\033[31m"
 
+# Orange/amber banner: inverted, high-contrast background highlight
+# (bold + amber background 43 + black foreground 30). Used for the
+# bottom ``>> Backlog`` banner line of ``ck st``'s WORK CONTEXT so
+# the remaining-work count visually pops as the block's last line on
+# both dark and light terminal themes.
+BANNER_BG = "\033[1;43;30m"
+
 # Values treated as "on" for CLICOLOR_FORCE (mirrors cklib.sandbox).
 _TRUTHY_ENV = frozenset({"1", "true", "yes", "on"})
 
@@ -272,6 +279,16 @@ class Palette:
     def bold_red(self, text: str) -> str:
         return self.paint(text, BOLD, RED)
 
+    def banner(self, text: str) -> str:
+        """Bottom banner line: orange/amber background highlight.
+
+        Bold black-on-amber (SGR ``1;43;30``) — an inverted,
+        high-contrast accent that visually pops as a full-line
+        banner on both dark and light terminal themes. A disabled
+        palette returns the text unchanged (plain-text fallback).
+        """
+        return self.paint(text, BANNER_BG)
+
 
 def get_palette(stream: Any = None,
                 colors: Optional[dict] = None) -> Palette:
@@ -331,6 +348,7 @@ __all__ = [
     "YELLOW",
     "CYAN",
     "RED",
+    "BANNER_BG",
     "COLOR_NAMES",
     "PALETTE_SLOTS",
     "resolve_color",

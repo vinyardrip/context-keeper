@@ -6,13 +6,15 @@
 2. Dashboard table — priority columns (Project | Focus Task |
    Progress | Last Active) with content-capped widths.
 3. WORK CONTEXT — ordered structure (Done / conditional Skipped /
-   Focus|Next / Upcoming / Backlog count) where ``Skipped`` only
-   appears on a real execution gap and sequential pending tasks are
-   counted as backlog.
+   Focus|Next / Upcoming / optional Unfocused / Paused Context /
+   Backlog bottom banner) where ``Skipped`` only appears on a real
+   execution gap, sequential pending tasks stay in the queue, and
+   the Backlog banner reports TOTAL − Done as the very last line.
 """
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -339,8 +341,12 @@ class TestWorkContext(_IsolatedHome, unittest.TestCase):
     3. ``[>] Focus`` / ``[>] Next`` — explicit focus, or the
        auto-resolved first pending candidate (no mutation)
     4. ``>> Upcoming``  — the next pending task after Focus/Next
-    5. ``>> Backlog``   — a single ``+N tasks remaining`` count for
-       the unstarted tail (never duplicates a named task above)
+    5. ``Unfocused / Paused Context`` — still-open tasks that lost
+       focus (with their bound notes)
+    6. ``>> Backlog``   — the highlighted BOTTOM BANNER: a single
+       ``N tasks remaining`` count of the TOTAL remaining
+       uncompleted tasks (Total − Done — never reduced by the
+       tasks named in the sections above)
 
     Every active section is a header line with its task items
     indented on new lines below it (``- [ID] Title [st]`` per line).
@@ -409,24 +415,71 @@ class TestWorkContext(_IsolatedHome, unittest.TestCase):
         )
         out = self._status(plan)
         self.assertNotIn("[!] Skipped", out)
-        # current=task1(1), upcoming=task2(2) -> 6 opens remain.
-        self.assertIn(">> Backlog: +6 tasks remaining", out)
+        # Total − Done = 9 − 1: Focus/Next and Upcoming are NOT
+        # subtracted from the backlog count.
+        self.assertIn(">> Backlog: 8 tasks remaining", out)
         self.assertIn("- [1] task 1 [ ]", out)
         self.assertIn("- [2] task 2 [ ]", out)
 
-    def test_backlog_count_excludes_current_and_upcoming(self):
+    def test_backlog_is_total_minus_done(self):
+        """Backlog = Total − Done: the tasks shown as Focus/Next and
+        Upcoming are NOT subtracted from the remaining count."""
         plan = (
             "# P\n- [x] done\n"
             + "\n".join(f"- [ ] t{i}" for i in range(1, 7))
             + "\n"
         )
         out = self._status(plan)
-        # done=1, t1..t6=2..7: current=t1(2), upcoming=t2(3),
-        # backlog=t3..t6 → +4 tasks remaining, no Skipped block.
+        # Total=7, Done=1 → 6 remaining (current=t1, upcoming=t2 stay
+        # counted); no Skipped block either.
         self.assertNotIn("[!] Skipped", out)
-        self.assertIn(">> Backlog: +4 tasks remaining", out)
+        self.assertIn(">> Backlog: 6 tasks remaining", out)
         self.assertIn("- [2] t1 [ ]", out)
         self.assertIn("- [3] t2 [ ]", out)
+
+    def test_backlog_counts_skipped_tasks(self):
+        """Skipped tasks are NOT subtracted from the backlog count —
+        the banner is always Total − Done."""
+        # Skipped (a, b passed over before focus c) + upcoming d.
+        out = self._status("# P\n- [ ] a\n- [ ] b\n- [>] c\n- [ ] d\n")
+        self.assertIn("[!] Skipped:", out)
+        self.assertIn("- [1] a [ ]", out)
+        self.assertIn("- [2] b [ ]", out)
+        self.assertIn(">> Backlog: 4 tasks remaining", out)  # 4 − 0
+
+    def test_backlog_singular_grammar(self):
+        """Exactly one remaining task reads '1 task remaining'."""
+        out = self._status("# P\n- [x] a\n- [ ] b\n")
+        self.assertIn(">> Backlog: 1 task remaining", out)
+        self.assertNotIn("1 tasks remaining", out)
+
+    def test_backlog_all_done_zero(self):
+        out = self._status("# P\n- [x] a\n- [x] b\n")
+        self.assertIn(">> Backlog: 0 tasks remaining", out)
+
+    def test_backlog_banner_renders_below_paused_context(self):
+        """PLACEMENT: the Backlog banner is the VERY LAST line of the
+        WORK CONTEXT block — after ``Unfocused / Paused Context`` —
+        directly above the closing border."""
+        with tempfile.TemporaryDirectory() as td:
+            ck = self._ck(
+                Path(td),
+                "# P\n- [ ] a\n- [ ] b\n- [>] c\n- [ ] d\n",
+            )
+            ck.set_note("a note")
+            ck.start(2)  # a -> paused (with note), b -> skipped
+            ck.start(3)  # b -> paused (noteless), c -> focus
+            tl = parse_plan(ck.plan_file.read_text(encoding="utf-8"))
+            out = _render_local_status(ck, tl, palette=ckui.Palette(False))
+        self.assertIn("Unfocused / Paused Context:", out)
+        idx_paused = out.index("Unfocused / Paused Context:")
+        idx_banner = out.index(">> Backlog:")
+        self.assertGreater(idx_banner, idx_paused)
+        lines = out.splitlines()
+        self.assertEqual(lines[-1], "=" * 61)
+        self.assertIn(">> Backlog:", lines[-2])
+        # Total − Done = 4 − 0: paused/skipped tasks are NOT subtracted.
+        self.assertIn(">> Backlog: 4 tasks remaining", out)
 
     def test_skipped_under_limit_has_no_count_header(self):
         out = self._status("# P\n- [ ] a\n- [ ] b\n- [>] c\n")
@@ -451,8 +504,8 @@ class TestWorkContext(_IsolatedHome, unittest.TestCase):
         # The first open after the focus is still the Upcoming slot.
         self.assertIn(">> Upcoming:", out)
         self.assertIn("- [3] three [ ]", out)
-        # The remaining task is backlog, not skipped.
-        self.assertIn(">> Backlog: +1 tasks remaining", out)
+        # Total − Done = 4 − 1: focus + upcoming + tail all count.
+        self.assertIn(">> Backlog: 3 tasks remaining", out)
 
     def test_skipped_only_before_focus(self):
         """An open before the focus is Skipped; opens after it stay
@@ -470,7 +523,8 @@ class TestWorkContext(_IsolatedHome, unittest.TestCase):
     def test_skipped_section_omitted_when_clean(self):
         out = self._status("# P\n- [ ] a\n- [x] b\n")
         self.assertNotIn("[!] Skipped", out)
-        self.assertIn(">> Backlog: (none)", out)
+        # Total − Done = 2 − 1 (singular wording).
+        self.assertIn(">> Backlog: 1 task remaining", out)
 
     def test_sequential_opens_are_backlog_not_skipped(self):
         """With NO focus the first two opens become the Next candidate
@@ -481,7 +535,8 @@ class TestWorkContext(_IsolatedHome, unittest.TestCase):
         self.assertIn(">> Upcoming:", out)
         self.assertIn("- [3] two [ ]", out)
         self.assertNotIn("[!] Skipped", out)
-        self.assertIn(">> Backlog: +1 tasks remaining", out)
+        # Total − Done = 4 − 1: Next + Upcoming + tail all count.
+        self.assertIn(">> Backlog: 3 tasks remaining", out)
 
     # ---- element 3: [>] Focus / Next ------------------------------- #
 
@@ -565,13 +620,18 @@ class TestWorkContext(_IsolatedHome, unittest.TestCase):
         # Done items sit on indented lines under the header.
         self.assertIn("- [1] finished first [x]", out)
         self.assertIn("- [2] finished second [x]", out)
+        # BOTTOM PLACEMENT: the Backlog banner is the very last line
+        # of WORK CONTEXT, directly above the closing border.
+        lines = out.splitlines()
+        self.assertEqual(lines[-1], "=" * 61)
+        self.assertIn(">> Backlog:", lines[-2])
 
     def test_empty_plan_renders_section_hints(self):
         out = self._status("# P\n")
         self.assertIn("<< Done: (none completed)", out)
         self.assertIn("[>] Next: (no open tasks)", out)
         self.assertIn(">> Upcoming: (none)", out)
-        self.assertIn(">> Backlog: (none)", out)
+        self.assertIn(">> Backlog: 0 tasks remaining", out)
         # No Skipped section without an execution gap.
         self.assertNotIn("[!] Skipped", out)
 
@@ -602,7 +662,7 @@ class TestWorkContext(_IsolatedHome, unittest.TestCase):
             "       - [2] focus task",
             "    >> Upcoming:",
             "       - [3] next task [ ]",
-            "    >> Backlog: (none)",
+            "    >> Backlog: 2 tasks remaining",
             bar,
         ])
         self.assertEqual(out, expected)
