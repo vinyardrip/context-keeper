@@ -47,7 +47,9 @@ Local (current project):
                              with it); a noteless one prompts for a note
                              (TTY) or gets a soft hint. Flags: --no-input
                              (never prompt), -y (assume yes, ask text only)
-  done <ID|Range>            Mark task(s) as done ([x])
+  done <ID|Range>            Mark task(s) as done ([x]). Bare `ck done`
+                             completes the CURRENT FOCUS; without a
+                             focus it prints the usage line instead
   add <text>                 Insert a new open task before ## Completed
   note <text>                Attach/update a process note on the active task
                              (shown in `ck st`, cleared by `ck done`)
@@ -214,8 +216,14 @@ def build_parser() -> "argparse.ArgumentParser":
         "-y", "--yes", dest="assume_yes", action="store_true",
         help="Assume 'yes' at the note prompt (asks only for the text)")
 
-    p_done = sub.add_parser("done", help="Mark task(s) done")
-    p_done.add_argument("spec", help="Task ID, range, or list (e.g. 3, 2-4)")
+    p_done = sub.add_parser(
+        "done",
+        help="Mark task(s) done (bare `ck done` completes the "
+             "current focus)")
+    p_done.add_argument(
+        "spec", nargs="?", default="",
+        help="Task ID, range, or list (e.g. 3, 2-4); omitted = the "
+             "currently focused task")
 
     p_add = sub.add_parser("add", help="Add a new task")
     p_add.add_argument("text", nargs="+", help="Task text")
@@ -559,7 +567,17 @@ def main(argv: Optional[List[str]] = None) -> int:
             result = ck.start(args.task_id)
             _print_focus_result(result)
         elif args.command == "done":
-            ids = ck.done(args.spec)
+            spec = args.spec
+            if not spec:
+                # IMPLICIT FOCUS TARGET: `ck done` without arguments
+                # completes the CURRENT FOCUS. Without a focus the
+                # standard usage error applies (non-zero exit).
+                focus_id = ck.current_focus_id()
+                if focus_id is None:
+                    print("Usage: ck done <ID|range|list>")
+                    return 2
+                spec = str(focus_id)
+            ids = ck.done(spec)
             print(f"[ok] Marked done: {', '.join(map(str, ids))}")
             _maybe_notify(ck)
         elif args.command == "add":
@@ -748,10 +766,17 @@ def _legacy_dispatch(raw: List[str]) -> int:
             result = ck.start(tid)
             _print_focus_result(result)
         elif cmd == "done":
-            if not rest:
-                print("Usage: ck done <ID|range|list>")
-                return 2
-            ids = ck.done(rest[0])
+            spec = rest[0] if rest else ""
+            if not spec:
+                # IMPLICIT FOCUS TARGET: `ck done` without arguments
+                # completes the CURRENT FOCUS. Without a focus the
+                # standard usage error applies (non-zero exit).
+                focus_id = ck.current_focus_id()
+                if focus_id is None:
+                    print("Usage: ck done <ID|range|list>")
+                    return 2
+                spec = str(focus_id)
+            ids = ck.done(spec)
             print(f"[ok] Marked done: {', '.join(map(str, ids))}")
             if notifiable:
                 _maybe_notify(ck)

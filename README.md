@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.5.1-blue)]()
+[![version](https://img.shields.io/badge/version-0.5.2-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -84,7 +84,7 @@ chmod +x ck
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.5.1
+ck -v    # → ck version 0.5.2
 ```
 
 ---
@@ -112,7 +112,7 @@ ck -v    # → ck version 0.5.1
 | ck init --register | Initialize locally and register the project in `~/.config/ck/projects.json` |
 | ck add \<text\> | Add a new open task (inserted before `## Completed`) |
 | ck start \<ID\> | Focus a task (`- [>]`); `ck start 0` resets focus. A noted task that loses focus moves to Unfocused / Paused Context (note preserved until `ck done` archives it); a noteless one gets a soft attach-a-note hint |
-| ck done \<ID\|range\|list\> | Mark task(s) done (`- [x]`), e.g. `3`, `2-4`, `1,3,5`; the completed task's process note is archived into HISTORY.md and cleared |
+| ck done \<ID\|range\|list\> | Mark task(s) done (`- [x]`), e.g. `3`, `2-4`, `1,3,5`. Bare `ck done` completes the CURRENT FOCUS (usage error without one); the completed task's process note is archived into HISTORY.md and cleared |
 | ck note \<text\> | Attach/update a process note on the active task (shown in `ck st`; archived to HISTORY.md by `ck done`) |
 | ck edit | Open PLAN.md in your editor (see [Editor Resolution](#editor-resolution)) |
 | ck save | Task completion workflow: optional note + optional **local** commit |
