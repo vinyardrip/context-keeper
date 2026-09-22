@@ -2459,9 +2459,12 @@ class _StatusContext:
       the first open task auto-resolved as the Next candidate
       (display only — the plan state is never mutated).
     - ``upcoming``: the first open task after ``current``.
-    - ``backlog``: every remaining unstarted task — the opens not
-      already accounted for as current, upcoming, or skipped. The
-      renderer reports only its count (``+N tasks remaining``).
+    - ``backlog``: the TOTAL remaining uncompleted work — every
+      non-done task (``len(tl.tasks) - len(tl.done)``). It is the
+      bottom banner count and is deliberately NOT reduced by tasks
+      shown in Focus/Next, Upcoming, Skipped, or the Unfocused /
+      Paused Context block — those sections name tasks, the banner
+      reports the overall remaining workload.
     """
 
     done: list
@@ -2486,8 +2489,10 @@ def _status_context(tl: TaskList) -> _StatusContext:
     focus. Without a focus the Next candidate is the first open task,
     so nothing can be skipped — the sequential tail is backlog.
 
-    The backlog is every open task left after subtracting the
-    current, upcoming, and skipped tasks; only its count is shown.
+    The backlog is the TOTAL remaining uncompleted work —
+    ``len(tl.tasks) - len(tl.done)`` — never reduced by the tasks
+    shown in Focus/Next, Upcoming, Skipped, or the Unfocused /
+    Paused Context block; only its count is shown (bottom banner).
     """
     focus = tl.focused[0] if tl.focused else None
     opens = tl.open
@@ -2538,12 +2543,11 @@ def _status_context(tl: TaskList) -> _StatusContext:
             and anchor < i < cur_pos
         ]
 
-    accounted = {t.id for t in skipped}
-    if current is not None:
-        accounted.add(current.id)
-    if upcoming is not None:
-        accounted.add(upcoming.id)
-    backlog = [t for t in opens if t.id not in accounted]
+    # Backlog = TOTAL remaining work (Total − Done). Tasks shown in
+    # Focus/Next, Upcoming, Skipped, or Unfocused / Paused Context
+    # are NOT subtracted: those sections name individual tasks while
+    # the bottom banner counts the overall uncompleted workload.
+    backlog = [t for t in tl.tasks if t.status != TaskStatus.DONE]
 
     return _StatusContext(
         done=done,
@@ -2563,7 +2567,8 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
     Structure (spec-exact in plain-text mode, PURE ASCII — no emoji
     or box-drawing glyphs, so no terminal font fallback is ever
     needed). The WORK CONTEXT section is an ordered vertical list
-    (Done / conditional Skipped / Focus|Next / Upcoming / Backlog):
+    (Done / conditional Skipped / Focus|Next / Upcoming / optional
+    Unfocused / Paused Context / Backlog bottom banner):
     every active section renders a header line with its task items
     indented on new lines below it, one ``- [ID] Title [st]`` per
     line::
@@ -2592,13 +2597,13 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
                - [<id>] <title> [ ]              never mutates)
             >> Upcoming:                          (follows Focus/Next)
                - [<id>] <title> [ ]
-            >> Backlog: +<N> tasks remaining   (unstarted tail count;
-                                                   disjoint from the
-                                                   sections above)
-            * Note: <process note>                    (only when set)
             Unfocused / Paused Context:  (noted open task that lost focus)
                - [<id>] <title>
                  * Note: <note text>
+            >> Backlog: <N> task(s) remaining  (BOTTOM BANNER: total
+                               remaining uncompleted tasks — Total −
+                               Done; amber background highlight —
+                               never reduced by the sections above)
         =============================================================
 
     DISPLAY LIMITS: ``<< Done`` and ``[!] Skipped`` show at most
@@ -2617,10 +2622,16 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
     With no focus at all the section is absent, since the Next
     candidate is by definition the first open task.
 
-    BACKLOG: a single count line for the remaining unstarted tasks
-    (``>> Backlog: +N tasks remaining``) — the opens not already shown
-    as Focus/Next, Upcoming, or Skipped. It never duplicates a named
-    task from the sections above.
+    BACKLOG: the bottom banner line (``>> Backlog: +N tasks
+    remaining``) reporting the TOTAL remaining uncompleted tasks —
+    ``Total − Done``. It is deliberately NOT reduced by the tasks
+    shown in Focus/Next, Upcoming, Skipped, or the Unfocused /
+    Paused Context block: those sections name individual tasks,
+    while the banner counts the overall remaining workload. It is
+    the VERY LAST line of the WORK CONTEXT section, rendered with
+    an orange/amber background highlight (inverted, bold
+    black-on-amber — see :meth:`cklib.ui.Palette.banner`) so it
+    visually pops as a bottom banner in terminal displays.
 
     UNFOCUSED / PAUSED CONTEXT: a still-open task that lost focus
     (via ``ck start <NEW_ID>`` or a focus reset) while carrying the
@@ -2839,16 +2850,6 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
     else:
         lines.append(p.muted("    >> Upcoming: (none)"))
 
-    # 4b) >> Backlog: remaining unstarted count — the opens not shown
-    #     as Focus/Next, Upcoming, or Skipped. Count only, so a long
-    #     queue tail never floods the block.
-    remaining = len(ctx.backlog)
-    if remaining:
-        lines.append(
-            p.muted(f"    >> Backlog: +{remaining} tasks remaining"))
-    else:
-        lines.append(p.muted("    >> Backlog: (none)"))
-
     # 5) Unfocused / Paused Context: every still-open task that
     #    previously held focus (the paused_tasks ledger), each with
     #    its bound note when one was attached — unnoted pauses stay
@@ -2859,6 +2860,18 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
             lines.append(f"       - [{pid}] {ptitle}")
             if pnote:
                 lines.append(p.bold_cyan(f"         * Note: {pnote}"))
+
+    # 6) >> Backlog: BOTTOM BANNER of the WORK CONTEXT block — the
+    #    total remaining uncompleted tasks (Total − Done). Tasks
+    #    shown in Focus/Next, Upcoming, Skipped, or Unfocused /
+    #    Paused Context are NOT subtracted — 0 stays 0 when nothing
+    #    is left. Rendered with an orange/amber background highlight
+    #    (bold black-on-amber) so it visually pops as the block's
+    #    last line.
+    remaining = len(ctx.backlog)
+    noun = "task" if remaining == 1 else "tasks"
+    lines.append(
+        p.banner(f"    >> Backlog: {remaining} {noun} remaining"))
 
     lines.append(p.border(bar))
     return "\n".join(lines)

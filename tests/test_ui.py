@@ -199,10 +199,14 @@ class TestStatusRenderingColors(unittest.TestCase):
         self.assertIn("       - [3] next task [ ]", out)
         self.assertNotIn(
             f"\033[90m       - [3] next task [ ]{ui.RESET}", out)
-        # No execution gap here -> the Skipped section is omitted;
-        # the backlog count line is native too.
+        # No execution gap here -> the Skipped section is omitted.
         self.assertNotIn("[!] Skipped", out)
-        self.assertIn("    >> Backlog: (none)", out)
+        # The bottom Backlog banner carries the orange/amber
+        # background highlight (bold black-on-amber, inverted).
+        self.assertIn(
+            f"{ui.BANNER_BG}    >> Backlog: 2 tasks remaining{ui.RESET}",
+            out,
+        )
         # Section header is bold.
         self.assertIn(f"{ui.BOLD} -> WORK CONTEXT:{ui.RESET}", out)
 
@@ -221,11 +225,32 @@ class TestStatusRenderingColors(unittest.TestCase):
         )
 
     def test_colored_output_has_no_low_contrast_tokens(self):
-        """Zero DIM (2) and zero black/bright-black (30/90) codes —
-        readable on dark and transparent themes without selection."""
+        """Zero DIM (2) and zero standalone black/bright-black (30/90)
+        codes — readable on dark and transparent themes without
+        selection. The Backlog banner's black-on-amber background
+        (``1;43;30``) is the sanctioned inversion: black text only
+        ever appears ON an amber background, never as a bare
+        low-contrast foreground token."""
         out = self._render(ui.Palette(True))
         for token in ("\033[2m", "\033[30m", "\033[90m"):
             self.assertNotIn(token, out)
+
+    def test_backlog_banner_is_amber_highlight_on_colored_output(self):
+        """The bottom Backlog line renders with the inverted
+        orange/amber background highlight; the plain fallback is
+        byte-identical to the unstyled text."""
+        out = self._render(ui.Palette(True))
+        banner_line = [
+            l for l in out.splitlines() if ">> Backlog:" in l
+        ][0]
+        self.assertTrue(banner_line.startswith(ui.BANNER_BG))
+        self.assertTrue(banner_line.endswith(ui.RESET))
+        # Plain palette: same content, zero escapes.
+        plain = self._render(ui.Palette(False))
+        self.assertEqual(
+            ui.strip_ansi(banner_line),
+            [l for l in plain.splitlines() if ">> Backlog:" in l][0],
+        )
 
     def test_borders_and_accents_inherit_native_color(self):
         out = self._render(ui.Palette(True))

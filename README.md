@@ -118,7 +118,7 @@ ck -v    # → ck version 0.5.1
 | ck save | Task completion workflow: optional note + optional **local** commit |
 | ck log | Open HISTORY.md in your editor (see [Editor Resolution](#editor-resolution)) |
 | ck log --all | View the full history: every rotation archive (`.md.gz` decompressed / legacy `.md.bak`, oldest first) concatenated with the current HISTORY.md |
-| ck st | Status overview (tri-state: Previous / Focus / Next); an explicit focus is duplicated at the top as `-> CURRENT FOCUS: [#<id>] <title>` (with its note). WORK CONTEXT shows `<< Done`, a conditional `[!] Skipped` (only on a real execution gap), `[>] Focus` / `Next`, `>> Upcoming`, and a `>> Backlog: +N tasks remaining` count |
+| ck st | Status overview (tri-state: Previous / Focus / Next); an explicit focus is duplicated at the top as `-> CURRENT FOCUS: [#<id>] <title>` (with its note). WORK CONTEXT shows `<< Done`, a conditional `[!] Skipped` (only on a real execution gap), `[>] Focus` / `Next`, `>> Upcoming`, and a highlighted bottom banner `>> Backlog: N task(s) remaining` |
 | ck notes | List all active process notes: `[>] Active Focus:` plus `[!] Unfocused / Paused Context:` with each paused task's bound note (`[i] No active process notes found.` when none) |
 | ck st -l / --list | Print the task list to STDOUT (same as `ck list`) |
 | ck st -e / --edit | Open PLAN.md in your editor (same as `ck edit`) |
@@ -283,11 +283,16 @@ this order:
    auto-resolved first pending task — display only, `PLAN.md` is never
    mutated).
 4. **`>> Upcoming`** — exactly one next pending task after Focus/Next.
-5. **`>> Backlog`** — a single count line (`+N tasks remaining`) for the
-   remaining unstarted tasks, i.e. the opens not already shown as
-   Focus/Next, Upcoming, or Skipped. No task is ever listed twice.
-6. **`Unfocused / Paused Context`** — still-open tasks that lost focus while
+5. **`Unfocused / Paused Context`** — still-open tasks that lost focus while
    carrying a process note (rendered last, with the note attached).
+6. **`>> Backlog`** — the highlighted BOTTOM BANNER of the block: a single
+   count line (`N task(s) remaining`, singular when `N = 1`) for the TOTAL
+   remaining uncompleted tasks, i.e. `Total − Done`. It is deliberately NOT
+   reduced by the tasks shown in Focus/Next, Upcoming, Skipped, or the
+   Unfocused / Paused Context block — those sections name individual tasks,
+   the banner counts the overall remaining workload. Rendered with an
+   orange/amber background highlight (inverted, bold black-on-amber) so it
+   visually pops as the last line of WORK CONTEXT.
 
 When no task is focused but pending work remains, `ck st` prints a read-only
 hint banner — `[!] No active focus set. Run 'ck start <ID>'` — and points at
