@@ -6,8 +6,9 @@ Covers Step 2 of the refactor:
    out of existing PLAN.md files (pure function + persisted repair).
 2. Clean insertion: ``ck add`` inserts under ``## Current Sprint``
    (or directly before ``## Completed``).
-3. ID & gap logic: positional gap detection, no false gaps for
-   newly added tasks, sequential IDs after repair drops noise.
+3. ID & gap logic: literal missing-ID gap detection (status is
+   ignored), no false gaps for newly added tasks, sequential IDs
+   after repair drops noise.
 """
 
 from __future__ import annotations
@@ -332,11 +333,16 @@ class TestInsertionPosition(_IsolatedHome, unittest.TestCase):
 
 
 class TestGapAndIdLogic(unittest.TestCase):
-    """Positional gap detection + sequential IDs."""
+    """Literal missing-ID gap detection + sequential IDs.
 
-    def test_gap_detection_positional(self):
-        tl = parse_plan("- [x] done\n- [ ] gap1\n- [ ] gap2\n")
-        self.assertEqual(tl.gap_ids(), [2, 3])
+    Task STATUS is ignored: a pending task after a done one is not a
+    gap. Only a genuinely missing integer ID counts.
+    """
+
+    def test_no_gaps_for_sequential_pending_tasks(self):
+        tl = parse_plan("- [x] done\n- [ ] pending1\n- [ ] pending2\n")
+        self.assertEqual([t.id for t in tl.tasks], [1, 2, 3])
+        self.assertEqual(tl.gap_ids(), [])
 
     def test_no_gaps_when_open_before_done(self):
         tl = parse_plan("- [ ] a\n- [ ] b\n- [x] c\n")
@@ -347,17 +353,16 @@ class TestGapAndIdLogic(unittest.TestCase):
         merely because its provisional line number points past EOF."""
         tl = parse_plan("- [ ] a\n- [x] b\n")
         tl.add("new after done")  # provisional line_number > source len
-        # New open task after done → it IS a genuine gap by design
-        self.assertEqual(tl.gap_ids(), [3])
+        self.assertEqual(tl.gap_ids(), [])
 
     def test_gap_after_repair_renumbering(self):
         """Repair dropping lines must not distort gap detection."""
         dirty = "# P\n\x1b[0m noise\n- [ ] a\n- [x] b\n- [ ] c\n"
         cleaned = repair_plan_text(dirty)
         tl = parse_plan(cleaned)
-        # Sequential IDs despite the dropped noise line
+        # Sequential IDs despite the dropped noise line.
         self.assertEqual([t.id for t in tl.tasks], [1, 2, 3])
-        self.assertEqual(tl.gap_ids(), [3])
+        self.assertEqual(tl.gap_ids(), [])
 
     def test_add_after_repair_keeps_id_sequence(self):
         """IDs continue 1..N+1 after repair heals the file."""
@@ -379,9 +384,13 @@ class TestGapAndIdLogic(unittest.TestCase):
             "- [ ] a\n- [x] b\n- [ ] c\n- [x] d\n- [ ] e\n"
         )
         self.assertEqual([t.id for t in tl.tasks], [1, 2, 3, 4, 5])
-        # Only e trails the LAST done task (d); c sits between done
-        # tasks and is not a gap under the positional rule.
-        self.assertEqual(tl.gap_ids(), [5])
+        # IDs are contiguous 1..5 → no literal gap regardless of status.
+        self.assertEqual(tl.gap_ids(), [])
+
+    def test_literal_id_gap_detected(self):
+        tl = parse_plan("- [ ] a\n- [ ] b\n- [ ] c\n- [ ] d\n")
+        tl.remove(3)  # IDs become 1, 2, 4
+        self.assertEqual(tl.gap_ids(), [3])
 
 
 # ---------------------------------------------------------------------------

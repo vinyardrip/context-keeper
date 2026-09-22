@@ -170,25 +170,20 @@ class TaskList:
         return round(100.0 * len(self.done) / len(self.tasks), 1)
 
     def gap_ids(self) -> list[int]:
-        """Detect open tasks that appear *after* a done task.
+        """Detect literal missing numeric IDs in the task sequence.
 
-        Detection is POSITIONAL (order within the task list) rather
-        than line-number based, so the result is immune to source
-        line renumbering — auto-repair dropping artifact lines, or
-        newly added tasks whose provisional line numbers point past
-        EOF — and never miscounts. Returns the IDs of the offending
-        open tasks that follow the last done task.
+        A "gap" is an integer in ``[min_id, max_id]`` that no task in
+        this list carries — e.g. a ``1, 2, 4, 5`` sequence reports
+        ``[3]``. Task STATUS is deliberately ignored: pending tasks
+        that merely sit after a completed one are NOT gaps, and the
+        parser assigns IDs sequentially (1..N) so an intact plan
+        yields ``[]``.
         """
-        last_done_pos = -1
-        for pos, t in enumerate(self.tasks):
-            if t.status == TaskStatus.DONE:
-                last_done_pos = pos
-        if last_done_pos == -1:
+        if not self.tasks:
             return []
-        return [
-            t.id for pos, t in enumerate(self.tasks)
-            if pos > last_done_pos and t.status == TaskStatus.OPEN
-        ]
+        ids = {t.id for t in self.tasks}
+        lo, hi = min(ids), max(ids)
+        return [i for i in range(lo, hi + 1) if i not in ids]
 
     def active(self) -> Optional[Task]:
         """Return the focused task, or the first open task, or None."""

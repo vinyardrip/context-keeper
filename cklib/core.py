@@ -2448,15 +2448,20 @@ class _StatusContext:
       ordered so the ones closest to the focus come last — the
       renderer shows the last 2 (display limit) and folds the rest
       into a count header + overflow line.
-    - ``skipped``: open tasks left behind — with an explicit focus,
-      ONLY the opens positioned BEFORE it (passed over); without a
-      focus, the stranded opens after the last completed task
-      (classic gaps) also qualify. The current and upcoming tasks
-      are always excluded. Listed by name in the rendering.
+    - ``skipped``: open tasks genuinely left behind — ONLY computed
+      when an explicit focus sits after the last completed task and
+      open tasks fall strictly BETWEEN that completion and the
+      focus (literal gaps in execution order). A no-focus view
+      never reports skipped tasks: the auto-resolved Next candidate
+      is the first open task, so nothing can precede it, and the
+      sequential tail is backlog — never "skipped".
     - ``current`` / ``is_focus``: the explicitly focused task, or
       the first open task auto-resolved as the Next candidate
       (display only — the plan state is never mutated).
     - ``upcoming``: the first open task after ``current``.
+    - ``backlog``: every remaining unstarted task — the opens not
+      already accounted for as current, upcoming, or skipped. The
+      renderer reports only its count (``+N tasks remaining``).
     """
 
     done: list
@@ -2464,19 +2469,25 @@ class _StatusContext:
     current: Optional[Task]
     is_focus: bool
     upcoming: Optional[Task]
+    backlog: list
 
 
 def _status_context(tl: TaskList) -> _StatusContext:
-    """Resolve the 4-element WORK CONTEXT (``ck st``).
+    """Resolve the WORK CONTEXT view state (``ck st``).
 
     The progress point is the explicit focus when set; otherwise the
     FIRST open task is auto-resolved as the Next candidate (without
     mutating the plan). Done context is every completion before the
     point (focus case) or overall (candidate case) — the renderer
-    applies the 2-task display limit. Skipped tasks are the
-    passed-over opens before an explicit focus, or the stranded
-    opens (auto-candidate case), minus the current and upcoming
-    tasks.
+    applies the 2-task display limit.
+
+    Skipped tasks only exist when a task is explicitly focused and
+    open tasks were passed over between the last completion and that
+    focus. Without a focus the Next candidate is the first open task,
+    so nothing can be skipped — the sequential tail is backlog.
+
+    The backlog is every open task left after subtracting the
+    current, upcoming, and skipped tasks; only its count is shown.
     """
     focus = tl.focused[0] if tl.focused else None
     opens = tl.open
@@ -2489,10 +2500,6 @@ def _status_context(tl: TaskList) -> _StatusContext:
         current, is_focus = None, False
 
     pos = {t.id: i for i, t in enumerate(tl.tasks)}
-    last_done_pos = -1
-    for i, t in enumerate(tl.tasks):
-        if t.status == TaskStatus.DONE:
-            last_done_pos = i
 
     if is_focus and current is not None:
         done = [
@@ -2510,31 +2517,33 @@ def _status_context(tl: TaskList) -> _StatusContext:
                 break
 
     skipped: list = []
-    if current is not None:
+    if is_focus and current is not None:
         cur_pos = pos[current.id]
         excluded = {current.id}
         if upcoming is not None:
             excluded.add(upcoming.id)
-        # With an explicit FOCUS, only opens POSITIONED BEFORE it were
-        # passed over — every open after the focus stays Pending /
-        # Upcoming. The stranded-after-last-done heuristic is reserved
-        # for the no-focus view (auto-resolved Next candidate), where
-        # it surfaces classic plan gaps by name.
-        if is_focus:
-            skipped = [
-                t for i, t in enumerate(tl.tasks)
-                if t.status == TaskStatus.OPEN
-                and t.id not in excluded
-                and i < cur_pos
-            ]
-        else:
-            skipped = [
-                t for i, t in enumerate(tl.tasks)
-                if t.status == TaskStatus.OPEN
-                and t.id not in excluded
-                and (i < cur_pos
-                     or (last_done_pos != -1 and i > last_done_pos))
-            ]
+        # Anchor on the last completion BEFORE the focus: only opens
+        # sitting strictly between it and the focus were genuinely
+        # passed over. With no earlier completion the anchor is the
+        # start of the list (-1), so every open before the focus
+        # counts as a gap in execution order.
+        anchor = -1
+        for i, t in enumerate(tl.tasks):
+            if t.status == TaskStatus.DONE and i < cur_pos:
+                anchor = i
+        skipped = [
+            t for i, t in enumerate(tl.tasks)
+            if t.status == TaskStatus.OPEN
+            and t.id not in excluded
+            and anchor < i < cur_pos
+        ]
+
+    accounted = {t.id for t in skipped}
+    if current is not None:
+        accounted.add(current.id)
+    if upcoming is not None:
+        accounted.add(upcoming.id)
+    backlog = [t for t in opens if t.id not in accounted]
 
     return _StatusContext(
         done=done,
@@ -2542,6 +2551,7 @@ def _status_context(tl: TaskList) -> _StatusContext:
         current=current,
         is_focus=is_focus,
         upcoming=upcoming,
+        backlog=backlog,
     )
 
 
@@ -2552,25 +2562,29 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
 
     Structure (spec-exact in plain-text mode, PURE ASCII — no emoji
     or box-drawing glyphs, so no terminal font fallback is ever
-    needed). The WORK CONTEXT section is a strict 4-element vertical
-    list: every active section renders a header line with its task
-    items indented on new lines below it, one ``- [ID] Title [st]``
-    per line::
+    needed). The WORK CONTEXT section is an ordered vertical list
+    (Done / conditional Skipped / Focus|Next / Upcoming / Backlog):
+    every active section renders a header line with its task items
+    indented on new lines below it, one ``- [ID] Title [st]`` per
+    line::
 
         =============================================================
          > <project_name> [v<version>]
-         [%] Progress: <done>/<total> tasks done (<pct>%)
-         -> CURRENT FOCUS: [#<id>] <title>   (explicit focus only)
-            * Note: <process note>            (only when set)
+ [%] Progress: <done>/<total> tasks done (<pct>%)
+ [!] No active focus set. Run 'ck start <ID>'...  (no focus, pending exists;
+                                                    read-only hint — PLAN.md
+                                                    is never auto-focused)
+ -> CURRENT FOCUS: [#<id>] <title>   (explicit focus only)
+    * Note: <process note>            (only when set)
 
          -> WORK CONTEXT:
             << Done (N tasks):               last 2, closest to focus
                - [<id>] <title> [x]
                - [<id>] <title> [x]
                ... (+<N> more done)
-            [!] Skipped (N tasks):                by name, capped
-               - [<id>] <title> [ ]
-               - [<id>] <title> [ ]
+            [!] Skipped (N tasks):   ONLY with a real execution gap
+               - [<id>] <title> [ ]   (open between last Done and Focus);
+               - [<id>] <title> [ ]   section is OMITTED when empty
                ... (+<N> more skipped)
             [>] Focus:                          (focus set via ck start)
                - [<id>] <title>
@@ -2578,6 +2592,9 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
                - [<id>] <title> [ ]              never mutates)
             >> Upcoming:                          (follows Focus/Next)
                - [<id>] <title> [ ]
+            >> Backlog: +<N> tasks remaining   (unstarted tail count;
+                                                   disjoint from the
+                                                   sections above)
             * Note: <process note>                    (only when set)
             Unfocused / Paused Context:  (noted open task that lost focus)
                - [<id>] <title>
@@ -2593,11 +2610,17 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
     and never overflow. Empty sections keep the inline hint form
     (``<< Done: (none completed)``) on the header line.
 
-    Skipped tasks are the opens left behind — passed over before the
-    focus/next progress point, or stranded after the last completed
-    task — so gaps surface BY NAME instead of the abstract
-    ``(gaps: X-Y)`` range (which still summarizes the progress
-    line).
+    SKIPPED: appears ONLY when a task is explicitly focused and open
+    tasks were passed over between the last completed task and that
+    focus (a literal gap in execution order). Sequential upcoming
+    tasks are NEVER labelled Skipped — they belong to the backlog.
+    With no focus at all the section is absent, since the Next
+    candidate is by definition the first open task.
+
+    BACKLOG: a single count line for the remaining unstarted tasks
+    (``>> Backlog: +N tasks remaining``) — the opens not already shown
+    as Focus/Next, Upcoming, or Skipped. It never duplicates a named
+    task from the sections above.
 
     UNFOCUSED / PAUSED CONTEXT: a still-open task that lost focus
     (via ``ck start <NEW_ID>`` or a focus reset) while carrying the
@@ -2676,6 +2699,19 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
         if top_note:
             lines.append(p.bold_cyan(f"    * Note: {top_note}"))
 
+    # 0b) No active focus: guide the user to ``ck start`` instead of
+    #     silently auto-focusing. The read path NEVER mutates PLAN.md;
+    #     the first pending task is only recommended as the start ID
+    #     and surfaced under ``[>] Next:`` below.
+    if top_focus is None:
+        first_pending = tl.open[0] if tl.open else None
+        if first_pending is not None:
+            lines.append("")
+            lines.append(p.yellow(
+                " [!] No active focus set. Run 'ck start <ID>' "
+                f"(e.g., 'ck start {first_pending.id}') to set focus."
+            ))
+
     lines.append("")
     lines.append(p.bold(" -> WORK CONTEXT:"))
 
@@ -2745,8 +2781,11 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
                     inline_note = entry["note"]
                     break
 
-    # 2) [!] Skipped: passed-over / stranded opens, BY NAME (capped,
-    #    closest to the focus first). Tasks rendered in the
+    # 2) [!] Skipped: opens genuinely passed over between the last
+    #    completion and the explicit focus, BY NAME (capped, closest
+    #    to the focus first). The section is OMITTED entirely when
+    #    there is no real execution gap — sequential upcoming tasks
+    #    are backlog, never skipped. Tasks rendered in the
     #    Unfocused / Paused Context block are excluded here so a
     #    paused task never doubles up in the generic skipped list.
     skipped_visible = [
@@ -2766,8 +2805,6 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
         if hidden > 0:
             lines.append(
                 p.yellow(f"       ... (+{hidden} more skipped)"))
-    else:
-        lines.append(p.muted("    [!] Skipped: (none)"))
 
     # 3) [>] Focus (explicit) or Next (auto-resolved candidate —
     #    display only, the plan is never mutated).
@@ -2801,6 +2838,16 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
         )
     else:
         lines.append(p.muted("    >> Upcoming: (none)"))
+
+    # 4b) >> Backlog: remaining unstarted count — the opens not shown
+    #     as Focus/Next, Upcoming, or Skipped. Count only, so a long
+    #     queue tail never floods the block.
+    remaining = len(ctx.backlog)
+    if remaining:
+        lines.append(
+            p.muted(f"    >> Backlog: +{remaining} tasks remaining"))
+    else:
+        lines.append(p.muted("    >> Backlog: (none)"))
 
     # 5) Unfocused / Paused Context: every still-open task that
     #    previously held focus (the paused_tasks ledger), each with
