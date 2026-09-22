@@ -167,15 +167,24 @@ class TestAnalytics(unittest.TestCase):
         self.assertEqual(len(tl.open), 1)
         self.assertEqual(len(tl.focused), 1)
 
-    def test_gap_detection(self):
-        text = "- [x] done\n- [ ] gap1\n- [ ] ok\n"
+    def test_no_gaps_for_sequential_pending_tasks(self):
+        """Status is ignored: a pending task after a done one is NOT a
+        gap. IDs run 1..3 with no hole, so there is no gap."""
+        text = "- [x] done\n- [ ] pending1\n- [ ] pending2\n"
         tl = parse_plan(text)
-        self.assertEqual(tl.gap_ids(), [2, 3])
+        self.assertEqual([t.id for t in tl.tasks], [1, 2, 3])
+        self.assertEqual(tl.gap_ids(), [])
 
     def test_no_gaps_when_all_open_before_done(self):
         text = "- [ ] a\n- [ ] b\n- [x] c\n"
         tl = parse_plan(text)
         self.assertEqual(tl.gap_ids(), [])
+
+    def test_literal_id_gap_detected(self):
+        """A missing integer ID is the ONLY thing that counts as a gap."""
+        tl = parse_plan("- [x] a\n- [ ] b\n- [ ] c\n- [ ] d\n")
+        tl.remove(3)  # IDs become 1, 2, 4
+        self.assertEqual(tl.gap_ids(), [3])
 
 
 class TestRenderer(unittest.TestCase):

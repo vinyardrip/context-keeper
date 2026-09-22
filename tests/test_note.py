@@ -581,12 +581,11 @@ class TestPausedLedger(_NoteHarness):
         self.assertIn("* Note: a note", out)
         self.assertIn("- [2] b", out)
         self.assertIn("- [3] c", out)
-        # Paused tasks excluded from the generic skipped list.
-        self.assertNotIn("[!] Skipped (2 tasks):", out)
-        for tid in (1, 2, 3):
-            self.assertNotIn(f"       - [{tid}] ",
-                             out.split("[!] Skipped")[1].split(
-                                 "Unfocused")[0])
+        # Paused tasks excluded from the generic skipped list —
+        # with every passed-over open task paused, no Skipped section
+        # is rendered at all.
+        self.assertNotIn("[!] Skipped", out)
+        self.assertIn("- [4] d", out)
 
     def test_paused_note_survives_intermediate_switches(self):
         ck = self._ck("# P\n- [>] a\n- [ ] b\n- [ ] c\n- [ ] d\n")
