@@ -1,200 +1,235 @@
 #!/usr/bin/env bash
-# install.sh — install / check / uninstall Context Keeper (ck).
+# install.sh — standalone one-line installer for Context Keeper (ck).
 #
 # Usage:
-#   ./install.sh              # default: physical-copy ck into ~/.local/bin
-#   ./install.sh check        # verify dependencies
-#   ./install.sh uninstall    # remove the installation
+#   curl -sSL https://raw.githubusercontent.com/vinyardrip/context-keeper/main/install.sh | bash
+#   ./install.sh              # same result when run from a checkout
+#   ./install.sh --help
 #
-# This script does NOT require sudo. It installs a PHYSICAL COPY of the
-# launcher at ${USER_BIN:-~/.local/bin}/ck (a regular executable file,
-# NEVER a symlink) plus a static snapshot of the cklib package at
-# ~/.local/share/ck/cklib, so the installed command stays decoupled
-# from this checkout until the install (or `ck update`) is re-run.
-# The uninstall step removes the copy, the snapshot, and any legacy
-# ~/.local/bin/ck-dev dev entrypoint.
+# The source is downloaded as a STREAM (``curl … | tar -xz``) straight
+# into ``~/.local/share/context-keeper`` — no temporary ``.tar.gz`` on
+# disk and no cloned ``.git`` directory. The top-level archive component
+# is stripped so the files unpack directly into the install directory.
+#
+# A symlink ``~/.local/bin/ck`` is created (or updated) pointing at the
+# launcher ``~/.local/share/context-keeper/ck``; the launcher carries a
+# ``#!/usr/bin/env python3`` shebang and is marked executable, so the
+# ``ck`` command runs it through ``python3``.
+#
+# No sudo, no root. Works on POSIX environments (Linux, macOS, WSL,
+# Git Bash). Re-running is idempotent: the codebase is refreshed in
+# place while user runtime data (``.ck/``) is preserved.
+#
+# Overrides (used by tests and custom installs):
+#   CK_INSTALL_DIR  source directory   (default: ~/.local/share/context-keeper)
+#   CK_BIN_DIR      symlink directory  (default: ~/.local/bin)
+#   CK_TARBALL_URL  source tarball URL (default: GitHub main archive)
+#   CK_REPO_OWNER / CK_REPO_BRANCH     GitHub owner / branch
 
 set -euo pipefail
 
-# Resolve the directory holding this script.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BIN_DIR="${USER_BIN:-${HOME}/.local/bin}"
-CK_TARGET="${BIN_DIR}/ck"
-CK_DEV_TARGET="${BIN_DIR}/ck-dev"
-SNAPSHOT_DIR="${HOME}/.local/share/ck"
-CK_BIN_SRC="${SCRIPT_DIR}/ck"
-CK_LIB_SRC="${SCRIPT_DIR}/cklib"
+REPO_OWNER="${CK_REPO_OWNER:-vinyardrip}"
+REPO_NAME="context-keeper"
+REPO_BRANCH="${CK_REPO_BRANCH:-main}"
+TARBALL_URL="${CK_TARBALL_URL:-https://github.com/${REPO_OWNER}/${REPO_NAME}/archive/refs/heads/${REPO_BRANCH}.tar.gz}"
 
-log()  { printf '%s\n' "$*"; }
-ok()   { printf '  \033[32m\u2713\033[0m %s\n' "$*"; }
-warn() { printf '  \033[33m!\033[0m %s\n' "$*"; }
-fail() { printf '  \033[31m\u2717\033[0m %s\n' "$*"; }
+ok()   { printf '[ok]  %s\n' "$*"; }
+warn() { printf '[!]   %s\n' "$*"; }
+fail() { printf '[x]   %s\n' "$*" >&2; }
+info() { printf '      %s\n' "$*"; }
 
-ensure_local_bin() {
-    mkdir -p "${BIN_DIR}"
+usage() {
+    printf 'Usage: %s [install|uninstall]\n\n' "${0##*/}"
+    printf 'Installs Context Keeper into ~/.local (no sudo required):\n'
+    printf '  source  -> ~/.local/share/context-keeper\n'
+    printf '  symlink -> ~/.local/bin/ck\n'
+    printf '\nActions:\n'
+    printf '  install      download and install (default)\n'
+    printf '  uninstall    remove the source tree and the symlink\n'
+    printf '\nOptions:\n'
+    printf '  -h, --help   show this help and exit\n'
 }
 
 # ---------------------------------------------------------------------- #
-# default action: install (physical copy — no symlinks)                  #
+# prerequisites                                                          #
 # ---------------------------------------------------------------------- #
 
-do_install() {
-    ensure_local_bin
-
-    if [[ ! -f "${CK_BIN_SRC}" ]]; then
-        fail "Cannot locate the 'ck' entry script under ${SCRIPT_DIR}"
-        exit 1
-    fi
-    if [[ ! -d "${CK_LIB_SRC}" ]]; then
-        fail "Cannot locate the 'cklib' package under ${SCRIPT_DIR}"
-        exit 1
-    fi
-    chmod +x "${CK_BIN_SRC}" || true
-
-    # Static package snapshot (production isolation): the installed
-    # launcher resolves this copy, never the live checkout.
-    rm -rf "${SNAPSHOT_DIR}/cklib"
-    mkdir -p "${SNAPSHOT_DIR}"
-    cp -R "${CK_LIB_SRC}" "${SNAPSHOT_DIR}/cklib"
-    find "${SNAPSHOT_DIR}" -type d -name '__pycache__' -prune \
-        -exec rm -rf {} + 2>/dev/null || true
-
-    # Force-remove any existing entry (symlink or file): the target
-    # must be a fresh regular file — never a copy THROUGH a symlink.
-    rm -f "${CK_TARGET}"
-    cp "${CK_BIN_SRC}" "${CK_TARGET}"
-    chmod 0755 "${CK_TARGET}"
-
-    ok "Installed (physical copy): ${CK_TARGET}"
-    ok "Package snapshot: ${SNAPSHOT_DIR}/cklib"
-    warn "Production is a static snapshot: re-run the install (or \`ck update\`) after changing this checkout."
-
-    # PATH hint
-    if ! command -v ck >/dev/null 2>&1; then
-        if [[ ":${PATH}:" != *":${BIN_DIR}:"* ]]; then
-            warn "${BIN_DIR} is not on PATH."
-            printf 'Add this to your shell rc:\n'
-            printf '  export PATH="%s:${PATH}"\n' "${BIN_DIR}"
-        fi
-    fi
-}
-
-# ---------------------------------------------------------------------- #
-# check action: environment diagnostics                                  #
-# ---------------------------------------------------------------------- #
-
-do_check() {
-    log "Context Keeper environment check"
-    log "---------------------------------"
-
-    # Python
-    if command -v python3 >/dev/null 2>&1; then
-        py_version="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
-        py_major="$(python3 -c 'import sys; print(sys.version_info[0])')"
-        py_minor="$(python3 -c 'import sys; print(sys.version_info[1])')"
-        if [[ "${py_major}" -ge 3 && "${py_minor}" -ge 11 ]]; then
-            ok "Python 3.11+ found: ${py_version}"
-        else
-            warn "Python ${py_version} found. Python 3.11+ is recommended."
-        fi
-    else
+check_python() {
+    if ! command -v python3 >/dev/null 2>&1; then
         fail "python3 not found on PATH."
+        info "Context Keeper requires Python 3.8 or newer."
+        info "Install it first, then re-run this installer."
+        exit 1
     fi
-
-    # Git
-    if command -v git >/dev/null 2>&1; then
-        git_version="$(git --version | awk '{print $3}')"
-        ok "git found: ${git_version}"
-    else
-        fail "git not found on PATH."
+    if ! python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)' >/dev/null 2>&1; then
+        fail "Python 3.8 or newer is required (found an older python3)."
+        info "Upgrade Python, then re-run this installer."
+        exit 1
     fi
+}
 
-    # $EDITOR
-    if [[ -n "${EDITOR:-}" ]]; then
-        if command -v "${EDITOR}" >/dev/null 2>&1; then
-            ok "\$EDITOR set: ${EDITOR}"
-        else
-            warn "\$EDITOR is '${EDITOR}' but not found on PATH."
-        fi
-    else
-        warn "\$EDITOR is not set. ck edit / ck log will fall back to micro/nano/vi."
+check_command() {
+    # $1 = command name, $2 = human-readable purpose
+    if ! command -v "$1" >/dev/null 2>&1; then
+        fail "required command '$1' not found on PATH ($2)."
+        info "Install '$1' and re-run this installer."
+        exit 1
     fi
+}
 
-    # bin dir writable
-    if [[ -d "${BIN_DIR}" ]]; then
-        if [[ -w "${BIN_DIR}" ]]; then
-            ok "${BIN_DIR} is writable."
-        else
-            warn "${BIN_DIR} exists but is not writable."
-        fi
-    else
-        warn "${BIN_DIR} does not exist (will be created on install)."
-    fi
-
-    # ck installation
-    if [[ -L "${CK_TARGET}" ]]; then
-        warn "ck is a SYMLINK (legacy install): ${CK_TARGET} -> $(readlink "${CK_TARGET}")."
-        warn "Re-run the install to replace it with a physical copy."
-    elif [[ -f "${CK_TARGET}" ]]; then
-        ok "ck installed (physical copy): ${CK_TARGET}"
-        if [[ -d "${SNAPSHOT_DIR}/cklib" ]]; then
-            ok "Package snapshot present: ${SNAPSHOT_DIR}/cklib"
-        else
-            warn "Package snapshot missing: ${SNAPSHOT_DIR}/cklib (re-run the install)."
-        fi
-    else
-        warn "ck is not installed at ${CK_TARGET}."
-    fi
-
-    log "---------------------------------"
-    log "Check complete."
+check_prerequisites() {
+    check_python
+    check_command curl "needed to download the source"
+    check_command tar  "needed to unpack the source"
 }
 
 # ---------------------------------------------------------------------- #
-# uninstall action                                                       #
+# install                                                                #
 # ---------------------------------------------------------------------- #
+
+prepare_target() {
+    mkdir -p "$INSTALL_DIR"
+    # Idempotent refresh: drop the previous codebase but keep user
+    # runtime data (.ck/) so re-running updates cleanly.
+    find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 ! -name '.ck' \
+        -exec rm -rf {} + 2>/dev/null || true
+}
+
+download_and_extract() {
+    # Preserve an existing .ck/ tree: exclude it from extraction so the
+    # archive cannot overwrite user runtime data on re-install.
+    local excludes=""
+    if [ -d "${INSTALL_DIR}/.ck" ]; then
+        excludes="--exclude=*/.ck --exclude=*/.ck/*"
+    fi
+
+    info "Downloading ${TARBALL_URL}"
+    # shellcheck disable=SC2086  # intentional word splitting of $excludes
+    if ! curl -fsSL "$TARBALL_URL" \
+            | tar -xz -C "$INSTALL_DIR" --strip-components=1 $excludes; then
+        fail "download or extraction failed."
+        info "Check your network connection and try again."
+        exit 1
+    fi
+}
+
+link_launcher() {
+    if [ ! -f "${INSTALL_DIR}/ck" ]; then
+        fail "extraction did not produce ${INSTALL_DIR}/ck."
+        exit 1
+    fi
+
+    mkdir -p "$BIN_DIR"
+    if [ -d "$CK_LINK" ] && [ ! -L "$CK_LINK" ]; then
+        fail "${CK_LINK} is a directory; refusing to replace it."
+        exit 1
+    fi
+
+    chmod +x "${INSTALL_DIR}/ck"
+    # Symlink to the launcher: the launcher resolves its own path, so
+    # the adjacent cklib/ package under INSTALL_DIR is what executes.
+    ln -sf "${INSTALL_DIR}/ck" "$CK_LINK"
+    ok "Linked ${CK_LINK} -> ${INSTALL_DIR}/ck"
+}
 
 do_uninstall() {
-    local target
-    for target in "${CK_TARGET}" "${CK_DEV_TARGET}"; do
-        if [[ ! -e "${target}" && ! -L "${target}" ]]; then
-            warn "Not installed at ${target}."
-            continue
-        fi
-        if [[ -d "${target}" && ! -L "${target}" ]]; then
-            fail "${target} is a directory. Refusing to delete."
-            continue
-        fi
-        rm -f "${target}"
-        ok "Removed: ${target}"
-    done
+    if [ -L "$CK_LINK" ]; then
+        rm -f "$CK_LINK"
+        ok "Removed symlink ${CK_LINK}"
+    elif [ -e "$CK_LINK" ]; then
+        warn "${CK_LINK} is not a symlink; leaving it untouched."
+    else
+        warn "Nothing installed at ${CK_LINK}."
+    fi
 
-    if [[ -d "${SNAPSHOT_DIR}/cklib" ]]; then
-        rm -rf "${SNAPSHOT_DIR}"
-        ok "Removed package snapshot: ${SNAPSHOT_DIR}"
+    if [ -d "$INSTALL_DIR" ]; then
+        rm -rf "$INSTALL_DIR"
+        ok "Removed ${INSTALL_DIR}"
     fi
 }
 
 # ---------------------------------------------------------------------- #
-# dispatch                                                               #
+# PATH guidance                                                          #
 # ---------------------------------------------------------------------- #
 
-case "${1:-install}" in
-    install|"")
-        do_install
-        ;;
-    check)
-        do_check
-        ;;
-    uninstall|remove|rm)
-        do_uninstall
-        ;;
-    -h|--help|help)
-        printf 'Usage: %s [install|check|uninstall]\n' "$0"
-        ;;
-    *)
-        printf 'Unknown action: %s\n' "$1" >&2
-        printf 'Usage: %s [install|check|uninstall]\n' "$0" >&2
-        exit 2
-        ;;
-esac
+shell_name() {
+    local s="${SHELL:-${0:-}}"
+    [ -n "$s" ] && printf '%s' "${s##*/}"
+}
+
+path_hint() {
+    case ":${PATH:-}:" in
+        *":${BIN_DIR}:"*)
+            ok "${BIN_DIR} is already on your PATH."
+            return 0
+            ;;
+    esac
+
+    warn "${BIN_DIR} is not on your PATH."
+    case "$(shell_name)" in
+        fish)
+            info "Add it to your fish PATH with:"
+            printf '        fish_add_path "%s"\n' "$BIN_DIR"
+            ;;
+        zsh)
+            info "Add it to ~/.zshrc with:"
+            printf '        echo '\''export PATH="%s:$PATH"'\'' >> %s/.zshrc\n' \
+                "$BIN_DIR" "$HOME_DIR"
+            ;;
+        *)
+            info "Add it to ~/.bashrc with:"
+            printf '        echo '\''export PATH="%s:$PATH"'\'' >> %s/.bashrc\n' \
+                "$BIN_DIR" "$HOME_DIR"
+            ;;
+    esac
+    info "Then reload it (e.g. 'source ~/.bashrc') or open a new terminal."
+}
+
+# ---------------------------------------------------------------------- #
+# main                                                                   #
+# ---------------------------------------------------------------------- #
+
+main() {
+    case "${1:-}" in
+        -h|--help|help)
+            usage
+            exit 0
+            ;;
+    esac
+
+    if [ -z "${HOME:-}" ]; then
+        fail "\$HOME is not set; cannot determine install paths."
+        exit 1
+    fi
+
+    HOME_DIR="${HOME}"
+    INSTALL_DIR="${CK_INSTALL_DIR:-${HOME_DIR}/.local/share/context-keeper}"
+    BIN_DIR="${CK_BIN_DIR:-${HOME_DIR}/.local/bin}"
+    CK_LINK="${BIN_DIR}/ck"
+
+    case "${1:-}" in
+        ""|install)
+            ;;
+        uninstall|remove|rm)
+            do_uninstall
+            return 0
+            ;;
+        *)
+            fail "unknown argument: $1"
+            usage >&2
+            exit 2
+            ;;
+    esac
+
+    check_prerequisites
+    prepare_target
+    download_and_extract
+    link_launcher
+    path_hint
+
+    printf '\n'
+    ok "Context Keeper installed."
+    info "Run 'ck -v' to verify the installation."
+}
+
+main "$@"
