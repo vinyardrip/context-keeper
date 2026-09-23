@@ -298,7 +298,10 @@ class TestDevModeRegistryIntegration(_SandboxFixtureBase):
         ck = ContextKeeper(root=REPO_ROOT)
         out = ck.dashboard()
         self.assertIn("alpha", out)
-        self.assertIn("[MISSING] orphaned-deleted", out)
+        # Compact project column: the tag survives, the long name is
+        # middle-ellipsis-truncated inside the ~25-char cell.
+        self.assertIn("[MISSING]", out)
+        self.assertIn("ned-deleted", out)
         # Host registry was never created.
         self.assertFalse(self.host_config_dir.exists())
 
@@ -471,7 +474,9 @@ class TestCkDevEndToEnd(_SandboxFixtureBase):
             ["dashboard"], {"CK_SANDBOX": "1"})
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("alpha", result.stdout)
-        self.assertIn("[MISSING] orphaned-deleted", result.stdout)
+        # Compact project column: tag + name tail survive truncation.
+        self.assertIn("[MISSING]", result.stdout)
+        self.assertIn("ned-deleted", result.stdout)
         # Debug/interception noise stays off stdout.
         self.assertNotIn("[DEBUG]", result.stdout)
 

@@ -283,9 +283,11 @@ class TestEnterSandbox(_SandboxAnchor):
                       "production", out)
         self.assertIn("GLOBAL DASHBOARD", out)
         # The fixture registry makes the mock projects visible
-        # out-of-the-box.
+        # out-of-the-box (compact column truncates the long missing
+        # name: tag + tail survive).
         self.assertIn("alpha", out)
-        self.assertIn("orphaned-deleted", out)
+        self.assertIn("[MISSING]", out)
+        self.assertIn("ned-deleted", out)
         self.assertLess(out.index("SANDBOX MODE ACTIVE"),
                         out.index("GLOBAL DASHBOARD"))
         # Session persisted.
@@ -953,7 +955,9 @@ class TestPlainCkInterceptor(_SandboxAnchor):
         self.assertEqual(code, 0, err)
         self.assertIn("GLOBAL DASHBOARD", out)
         self.assertIn("alpha", out)
-        self.assertIn("orphaned-deleted", out)
+        # Compact project column: tag + name tail survive truncation.
+        self.assertIn("[MISSING]", out)
+        self.assertIn("ned-deleted", out)
         self.assertNotIn("No registered projects", out)
 
     def test_st_g_works_without_env_from_inside_sandbox(self):

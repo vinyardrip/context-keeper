@@ -202,10 +202,11 @@ class TestDashboardWidth(_IsolatedHome, unittest.TestCase):
         )
 
     def test_focus_column_truncated_at_cap(self):
-        """Extreme focus titles truncate with an ellipsis: the head
-        line carries ``[<id>] [>]`` and the text line caps at 20
-        chars (spec band 18-22), never blowing up the table width."""
-        from cklib.core import _safe_parse_plan
+        """Extreme focus titles truncate from the RIGHT with a
+        trailing ellipsis: the head line carries ``[<id>] [>]`` and
+        the text line caps at 32 chars, never blowing up the table
+        width."""
+        from cklib.core import _safe_parse_plan, _FOCUS_TEXT_CAP
 
         with tempfile.TemporaryDirectory() as td:
             # Build a registry entry whose focused-task title is
@@ -223,7 +224,7 @@ class TestDashboardWidth(_IsolatedHome, unittest.TestCase):
                 parse_plan_file=_safe_parse_plan,
             )
             # Head line carries the ID + focus marker; text line caps
-            # at 20 chars with an ellipsis.
+            # at the focus cap with a TRAILING (right-side) ellipsis.
             lines = out.splitlines()
             data = [i for i, l in enumerate(lines)
                     if l.startswith("| longtitle")]
@@ -232,8 +233,9 @@ class TestDashboardWidth(_IsolatedHome, unittest.TestCase):
             self.assertIn("[2] [>]", head_cell)
             self.assertNotIn("x", head_cell)
             text_cell = lines[data[0] + 1].split("|")[2]
-            self.assertLessEqual(len(text_cell.strip()), 20)
-            self.assertIn("...", text_cell)
+            self.assertLessEqual(len(text_cell.strip()), _FOCUS_TEXT_CAP)
+            self.assertTrue(text_cell.strip().endswith("..."),
+                            f"ellipsis must trail, got {text_cell!r}")
 
     def test_long_project_name_truncated(self):
         out = self._render_with([
@@ -245,12 +247,61 @@ class TestDashboardWidth(_IsolatedHome, unittest.TestCase):
                 if l.startswith("| a-very-long")]
         self.assertTrue(data)
         project_cell = lines[data[0]].split("|")[1]
-        self.assertLessEqual(len(project_cell.strip()), 40)
+        self.assertLessEqual(len(project_cell.strip()), 25)
         self.assertIn("...", project_cell)
+
+    def test_path_line_always_two_segment_form(self):
+        """The path line renders the FIXED ~/.../parent/project form
+        for EVERY path — short and long — and never exceeds the
+        compact ~25-char Project cell."""
+        out = self._render_with([
+            "p",                        # short path, still contracts
+            "a-very-long-project-directory-name-that-keeps-going",
+        ])
+        def _is_path_line(l: str) -> bool:
+            cell = l.split("|")[1] if l.startswith("|") else ""
+            return cell.lstrip().startswith(("/...", "~/..."))
+
+        path_lines = [l for l in out.splitlines() if _is_path_line(l)]
+        self.assertEqual(len(path_lines), 2,
+                         f"expected two contracted path lines:\n{out}")
+        for line in path_lines:
+            # "  " indent + path, inside the 25-char project cell.
+            cell = line.split("|")[1]
+            self.assertLessEqual(len(cell.rstrip()), 25 + 2)
+            self.assertTrue(
+                cell.strip().startswith(("/.../", "~/...")),
+                f"path line not in ~/.../parent/project form: {cell!r}",
+            )
+            # Exactly two segments after the /.../ marker.
+            body = cell.strip().split("/.../", 1)[1]
+            self.assertEqual(len(body.split("/")), 2, body)
+
+    def test_path_line_keeps_parent_and_project_segments(self):
+        """Deeply nested paths keep the LAST TWO segments: the
+        immediate parent dir plus the project dir."""
+        out = self._render_with(["myproject"])
+        line = next(l for l in out.splitlines()
+                    if l.startswith("|")
+                    and l.split("|")[1].lstrip().startswith(("/...", "~/...")))
+        cell = line.split("|")[1].strip()
+        # The registry fixture nests under a tmp dir; the last two
+        # segments must be <tmp-parent>/myproject.
+        self.assertTrue(cell.endswith("/myproject"), cell)
+        self.assertIn("/", cell.split("/.../", 1)[1])
 
     def test_short_data_fits_without_ellipsis(self):
         out = self._render_with(["p"])
-        self.assertNotIn("...", out)
+        # The fixed two-segment path contraction itself contributes
+        # an ellipsis ("/.../<parent>/<project>") — no OTHER cell may.
+        table_lines = [l for l in out.splitlines()
+                       if l.startswith("|")]
+        for line in table_lines:
+            for cell in line.strip("|").split("|"):
+                cell = cell.strip()
+                if cell.startswith("/...") or cell.startswith("~/..."):
+                    continue  # the path line's structural ellipsis
+                self.assertNotIn("...", cell)
         self.assertIn("| p ", out)
 
     def test_table_lines_bounded(self):
@@ -273,7 +324,16 @@ class TestDashboardWidth(_IsolatedHome, unittest.TestCase):
 
     def test_short_data_fits_without_ellipsis(self):
         out = self._render_with(["p"])
-        self.assertNotIn("...", out)
+        # The fixed two-segment path contraction itself contributes
+        # an ellipsis ("/.../<parent>/<project>") — no OTHER cell may.
+        table_lines = [l for l in out.splitlines()
+                       if l.startswith("|")]
+        for line in table_lines:
+            for cell in line.strip("|").split("|"):
+                cell = cell.strip()
+                if cell.startswith("/...") or cell.startswith("~/..."):
+                    continue  # the path line's structural ellipsis
+                self.assertNotIn("...", cell)
         self.assertIn("| p ", out)
 
     def test_single_table_line_stays_bounded(self):
