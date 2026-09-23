@@ -3043,6 +3043,23 @@ def _truncate(text: str, width: int) -> str:
     return "..." + text[-(width - 3):]
 
 
+def _truncate_right(text: str, width: int) -> str:
+    """Right-side truncation: keep the START, ellipsis at the END.
+
+    ``"Написать доп. шаблоны"`` at width 18 → ``"Написать доп. ...``
+    — the informative head of a task title survives and the ellipsis
+    marks the cut at the visible right boundary. Never returns a
+    string longer than ``width``; the marker is plain ASCII ``...``.
+    """
+    if width <= 0:
+        return ""
+    if len(text) <= width:
+        return text
+    if width <= 3:
+        return "." * width
+    return text[:width - 3] + "..."
+
+
 def _truncate_ellipsis(text: str, width: int) -> str:
     """Fit ``text`` into ``width`` columns with a middle ASCII ellipsis.
 
@@ -3251,12 +3268,15 @@ def read_active_task_note(project_root: Path) -> Optional[dict]:
 _DASH_HEADERS = ("Project", "Focus Task", "Progress", "Last Active")
 _DASH_KEYS = ("project", "focus", "progress", "last")
 
-# Content caps applied BEFORE width computation: the Focus Task text
-# truncates at 20 chars (spec band 18-22; the head line carries the
-# ``[<id>] [>]`` marker), the Project cell keeps BOTH lines (name and
-# smart path) at 40. Progress and Last Active are naturally short.
-_FOCUS_TEXT_CAP = 20
-_PROJECT_CAP = 40
+# Content caps applied BEFORE width computation: the Project cell
+# stays COMPACT (name line ~25 chars; the contracted path line adds
+# only the ~/.../ marker) so a long path can never expand the table
+# and starve the Focus Task column, which absorbs the liberated space
+# with a larger text cap (right-side ``...`` truncation; the head
+# line carries the ``[<id>] [>]`` marker). Progress and Last Active
+# are naturally short.
+_FOCUS_TEXT_CAP = 32
+_PROJECT_CAP = 25
 
 _DASH_FOOTER_TIP = (
     "[i] Missing a project? Navigate to its folder and run "
@@ -3279,26 +3299,43 @@ def _tilde_path(path: str) -> str:
 
 
 def _smart_path(path: str, width: int) -> str:
-    """Dashboard path line: ``~``-contracted and smartly truncated.
+    """Dashboard path line: FIXED two-segment contraction.
 
-    Long paths collapse to ``~/.../<parent_dir>/<project_dir>`` — the
-    immediate parent directory is ALWAYS kept so two registered
-    projects with the same folder name stay distinguishable. Short
-    paths pass through unchanged; a still-too-long contraction falls
-    back to end-keeping truncation (the ``parent/project`` tail
-    survives).
+    ALWAYS renders ``~/.../<parent_dir>/<project_dir>`` — the last
+    two RAW path segments are extracted unconditionally (no
+    length-based conditional on the input; short paths contract
+    too, so the layout never varies row to row) and the home prefix
+    is rendered as a literal ``~`` marker. The immediate parent
+    directory is kept so two registered projects with the same
+    folder name stay distinguishable.
+
+    Over-long segments are trimmed INDIVIDUALLY (head-keeping with a
+    trailing ``...``), so BOTH segments always survive and the whole
+    line stays inside a compact ~25-char envelope — the parent and
+    project structure is a hard invariant, never sacrificed to a
+    length check. ``width`` (the Project cell budget) only decides
+    the per-segment trimming; the two-segment shape is constant.
     """
-    p = _tilde_path(path)
-    if len(p) <= width:
-        return p
-    segments = [seg for seg in p.split("/") if seg]
+    segments = [seg for seg in path.split("/") if seg]
     tail = "/".join(segments[-2:]) if len(segments) >= 2 \
-        else (segments[-1] if segments else p)
-    prefix = "~" if p.startswith("~") else ""
-    contracted = f"{prefix}/.../{tail}" if prefix else f"/.../{tail}"
-    if len(contracted) <= width:
-        return contracted
-    return _truncate(contracted, width)
+        else (segments[-1] if segments else path)
+    prefix = "~/.../" if _tilde_path(path).startswith("~") else "/.../"
+    contracted = prefix + tail
+    budget = max(width - len(prefix) if width else 0, 0)
+    if budget and len(tail) > budget:
+        # Split the budget between parent and project, keeping the
+        # full structure: <parent-trim>/<project-trim>.
+        parts = tail.split("/")
+        if len(parts) == 2:
+            parent, project = parts
+            parent_budget = max(budget // 2 - 1, 4)
+            project_budget = max(budget - parent_budget - 1, 4)
+            tail = (f"{_truncate_right(parent, parent_budget)}"
+                    f"/{_truncate_right(project, project_budget)}")
+        else:
+            tail = _truncate_right(tail, budget)
+        contracted = prefix + tail
+    return contracted
 
 
 def _render_dashboard_table(states: list) -> str:
@@ -3323,7 +3360,9 @@ def _render_dashboard_table(states: list) -> str:
         if s["condition"] == "missing":
             name = f"[MISSING] {name}"
         name_line = _truncate_ellipsis(name, _PROJECT_CAP)
-        path_line = "  " + _smart_path(entry.path, _PROJECT_CAP)
+        # The two-space indent counts against the cell cap so the
+        # Project column never exceeds _PROJECT_CAP characters.
+        path_line = "  " + _smart_path(entry.path, _PROJECT_CAP - 2)
 
         last = _relative_time(entry.last_seen)
 
@@ -3337,7 +3376,7 @@ def _render_dashboard_table(states: list) -> str:
             if tl_local.focused:
                 t = tl_local.focused[0]
                 focus_head = f"[{t.id}] [>]"
-                focus_text = _truncate_ellipsis(t.title, _FOCUS_TEXT_CAP)
+                focus_text = _truncate_right(t.title, _FOCUS_TEXT_CAP)
             else:
                 focus_head, focus_text = "(no focus)", ""
             done_count = len(tl_local.done)

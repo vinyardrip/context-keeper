@@ -1105,7 +1105,9 @@ class TestCkDevSessionLifecycle(_WrapperBase):
         # The populated dashboard (not the empty-registry message).
         self.assertIn("GLOBAL DASHBOARD", out)
         self.assertIn("alpha", out)
-        self.assertIn("[MISSING] orphaned-deleted", out)
+        # Compact project column: tag + name tail survive truncation.
+        self.assertIn("[MISSING]", out)
+        self.assertIn("ned-deleted", out)
         self.assertNotIn("No registered projects", out)
         # The interceptor banner preceded it (cwd inside the sandbox).
         self.assertIn("SANDBOX MODE ACTIVE", out)
