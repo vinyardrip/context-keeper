@@ -255,8 +255,10 @@ class TestDashboardTable(_IsolatedRegistry, unittest.TestCase):
             # [>]`` on the head line, the (truncated) text below.
             self.assertIn("[2] [>]", out)
             self.assertIn("implement feature X", out)
-            # Progress renders as a compact done/total (pct%) ratio.
-            self.assertIn("0/2 (0.0%)", out)
+            # Progress renders as a compact TWO-LINE ratio:
+            # ``done/total`` on line 1, ``(pct%)`` on line 2.
+            self.assertIn("0/2", out)
+            self.assertIn("(0.0%)", out)
 
     def test_dashboard_no_focus(self):
         with tempfile.TemporaryDirectory() as td:
@@ -345,8 +347,9 @@ class TestDashboardTable(_IsolatedRegistry, unittest.TestCase):
             ck = ContextKeeper()
             ck.register(path=target, name="empty")
             out = self._render(ck)
-            # Empty plan: 0/0 tasks, no focus.
-            self.assertIn("0/0 (0.0%)", out)
+            # Empty plan: 0/0 tasks, no focus (two-line progress).
+            self.assertIn("0/0", out)
+            self.assertIn("(0.0%)", out)
             self.assertIn("(no focus)", out)
 
     def test_dashboard_active_marker(self):
