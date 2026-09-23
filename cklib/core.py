@@ -3129,12 +3129,17 @@ def _render_dashboard(ck: Optional[ContextKeeper], *, list_projects,
 
     1. Project      — line 1: name (``*`` appended for the cwd
                       project); line 2: ``~``-contracted smart path
-                      (``~/.../<parent>/<project>``), indented two
-                      spaces
+                      (``~/../<parent>/<project>``), flush left
     2. Focus Task   — line 1: ``[<id>] [>]`` (or ``(no focus)``);
-                      line 2: ellipsis-truncated task text
-    3. Progress     — compact ``<done>/<total> (<pct>%)``
+                      line 2: right-side-ellipsis-truncated task text
+    3. Progress     — compact two-line form: ``<done>/<total>`` on
+                      line 1 and ``(<pct>%)`` on line 2
     4. Last Active  — compact relative time (``2m ago``, ``yesterday``)
+
+    The whole grid fits comfortably in 80 columns: Project (25),
+    Progress (9), and Last Active (dynamic) stay tight while
+    **Focus Task is the fluid column** that absorbs the rest of the
+    available space and right-truncates its task text to fit.
 
     A footer tip below the table points at ``ck init`` /
     ``ck register``.
@@ -3268,15 +3273,29 @@ def read_active_task_note(project_root: Path) -> Optional[dict]:
 _DASH_HEADERS = ("Project", "Focus Task", "Progress", "Last Active")
 _DASH_KEYS = ("project", "focus", "progress", "last")
 
-# Content caps applied BEFORE width computation: the Project cell
-# stays COMPACT (name line ~25 chars; the contracted path line adds
-# only the ~/.../ marker) so a long path can never expand the table
-# and starve the Focus Task column, which absorbs the liberated space
-# with a larger text cap (right-side ``...`` truncation; the head
-# line carries the ``[<id>] [>]`` marker). Progress and Last Active
-# are naturally short.
-_FOCUS_TEXT_CAP = 32
+# Hard caps for the NARROW columns — kept tight so the table fits
+# inside an 80-column terminal (Alacritty etc.) without line wrapping.
+#
+# - Project: 25 chars (name + ` *` cwd marker; path line is a separate
+#   ``~/../parent/project`` contraction sharing the same column cap)
+# - Progress: 9 chars (hardcoded two-line form: ``100/100`` on line 1
+#   and ``(100.0%)`` on line 2 — 7 and 8 chars max, 9 is the safety
+#   pad)
+# - Last Active: 16 chars (the rare > 30-day absolute timestamp form
+#   ``2025-12-04 11:30``; common short forms like ``5m ago`` /
+#   ``yesterday`` come in at 6-9 chars naturally)
+#
+# **Focus Task is the FLUID column.** Its text is only soft-capped
+# (see ``_FOCUS_TEXT_CAP``) and the rendered column width is the
+# remaining space within the 80-column table budget, right-truncated
+# to ``...`` if the title still overflows. Project / Progress / Last
+# Active keep their natural content width when it falls under the cap.
 _PROJECT_CAP = 25
+_PROGRESS_WIDTH = 9
+_LAST_WIDTH_CAP = 16
+_TABLE_BUDGET = 80
+_FOCUS_TEXT_CAP = 80  # soft cap; table-budget clamp is the real gate
+_FOCUS_MIN_WIDTH = 10  # never squeeze Focus below 10 chars (header len)
 
 _DASH_FOOTER_TIP = (
     "[i] Missing a project? Navigate to its folder and run "
@@ -3301,13 +3320,15 @@ def _tilde_path(path: str) -> str:
 def _smart_path(path: str, width: int) -> str:
     """Dashboard path line: FIXED two-segment contraction.
 
-    ALWAYS renders ``~/.../<parent_dir>/<project_dir>`` — the last
+    ALWAYS renders ``~/../<parent_dir>/<project_dir>`` — the last
     two RAW path segments are extracted unconditionally (no
     length-based conditional on the input; short paths contract
     too, so the layout never varies row to row) and the home prefix
-    is rendered as a literal ``~`` marker. The immediate parent
-    directory is kept so two registered projects with the same
-    folder name stay distinguishable.
+    is rendered as a literal ``~`` marker. The two-dot ``..`` marker
+    (vs the older ``...``) saves a character to keep the path line
+    compact for narrow terminals. The immediate parent directory is
+    kept so two registered projects with the same folder name stay
+    distinguishable.
 
     Over-long segments are trimmed INDIVIDUALLY (head-keeping with a
     trailing ``...``), so BOTH segments always survive and the whole
@@ -3319,7 +3340,7 @@ def _smart_path(path: str, width: int) -> str:
     segments = [seg for seg in path.split("/") if seg]
     tail = "/".join(segments[-2:]) if len(segments) >= 2 \
         else (segments[-1] if segments else path)
-    prefix = "~/.../" if _tilde_path(path).startswith("~") else "/.../"
+    prefix = "~/../" if _tilde_path(path).startswith("~") else "/../"
     contracted = prefix + tail
     budget = max(width - len(prefix) if width else 0, 0)
     if budget and len(tail) > budget:
@@ -3341,15 +3362,29 @@ def _smart_path(path: str, width: int) -> str:
 def _render_dashboard_table(states: list) -> str:
     """Compact priority table: Project | Focus Task | Progress | Last Active.
 
-    Multi-line pure-ASCII grid:
+    Multi-line pure-ASCII grid (designed for an 80-column terminal):
 
     - the ``Project`` cell carries the project name on line 1 and the
-      ``~``-contracted smart path on line 2 (indented two spaces);
+      ``~``-contracted smart path (``~/../<parent>/<project>``) on
+      line 2, both flush-left (no leading indent);
     - the ``Focus Task`` cell carries the ``[<id>] [>]`` head (or
-      ``(no focus)``) on line 1 and the truncated task text on line 2;
+      ``(no focus)``) on line 1 and the right-truncated task text on
+      line 2 — this column is the FLUID one and absorbs whatever
+      space the table budget allows;
+    - the ``Progress`` cell is a tight two-line form: ``<done>/<total>``
+      on line 1 and ``(<pct>%)`` on line 2 (column width = 9);
+    - the ``Last Active`` cell is a one-line relative timestamp;
     - an explicit horizontal divider follows EVERY project row, so
       adjacent multi-line rows never visually merge;
     - a registration tip footer follows the bottom divider.
+
+    Width strategy: each narrow column is hard-capped (see the
+    ``_PROJECT_CAP`` / ``_PROGRESS_WIDTH`` / ``_LAST_WIDTH_CAP``
+    constants); the Focus Task column is then sized to whatever room
+    is left inside ``_TABLE_BUDGET`` columns of chrome, so the whole
+    grid stays inside 80 chars regardless of project-name length.
+    Long focus titles are right-truncated with a trailing ``...`` to
+    keep the budget.
     """
     rows: list[dict] = []
     for s in states:
@@ -3360,18 +3395,20 @@ def _render_dashboard_table(states: list) -> str:
         if s["condition"] == "missing":
             name = f"[MISSING] {name}"
         name_line = _truncate_ellipsis(name, _PROJECT_CAP)
-        # The two-space indent counts against the cell cap so the
-        # Project column never exceeds _PROJECT_CAP characters.
-        path_line = "  " + _smart_path(entry.path, _PROJECT_CAP - 2)
+        # Path line: FLUSH LEFT (no leading indent) and contracted
+        # to the two-segment form ``~/../parent/project``. The full
+        # ``_PROJECT_CAP`` is the column budget; the path shares it
+        # with the name line (different rows, same column width).
+        path_line = _smart_path(entry.path, _PROJECT_CAP)
 
         last = _relative_time(entry.last_seen)
 
         if s["condition"] == "missing":
             focus_head, focus_text = "n/a", ""
-            progress = "missing"
+            progress_lines = ("missing",)
         elif s["condition"] == "corrupt":
             focus_head, focus_text = "n/a", ""
-            progress = "corrupt"
+            progress_lines = ("corrupt",)
         else:
             if tl_local.focused:
                 t = tl_local.focused[0]
@@ -3380,21 +3417,59 @@ def _render_dashboard_table(states: list) -> str:
             else:
                 focus_head, focus_text = "(no focus)", ""
             done_count = len(tl_local.done)
-            progress = f"{done_count}/{tl_local.total} ({tl_local.completion_pct}%)"
+            # Compact two-line progress: ``<done>/<total>`` on line 1
+            # and ``(<pct>%)`` on line 2. Both fit inside the 9-char
+            # ``_PROGRESS_WIDTH`` even at the longest (``100/100`` and
+            # ``(100.0%)`` = 7 and 8 chars).
+            progress_lines = (
+                f"{done_count}/{tl_local.total}",
+                f"({tl_local.completion_pct}%)",
+            )
 
         rows.append({
             "project": (name_line, path_line),
             "focus": (focus_head, focus_text),
-            "progress": (progress,),
+            "progress": progress_lines,
             "last": (last,),
         })
 
+    # ---- width computation ------------------------------------------
+    # 1. Per-column natural width = max(header, content).
     widths: dict[str, int] = {}
     for h, k in zip(_DASH_HEADERS, _DASH_KEYS):
         widths[k] = max(
             len(h),
             *(len(line) for r in rows for line in r[k]),
         )
+
+    # 2. Apply hard caps to the narrow columns.
+    widths["project"] = min(widths["project"], _PROJECT_CAP)
+    widths["progress"] = _PROGRESS_WIDTH  # always 9 — 2-line cell
+    widths["last"] = min(widths["last"], _LAST_WIDTH_CAP)
+
+    # 3. Focus Task is the FLUID column: it absorbs the rest of the
+    #    table budget so the whole grid fits inside _TABLE_BUDGET
+    #    columns. Chrome is 5 ``+``/``|`` separators + 2 spaces of
+    #    padding on each cell (4 cells × 2 = 8 spaces of inner pad).
+    chrome = 5 + (4 * 2)  # 13
+    fixed = widths["project"] + widths["progress"] + widths["last"]
+    focus_budget = _TABLE_BUDGET - chrome - fixed
+    widths["focus"] = max(
+        min(widths["focus"], max(focus_budget, _FOCUS_MIN_WIDTH)),
+        _FOCUS_MIN_WIDTH,
+    )
+
+    # 4. Re-truncate focus content if the column shrank below the
+    #    natural content length.
+    for r in rows:
+        head, text = r["focus"]
+        if widths["focus"] < _FOCUS_MIN_WIDTH:
+            widths["focus"] = _FOCUS_MIN_WIDTH
+        if len(text) > widths["focus"]:
+            text = _truncate_right(text, widths["focus"])
+        if len(head) > widths["focus"]:
+            head = _truncate_right(head, widths["focus"])
+        r["focus"] = (head, text)
 
     def _hr() -> str:
         return "+" + "+".join("-" * (widths[k] + 2) for k in _DASH_KEYS) + "+"

@@ -175,8 +175,11 @@ class TestGapDisplay(_IsolatedHome, unittest.TestCase):
 class TestDashboardWidth(_IsolatedHome, unittest.TestCase):
     """Dashboard table columns are content-capped before layout.
 
-    Focus Task titles truncate at ~90 chars (spec band 80-100) and
-    project names at 40, so every column stays naturally bounded.
+    The compact table fits an 80-column terminal: Project (25),
+    Progress (9, two-line ``done/total`` + ``(pct%)``), Last Active
+    (dynamic, capped at 16) stay tight, and **Focus Task is the
+    fluid column** that absorbs whatever's left and right-truncates
+    long task titles with a trailing ``...``.
     """
 
     def _render_with(self, names: list) -> str:
@@ -201,11 +204,40 @@ class TestDashboardWidth(_IsolatedHome, unittest.TestCase):
             cells, ["Project", "Focus Task", "Progress", "Last Active"]
         )
 
+    def test_progress_cell_is_two_line_and_bounded(self):
+        """Progress renders as ``<done>/<total>`` on line 1 and
+        ``(<pct>%)`` on line 2, inside a <= 9-char column."""
+        from cklib.core import _safe_parse_plan, _PROGRESS_WIDTH
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "progproj"
+            root.mkdir()
+            ck = ContextKeeper(root=root)
+            ck.init()
+            for n in range(3):
+                ck.add_task(f"task {n}")
+            ck.done("2")
+            ck.register(path=root, name="progproj")
+            out = _render_dashboard(
+                ck,
+                list_projects=ckregistry.list_projects,
+                parse_plan_file=_safe_parse_plan,
+            )
+        lines = out.splitlines()
+        idx = next(i for i, l in enumerate(lines)
+                   if l.startswith("| progproj"))
+        ratio = lines[idx].split("|")[3].strip()
+        pct = lines[idx + 1].split("|")[3].strip()
+        self.assertRegex(ratio, r"^\d+/\d+$")
+        self.assertRegex(pct, r"^\(\d+(\.\d+)?%\)$")
+        self.assertLessEqual(len(ratio), _PROGRESS_WIDTH)
+        self.assertLessEqual(len(pct), _PROGRESS_WIDTH)
+
     def test_focus_column_truncated_at_cap(self):
         """Extreme focus titles truncate from the RIGHT with a
         trailing ellipsis: the head line carries ``[<id>] [>]`` and
-        the text line caps at 32 chars, never blowing up the table
-        width."""
+        the text line is clamped to the fluid column width, never
+        blowing up the table."""
         from cklib.core import _safe_parse_plan, _FOCUS_TEXT_CAP
 
         with tempfile.TemporaryDirectory() as td:
@@ -251,30 +283,34 @@ class TestDashboardWidth(_IsolatedHome, unittest.TestCase):
         self.assertIn("...", project_cell)
 
     def test_path_line_always_two_segment_form(self):
-        """The path line renders the FIXED ~/.../parent/project form
-        for EVERY path — short and long — and never exceeds the
-        compact ~25-char Project cell."""
+        """The path line renders the FIXED ~/../parent/project form
+        (two-dot marker, FLUSH LEFT) for EVERY path — short and long
+        — and never exceeds the compact 25-char Project cell."""
         out = self._render_with([
             "p",                        # short path, still contracts
             "a-very-long-project-directory-name-that-keeps-going",
         ])
         def _is_path_line(l: str) -> bool:
             cell = l.split("|")[1] if l.startswith("|") else ""
-            return cell.lstrip().startswith(("/...", "~/..."))
+            return cell.strip().startswith(("/../", "~/../"))
 
         path_lines = [l for l in out.splitlines() if _is_path_line(l)]
         self.assertEqual(len(path_lines), 2,
                          f"expected two contracted path lines:\n{out}")
         for line in path_lines:
-            # "  " indent + path, inside the 25-char project cell.
+            # Flush left: a single cell-padding space, NO indent.
             cell = line.split("|")[1]
-            self.assertLessEqual(len(cell.rstrip()), 25 + 2)
+            self.assertTrue(cell.startswith(" "),
+                            f"path line lost its cell padding: {cell!r}")
+            self.assertFalse(cell.startswith("  "),
+                             f"path line must be flush left: {cell!r}")
+            self.assertLessEqual(len(cell.rstrip()), 25 + 1)
             self.assertTrue(
-                cell.strip().startswith(("/.../", "~/...")),
-                f"path line not in ~/.../parent/project form: {cell!r}",
+                cell.strip().startswith(("/../", "~/../")),
+                f"path line not in ~/../parent/project form: {cell!r}",
             )
-            # Exactly two segments after the /.../ marker.
-            body = cell.strip().split("/.../", 1)[1]
+            # Exactly two segments after the two-dot marker.
+            body = cell.strip().split("/../", 1)[1]
             self.assertEqual(len(body.split("/")), 2, body)
 
     def test_path_line_keeps_parent_and_project_segments(self):
@@ -283,30 +319,31 @@ class TestDashboardWidth(_IsolatedHome, unittest.TestCase):
         out = self._render_with(["myproject"])
         line = next(l for l in out.splitlines()
                     if l.startswith("|")
-                    and l.split("|")[1].lstrip().startswith(("/...", "~/...")))
+                    and l.split("|")[1].strip().startswith(("/../", "~/../")))
         cell = line.split("|")[1].strip()
         # The registry fixture nests under a tmp dir; the last two
         # segments must be <tmp-parent>/myproject.
         self.assertTrue(cell.endswith("/myproject"), cell)
-        self.assertIn("/", cell.split("/.../", 1)[1])
+        self.assertIn("/", cell.split("/../", 1)[1])
 
     def test_short_data_fits_without_ellipsis(self):
         out = self._render_with(["p"])
         # The fixed two-segment path contraction itself contributes
-        # an ellipsis ("/.../<parent>/<project>") — no OTHER cell may.
+        # the ``..`` marker ("/../<parent>/<project>") — no OTHER
+        # cell may carry an ellipsis.
         table_lines = [l for l in out.splitlines()
                        if l.startswith("|")]
         for line in table_lines:
             for cell in line.strip("|").split("|"):
                 cell = cell.strip()
-                if cell.startswith("/...") or cell.startswith("~/..."):
-                    continue  # the path line's structural ellipsis
+                if cell.startswith("/../") or cell.startswith("~/../"):
+                    continue  # the path line's structural marker
                 self.assertNotIn("...", cell)
         self.assertIn("| p ", out)
 
-    def test_table_lines_bounded(self):
-        """Every table line stays under a compact bound (~170 chars:
-        90 focus + 40 project + short progress/last + chrome)."""
+    def test_table_lines_bounded_for_80_col_terminal(self):
+        """Every table line fits inside an 80-column terminal — even
+        with long project names and a wide focus column."""
         out = self._render_with([
             "context-keeper",
             "my-second-project-with-a-very-long-name",
@@ -318,29 +355,15 @@ class TestDashboardWidth(_IsolatedHome, unittest.TestCase):
         self.assertTrue(table_lines)
         for line in table_lines:
             self.assertLessEqual(
-                len(line), 170,
-                f"table line exceeds 170 chars: {len(line)}: {line!r}",
+                len(line), 80,
+                f"table line exceeds 80 cols: {len(line)}: {line!r}",
             )
-
-    def test_short_data_fits_without_ellipsis(self):
-        out = self._render_with(["p"])
-        # The fixed two-segment path contraction itself contributes
-        # an ellipsis ("/.../<parent>/<project>") — no OTHER cell may.
-        table_lines = [l for l in out.splitlines()
-                       if l.startswith("|")]
-        for line in table_lines:
-            for cell in line.strip("|").split("|"):
-                cell = cell.strip()
-                if cell.startswith("/...") or cell.startswith("~/..."):
-                    continue  # the path line's structural ellipsis
-                self.assertNotIn("...", cell)
-        self.assertIn("| p ", out)
 
     def test_single_table_line_stays_bounded(self):
         out = self._render_with(["p"])
         for line in out.splitlines():
             if line.startswith("|") or line.startswith("+"):
-                self.assertLessEqual(len(line), 85)
+                self.assertLessEqual(len(line), 80)
 
 
 class _Entry:
