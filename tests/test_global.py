@@ -251,9 +251,10 @@ class TestDashboardTable(_IsolatedRegistry, unittest.TestCase):
             ck.register(path=target, name="alpha")
 
             out = self._render(ck)
-            # Focused task renders as [<id>] [>] <text> in the Focus
-            # Task column.
-            self.assertIn("[2] [>] implement feature X", out)
+            # Focused task renders as a two-line cell: ``[<id>]
+            # [>]`` on the head line, the (truncated) text below.
+            self.assertIn("[2] [>]", out)
+            self.assertIn("implement feature X", out)
             # Progress renders as a compact done/total (pct%) ratio.
             self.assertIn("0/2 (0.0%)", out)
 

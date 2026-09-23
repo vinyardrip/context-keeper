@@ -202,8 +202,9 @@ class TestDashboardWidth(_IsolatedHome, unittest.TestCase):
         )
 
     def test_focus_column_truncated_at_cap(self):
-        """Extreme focus titles truncate with a middle ellipsis, never
-        blow up the table width."""
+        """Extreme focus titles truncate with an ellipsis: the head
+        line carries ``[<id>] [>]`` and the text line caps at 20
+        chars (spec band 18-22), never blowing up the table width."""
         from cklib.core import _safe_parse_plan
 
         with tempfile.TemporaryDirectory() as td:
@@ -221,23 +222,29 @@ class TestDashboardWidth(_IsolatedHome, unittest.TestCase):
                 list_projects=ckregistry.list_projects,
                 parse_plan_file=_safe_parse_plan,
             )
-            # Title capped at 90 chars total for the focus cell.
-            data = [l for l in out.splitlines()
+            # Head line carries the ID + focus marker; text line caps
+            # at 20 chars with an ellipsis.
+            lines = out.splitlines()
+            data = [i for i, l in enumerate(lines)
                     if l.startswith("| longtitle")]
             self.assertTrue(data)
-            focus_cell = data[0].split("|")[2]
-            self.assertLessEqual(len(focus_cell.strip()), 90)
-            self.assertIn("...", focus_cell)
+            head_cell = lines[data[0]].split("|")[2]
+            self.assertIn("[2] [>]", head_cell)
+            self.assertNotIn("x", head_cell)
+            text_cell = lines[data[0] + 1].split("|")[2]
+            self.assertLessEqual(len(text_cell.strip()), 20)
+            self.assertIn("...", text_cell)
 
     def test_long_project_name_truncated(self):
         out = self._render_with([
             "a-very-long-project-directory-name-that-keeps-going-on-and-on",
         ])
         # Project names cap at 40 chars.
-        data = [l for l in out.splitlines()
+        lines = out.splitlines()
+        data = [i for i, l in enumerate(lines)
                 if l.startswith("| a-very-long")]
         self.assertTrue(data)
-        project_cell = data[0].split("|")[1]
+        project_cell = lines[data[0]].split("|")[1]
         self.assertLessEqual(len(project_cell.strip()), 40)
         self.assertIn("...", project_cell)
 

@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.5.3-blue)]()
+[![version](https://img.shields.io/badge/version-0.5.4-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -50,7 +50,7 @@ Context Keeper (ck) acts as a bridge between your brain, AI agents, and Git, per
 - Global Registry: Cross-project dashboard (ck dashboard) backed by `~/.config/ck/projects.json`; registration is explicit
 - Fail-Closed Locking: Cross-process file locking guards registry, PLAN.md, HISTORY.md and state.json writes
 - Full Plan View: ck st --all
-- Dev Sandbox: `ck-dev` runs any command against real data read-only, redirecting all writes into a git-ignored `.sandbox/` (`ck-clean` resets it); `ck-dev sandbox setup` builds a disposable mock environment with bulk test data
+- Dev Sandbox: `ck-dev` runs any command against real data read-only, redirecting all writes into a git-ignored `.sandbox/` (`ck-clean` resets it); `ck-dev sandbox setup` builds a disposable mock environment with bulk test data; entry keeps `ROADMAP.md -> .ck/PLAN.md` safely symlinked
 
 ---
 
@@ -78,13 +78,32 @@ cd context-keeper
 ./ck install   # physical copy to ~/.local/bin/ck + cklib snapshot
 ```
 
+### Running in Dev Mode (`./ck-dev`)
+
+Never install a dev build globally — run the checkout's wrapper directly:
+
+```bash
+./ck-dev                  # enter the interactive sandbox session (exit → type 'exit')
+./ck-dev <command>        # run a single command in sandbox mode
+./ck-dev sandbox setup    # build the disposable mock environment (.sandbox/)
+./ck-clean                # purge .sandbox/ afterwards
+```
+
+On every entry the wrapper also keeps the project's internal roadmap safely linked — one canonical file, two well-known names, zero copies:
+
+```bash
+ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
+```
+
+`ROADMAP.md` (repo root) is the real file; `.ck/PLAN.md` is a symlink to it. If only a real `.ck/PLAN.md` exists, it is promoted (renamed, content preserved) to `ROADMAP.md` once and the link is created back. Nothing is moved on session exit and a divergent real `.ck/PLAN.md` is never overwritten.
+
 > Production isolation: `ck install` writes a **physical copy** of the launcher to `~/.local/bin/ck` (regular executable file, 0755 — never a symlink) and snapshots the `cklib/` package to `~/.local/share/ck/cklib`. The installed command is a static snapshot: editing this checkout does not change `~/.local/bin/ck` until you explicitly re-run `ck install` (or `ck update`).
 > The one-line installer instead symlinks `~/.local/bin/ck` at the launcher under `~/.local/share/context-keeper` — re-run the installer to update it.
 > Note: `ck` is a thin wrapper over the `cklib/` package — install from the repository (or via `pip install .`), not as a standalone single file.
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.5.3
+ck -v    # → ck version 0.5.4
 ```
 
 ---

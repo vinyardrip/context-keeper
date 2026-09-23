@@ -54,6 +54,17 @@ Session management (this wrapper itself):
                       inside a session warns instead of nesting
                       (matryoshka guard).
 
+Roadmap link (on every entry, including delegated subcommands):
+
+```
+    ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
+```
+
+    (implemented as :func:`_ensure_roadmap_symlink`, run on every
+    entry — idempotent, never destructive: no ``mv`` on session
+    exit, no file overwrites, content is never transferred or
+    clobbered).
+
 For every delegated subcommand the active sandbox project is exported
 as ``CK_SANDBOX_ACTIVE`` so nested plain-``ck`` calls banner against
 the same project without re-reading the session state.
@@ -68,6 +79,7 @@ would be a bug, not a feature.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -97,6 +109,70 @@ def _git_repo_root(start: Path) -> "Path | None":
     if not top or top.startswith("-"):
         return None
     return Path(top)
+
+
+def _ensure_roadmap_symlink(repo_root: Path) -> None:
+    """Keep the checkout's internal roadmap safely linked.
+
+    The roadmap lives at ``ROADMAP.md`` (repo root) and
+    ``.ck/PLAN.md`` reads it through a symlink — one file, two
+    well-known names, ZERO copies. ``ln -sf`` semantics, in Python:
+
+    - ``ROADMAP.md`` missing but ``.ck/PLAN.md`` a real file → the
+      plan is PROMOTED to ``ROADMAP.md`` (a one-time rename of the
+      git-tracked plan — never a delete: ``shutil.move`` keeps the
+      content intact) and the link is created;
+    - ``ROADMAP.md`` exists → the link is (re)created pointing at
+      it; an existing ``.ck/PLAN.md`` symlink is replaced, a real
+      file there is NEVER overwritten (guardrail: refuse loudly
+      instead of clobbering divergent content);
+    - best-effort by design: any failure is a warning on stderr and
+      the session continues — a broken roadmap link must never
+      block dev-mode entry.
+    """
+    roadmap = repo_root / "ROADMAP.md"
+    plan = repo_root / ".ck" / "PLAN.md"
+    try:
+        if not roadmap.exists() and not roadmap.is_symlink():
+            if plan.is_symlink():
+                # Dangling/foreign link: clean slate, nothing to keep.
+                plan.unlink()
+            elif plan.is_file():
+                # One-time migration: promote the tracked plan to the
+                # canonical ROADMAP.md, then link back to it.
+                roadmap.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(plan), str(roadmap))
+            else:
+                # Neither file exists: nothing to link (ck init will
+                # create .ck/PLAN.md later); still create the link so
+                # both names resolve once the roadmap appears.
+                pass
+        if not roadmap.exists() and not roadmap.is_symlink():
+            return  # no source file anywhere — nothing to do
+        plan.parent.mkdir(parents=True, exist_ok=True)
+        if plan.is_symlink():
+            target = os.readlink(plan)
+            target_resolved = str((plan.parent / target).resolve())
+            if target_resolved == str(roadmap.resolve()) \
+                    and plan.is_file():
+                return  # already linked correctly
+            plan.unlink()
+        elif plan.exists():
+            print(
+                "[!] ck-dev: .ck/PLAN.md is a real file while ROADMAP.md "
+                "exists — refusing to overwrite the plan. "
+                "Link it manually: ln -sf ROADMAP.md .ck/PLAN.md",
+                file=sys.stderr,
+            )
+            return
+        if roadmap.exists() or roadmap.is_symlink():
+            plan.symlink_to(roadmap)
+    except OSError as e:
+        print(
+            f"[!] ck-dev: could not set up the ROADMAP.md -> "
+            f".ck/PLAN.md link: {e}",
+            file=sys.stderr,
+        )
 
 
 def main() -> int:
@@ -152,6 +228,8 @@ def main() -> int:
     # activates dev mode itself. The forced toggle below applies to
     # delegated subcommands only.
     os.environ["CK_SANDBOX_ROOT"] = str(repo_root / SANDBOX_DIR_NAME)
+
+    _ensure_roadmap_symlink(repo_root)
 
     from cklib.cli import main as cli_main  # noqa: E402
 

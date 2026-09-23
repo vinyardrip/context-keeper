@@ -3106,13 +3106,21 @@ def _render_dashboard(ck: Optional[ContextKeeper], *, list_projects,
                       parse_plan_file, verbose: bool = False) -> str:
     """Render the global dashboard.
 
-    Default (compact table) — columns strictly by priority:
+    Default (compact table) — columns strictly by priority, rendered
+    as a two-line grid with an explicit horizontal divider between
+    every project row (multi-line rows never visually merge):
 
-    1. Project      — name, ``*`` appended for the cwd project
-    2. Focus Task   — ``[<id>] [>] <text>`` (ellipsis-truncated) or
-                      ``(no focus)``
+    1. Project      — line 1: name (``*`` appended for the cwd
+                      project); line 2: ``~``-contracted smart path
+                      (``~/.../<parent>/<project>``), indented two
+                      spaces
+    2. Focus Task   — line 1: ``[<id>] [>]`` (or ``(no focus)``);
+                      line 2: ellipsis-truncated task text
     3. Progress     — compact ``<done>/<total> (<pct>%)``
     4. Last Active  — compact relative time (``2m ago``, ``yesterday``)
+
+    A footer tip below the table points at ``ck init`` /
+    ``ck register``.
 
     Verbose (``-v`` / ``--verbose``) — one block per project with the
     full PREV/FOCUS/NEXT triad context.
@@ -3243,67 +3251,138 @@ def read_active_task_note(project_root: Path) -> Optional[dict]:
 _DASH_HEADERS = ("Project", "Focus Task", "Progress", "Last Active")
 _DASH_KEYS = ("project", "focus", "progress", "last")
 
-# Content caps applied BEFORE width computation: Focus Task truncates
-# at ~90 chars (spec band 80-100; the ``[<id>] [>]`` prefix and the
-# title tail stay readable), Project names at 40. Progress and Last
-# Active are naturally short.
-_FOCUS_CAP = 90
+# Content caps applied BEFORE width computation: the Focus Task text
+# truncates at 20 chars (spec band 18-22; the head line carries the
+# ``[<id>] [>]`` marker), the Project cell keeps BOTH lines (name and
+# smart path) at 40. Progress and Last Active are naturally short.
+_FOCUS_TEXT_CAP = 20
 _PROJECT_CAP = 40
+
+_DASH_FOOTER_TIP = (
+    "[i] Missing a project? Navigate to its folder and run "
+    "'ck init' (or 'ck register')."
+)
+
+
+def _tilde_path(path: str) -> str:
+    """Contract the user's home directory prefix to ``~``.
+
+    ``/home/you/deep/proj`` → ``~/deep/proj``; paths outside the home
+    directory pass through unchanged.
+    """
+    home = os.path.expanduser("~")
+    if path == home:
+        return "~"
+    if path.startswith(home + os.sep):
+        return "~" + path[len(home):]
+    return path
+
+
+def _smart_path(path: str, width: int) -> str:
+    """Dashboard path line: ``~``-contracted and smartly truncated.
+
+    Long paths collapse to ``~/.../<parent_dir>/<project_dir>`` — the
+    immediate parent directory is ALWAYS kept so two registered
+    projects with the same folder name stay distinguishable. Short
+    paths pass through unchanged; a still-too-long contraction falls
+    back to end-keeping truncation (the ``parent/project`` tail
+    survives).
+    """
+    p = _tilde_path(path)
+    if len(p) <= width:
+        return p
+    segments = [seg for seg in p.split("/") if seg]
+    tail = "/".join(segments[-2:]) if len(segments) >= 2 \
+        else (segments[-1] if segments else p)
+    prefix = "~" if p.startswith("~") else ""
+    contracted = f"{prefix}/.../{tail}" if prefix else f"/.../{tail}"
+    if len(contracted) <= width:
+        return contracted
+    return _truncate(contracted, width)
 
 
 def _render_dashboard_table(states: list) -> str:
-    """Compact priority table: Project | Focus Task | Progress | Last Active."""
+    """Compact priority table: Project | Focus Task | Progress | Last Active.
+
+    Multi-line pure-ASCII grid:
+
+    - the ``Project`` cell carries the project name on line 1 and the
+      ``~``-contracted smart path on line 2 (indented two spaces);
+    - the ``Focus Task`` cell carries the ``[<id>] [>]`` head (or
+      ``(no focus)``) on line 1 and the truncated task text on line 2;
+    - an explicit horizontal divider follows EVERY project row, so
+      adjacent multi-line rows never visually merge;
+    - a registration tip footer follows the bottom divider.
+    """
     rows: list[dict] = []
     for s in states:
         entry = s["entry"]
         tl_local = s["tl"]
 
-        project = entry.name + (" *" if s["is_cwd"] else "")
+        name = entry.name + (" *" if s["is_cwd"] else "")
         if s["condition"] == "missing":
-            project = f"[MISSING] {project}"
+            name = f"[MISSING] {name}"
+        name_line = _truncate_ellipsis(name, _PROJECT_CAP)
+        path_line = "  " + _smart_path(entry.path, _PROJECT_CAP)
+
         last = _relative_time(entry.last_seen)
 
         if s["condition"] == "missing":
-            focus, progress = "n/a", "missing"
+            focus_head, focus_text = "n/a", ""
+            progress = "missing"
         elif s["condition"] == "corrupt":
-            focus, progress = "n/a", "corrupt"
+            focus_head, focus_text = "n/a", ""
+            progress = "corrupt"
         else:
             if tl_local.focused:
                 t = tl_local.focused[0]
-                focus = f"[{t.id}] [>] {t.title}"
+                focus_head = f"[{t.id}] [>]"
+                focus_text = _truncate_ellipsis(t.title, _FOCUS_TEXT_CAP)
             else:
-                focus = "(no focus)"
+                focus_head, focus_text = "(no focus)", ""
             done_count = len(tl_local.done)
             progress = f"{done_count}/{tl_local.total} ({tl_local.completion_pct}%)"
 
         rows.append({
-            "project": _truncate_ellipsis(project, _PROJECT_CAP),
-            "focus": _truncate_ellipsis(focus, _FOCUS_CAP),
-            "progress": progress,
-            "last": last,
+            "project": (name_line, path_line),
+            "focus": (focus_head, focus_text),
+            "progress": (progress,),
+            "last": (last,),
         })
 
     widths: dict[str, int] = {}
     for h, k in zip(_DASH_HEADERS, _DASH_KEYS):
-        widths[k] = max(len(h), *(len(r[k]) for r in rows))
+        widths[k] = max(
+            len(h),
+            *(len(line) for r in rows for line in r[k]),
+        )
 
     def _hr() -> str:
         return "+" + "+".join("-" * (widths[k] + 2) for k in _DASH_KEYS) + "+"
 
-    def _row(values: tuple) -> str:
-        cells = [
-            f" {v.ljust(widths[k])} "
-            for v, k in zip(values, _DASH_KEYS)
-        ]
-        return "|" + "|".join(cells) + "|"
+    def _row(values: tuple) -> list:
+        """Render one grid row; multi-line cells stack vertically."""
+        cells = [c if isinstance(c, tuple) else (c,) for c in values]
+        height = max(len(cell) for cell in cells)
+        lines = []
+        for i in range(height):
+            row_cells = [
+                " " + (cell[i] if i < len(cell) else "").ljust(widths[k]) + " "
+                for cell, k in zip(cells, _DASH_KEYS)
+            ]
+            lines.append("|" + "|".join(row_cells) + "|")
+        return lines
 
-    out: list[str] = ["GLOBAL DASHBOARD"]
-    out.append(_hr())
-    out.append(_row(_DASH_HEADERS))
-    out.append(_hr())
+    out: list[str] = [
+        "GLOBAL DASHBOARD",
+        _hr(),
+        *_row(tuple((h,) for h in _DASH_HEADERS)),
+        _hr(),
+    ]
     for r in rows:
-        out.append(_row((r["project"], r["focus"], r["progress"], r["last"])))
-    out.append(_hr())
+        out.extend(_row((r["project"], r["focus"], r["progress"], r["last"])))
+        out.append(_hr())
+    out.append(_DASH_FOOTER_TIP)
     return "\n".join(out)
 
 
