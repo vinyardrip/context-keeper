@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.5.2-blue)]()
+[![version](https://img.shields.io/badge/version-0.5.3-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -57,34 +57,34 @@ Context Keeper (ck) acts as a bridge between your brain, AI agents, and Git, per
 ## 📋 Requirements
 - Python 3.8+
 - Git (optional — ck save gracefully skips commits without it)
+- curl + tar (only for the one-line installer)
 - fzf, jq (optional integrations)
 
 ---
 
 ## 📦 Installation
 
-### Option 1 — Clone (recommended)
+### One-line install (recommended)
+```bash
+curl -sSL https://raw.githubusercontent.com/vinyardrip/context-keeper/main/install.sh | bash
+```
+Downloads the `main` source as a **stream** straight into `~/.local/share/context-keeper` (no temporary `.tar.gz`, no cloned `.git`) and links `~/.local/bin/ck` at the launcher — no sudo. If `~/.local/bin` is not on your `$PATH`, the installer prints the exact command to add it (bash / zsh / `fish_add_path`). Re-running the installer updates the code in place and preserves your runtime data (`.ck/`).
+
+### Developer Setup / Manual Installation
 ```bash
 git clone https://github.com/vinyardrip/context-keeper.git
 cd context-keeper
 ./ck init      # optional: try it out
-./install.sh   # copies ck into ~/.local/bin + cklib snapshot (no sudo)
-```
-
-### Option 2 — Built-in installer
-```bash
-git clone https://github.com/vinyardrip/context-keeper.git
-cd context-keeper
-chmod +x ck
 ./ck install   # physical copy to ~/.local/bin/ck + cklib snapshot
 ```
 
 > Production isolation: `ck install` writes a **physical copy** of the launcher to `~/.local/bin/ck` (regular executable file, 0755 — never a symlink) and snapshots the `cklib/` package to `~/.local/share/ck/cklib`. The installed command is a static snapshot: editing this checkout does not change `~/.local/bin/ck` until you explicitly re-run `ck install` (or `ck update`).
+> The one-line installer instead symlinks `~/.local/bin/ck` at the launcher under `~/.local/share/context-keeper` — re-run the installer to update it.
 > Note: `ck` is a thin wrapper over the `cklib/` package — install from the repository (or via `pip install .`), not as a standalone single file.
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.5.2
+ck -v    # → ck version 0.5.3
 ```
 
 ---
@@ -652,6 +652,14 @@ Context Keeper (ck) служит мостом между вашим разумо
 ---
 
 ## 📦 Установка
+
+### Установка одной командой (рекомендуется)
+```bash
+curl -sSL https://raw.githubusercontent.com/vinyardrip/context-keeper/main/install.sh | bash
+```
+Скачивает исходники ветки `main` **потоком** прямо в `~/.local/share/context-keeper` (без временного `.tar.gz` и без `.git`) и создаёт симлинк `~/.local/bin/ck` на лаунчер. Sudo не требуется. Если `~/.local/bin` отсутствует в `$PATH`, скрипт выведет точную команду для его добавления (bash / zsh / `fish_add_path`). Повторный запуск обновляет код на месте и сохраняет пользовательские данные (`.ck/`).
+
+### Ручная установка (для разработки)
 ```bash
 git clone https://github.com/vinyardrip/context-keeper.git
 cd context-keeper

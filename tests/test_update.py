@@ -10,8 +10,10 @@ Covers:
 - Strict guard clauses: ``CK_SANDBOX=1``, ``CK_DISABLE_UPDATE_CHECK=1``
   and a missing ``.git`` repo root abort instantly (no fetch, no
   timestamp refresh).
-- The ``install.sh`` shell script: default install, ``check`` and
-  ``uninstall`` actions.
+- The standalone ``install.sh`` one-line installer: streaming
+  ``curl | tar`` download, symlink setup, prerequisite checks,
+  ``$PATH`` guidance and idempotent re-install with ``.ck/``
+  runtime-data preservation.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ import json
 import os
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -679,7 +682,7 @@ class TestLsRemoteHardening(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# install.sh
+# install.sh (standalone one-line installer)
 # ---------------------------------------------------------------------------
 
 
@@ -687,105 +690,262 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _INSTALL_SH = _REPO_ROOT / "install.sh"
 
 
-def _run_install_sh(*args: str) -> subprocess.CompletedProcess:
-    """Run install.sh with the given args and return the CompletedProcess."""
-    return subprocess.run(
-        ["bash", str(_INSTALL_SH), *args],
-        capture_output=True, text=True, timeout=30,
-    )
+def _build_repo_tarball(dest: Path) -> Path:
+    """Build a GitHub-style source tarball (top-level ``context-keeper-main/``).
+
+    Only the parts the installed ``ck`` needs at runtime are included
+    (``ck``, ``cklib`` and a ``.ck/`` entry), so the unpacked tree is a
+    faithful stand-in for the streamed archive without network access.
+    """
+    with tarfile.open(dest, "w:gz") as tf:
+        for rel in ("ck", "cklib", ".ck/PLAN.md"):
+            src = _REPO_ROOT / rel
+            if src.is_file():
+                tf.add(src, arcname=f"context-keeper-main/{rel}")
+            elif src.is_dir():
+                for child in sorted(src.rglob("*")):
+                    if not child.is_file():
+                        continue
+                    if "__pycache__" in child.parts:
+                        continue
+                    arc = ("context-keeper-main/"
+                           f"{child.relative_to(_REPO_ROOT).as_posix()}")
+                    tf.add(child, arcname=arc)
+    return dest
 
 
-class TestInstallSh(unittest.TestCase):
+class _InstallShHarness(unittest.TestCase):
+    """Shared fixture: fake HOME, local tarball and a stub ``curl``.
+
+    ``curl`` is replaced by a script that streams the locally built
+    tarball, so the real ``curl | tar`` pipeline is exercised without
+    touching the network.
+    """
+
     def setUp(self):
-        # Use a fake HOME so we don't touch the user's real ~/.local/bin.
-        self._tmp_home = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp_home.cleanup)
-        self._orig_home = os.environ.get("HOME")
-        os.environ["HOME"] = self._tmp_home.name
-        self.addCleanup(self._restore_home)
-        # The script may need git/python; both are guaranteed here.
-
-    def _restore_home(self):
-        if self._orig_home is None:
-            os.environ.pop("HOME", None)
-        else:
-            os.environ["HOME"] = self._orig_home
-
-    def test_install_creates_physical_copy(self):
         if not _INSTALL_SH.exists():
             self.skipTest(f"install.sh not present at {_INSTALL_SH}")
-        target = Path(self._tmp_home.name) / ".local" / "bin" / "ck"
-        snapshot = (Path(self._tmp_home.name) / ".local" / "share" / "ck"
-                    / "cklib" / "__init__.py")
-        result = _run_install_sh()
-        self.assertEqual(result.returncode, 0,
-                         f"stderr: {result.stderr}")
-        # Physical copy: a REGULAR executable file, never a symlink.
-        self.assertTrue(target.is_file(),
-                        f"expected regular file at {target}")
-        self.assertFalse(target.is_symlink(),
-                         f"expected no symlink at {target}")
-        self.assertEqual(target.stat().st_mode & 0o777, 0o755)
-        # The cklib package snapshot ships with it.
-        self.assertTrue(snapshot.is_file(), "cklib snapshot missing")
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.base = Path(self._tmp.name)
+        self.home = self.base / "home"
+        self.home.mkdir()
+        self.install_dir = self.home / ".local" / "share" / "context-keeper"
+        self.bin_dir = self.home / ".local" / "bin"
+        self.ck_link = self.bin_dir / "ck"
+        self.tarball = _build_repo_tarball(self.base / "src.tar.gz")
 
-    def test_install_replaces_existing_symlink(self):
-        if not _INSTALL_SH.exists():
-            self.skipTest("install.sh not present")
-        target = Path(self._tmp_home.name) / ".local" / "bin" / "ck"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.symlink_to(_REPO_ROOT / "ck")
-        result = _run_install_sh()
+        self.fakebin = self.base / "fakebin"
+        self.fakebin.mkdir()
+        curl = self.fakebin / "curl"
+        curl.write_text(
+            "#!/usr/bin/env bash\n"
+            'cat "${CK_TEST_TARBALL:?missing CK_TEST_TARBALL}"\n',
+            encoding="utf-8",
+        )
+        curl.chmod(0o755)
+
+    def _env(self, extra: dict | None = None) -> dict:
+        env = {
+            k: v for k, v in os.environ.items()
+            if k not in ("CK_SANDBOX", "CK_SANDBOX_ROOT", "CK_DEV",
+                         "CK_DEBUG", "CK_PROJECT_ROOT", "PYTHONPATH",
+                         "CK_INSTALL_DIR", "CK_BIN_DIR", "CK_TARBALL_URL")
+        }
+        env["HOME"] = str(self.home)
+        env["CK_TEST_TARBALL"] = str(self.tarball)
+        env["CK_TARBALL_URL"] = (
+            "https://example.invalid/context-keeper/main.tar.gz")
+        env["CK_DISABLE_UPDATE_CHECK"] = "1"
+        env["PATH"] = os.pathsep.join(
+            [str(self.fakebin), os.environ.get("PATH", "")])
+        if extra:
+            env.update(extra)
+        return env
+
+    def _run(self, argv=(), env: dict | None = None):
+        return subprocess.run(
+            ["bash", str(_INSTALL_SH), *argv],
+            capture_output=True, text=True, timeout=60,
+            env=env if env is not None else self._env(),
+            cwd=str(self.base),
+        )
+
+    def _restricted_tool_path(self, omit: tuple = ()) -> Path:
+        """A PATH directory with real tools symlinked, minus ``omit``.
+
+        ``curl`` is stubbed with a no-op script so prerequisite checks
+        do not depend on a real curl being present.
+        """
+        tools = ("bash", "python3", "tar", "find", "rm", "mkdir",
+                 "ln", "chmod", "cat", "env", "sh")
+        tool_dir = self.base / ("tools-" + ("-".join(omit) or "all"))
+        tool_dir.mkdir(parents=True, exist_ok=True)
+        for name in tools:
+            if name in omit:
+                continue
+            real = shutil.which(name)
+            if real is None:
+                continue
+            link = tool_dir / name
+            if not link.exists():
+                link.symlink_to(real)
+        if "curl" not in omit:
+            stub = tool_dir / "curl"
+            stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            stub.chmod(0o755)
+        return tool_dir
+
+    def _base_env(self, path: str) -> dict:
+        env = self._env()
+        env["PATH"] = path
+        return env
+
+
+class TestInstallShStreamDownload(_InstallShHarness):
+    """Core requirement: a streaming ``curl | tar`` install."""
+
+    def test_script_has_valid_bash_syntax(self):
+        result = subprocess.run(
+            ["bash", "-n", str(_INSTALL_SH)],
+            capture_output=True, text=True, timeout=30,
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertTrue(target.is_file())
-        self.assertFalse(target.is_symlink())
 
-    def test_install_idempotent(self):
-        if not _INSTALL_SH.exists():
-            self.skipTest("install.sh not present")
-        first = _run_install_sh()
-        second = _run_install_sh()
+    def test_install_streams_source_and_links_launcher(self):
+        result = self._run()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        # Source unpacked directly into the install dir (strip-components).
+        self.assertTrue((self.install_dir / "ck").is_file())
+        self.assertTrue(
+            (self.install_dir / "cklib" / "__init__.py").is_file())
+
+        # Symlink created/updated and pointing at the launcher.
+        self.assertTrue(self.ck_link.is_symlink())
+        self.assertEqual(
+            os.path.realpath(self.ck_link),
+            os.path.realpath(self.install_dir / "ck"),
+        )
+        # Executable bit set (the launcher runs via its python3 shebang).
+        self.assertTrue(self.ck_link.stat().st_mode & 0o111)
+
+    def test_no_tarball_or_git_directory_left_on_disk(self):
+        result = self._run()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.install_dir / ".git").exists())
+        leftovers = [
+            p for p in self.install_dir.rglob("*")
+            if p.name.endswith((".tar.gz", ".tgz", ".tar"))
+        ]
+        self.assertEqual(leftovers, [],
+                         f"temporary archives left behind: {leftovers}")
+
+    def test_installed_symlink_executes_the_unpacked_source(self):
+        result = self._run()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        run = subprocess.run(
+            [str(self.ck_link), "-v"],
+            capture_output=True, text=True, timeout=60,
+            env=self._env(), cwd=str(self.base),
+        )
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("ck version 0.5.3", run.stdout)
+
+    def test_reinstall_is_idempotent_and_preserves_ck_runtime_data(self):
+        first = self._run()
         self.assertEqual(first.returncode, 0, first.stderr)
+
+        runtime = self.install_dir / ".ck" / "HISTORY.md"
+        runtime.write_text("user runtime data\n", encoding="utf-8")
+        stale = self.install_dir / "obsolete-module.py"
+        stale.write_text("stale\n", encoding="utf-8")
+
+        second = self._run()
         self.assertEqual(second.returncode, 0, second.stderr)
-        target = Path(self._tmp_home.name) / ".local" / "bin" / "ck"
-        self.assertTrue(target.is_file())
-        self.assertFalse(target.is_symlink())
 
-    def test_check_prints_status(self):
-        if not _INSTALL_SH.exists():
-            self.skipTest("install.sh not present")
-        result = _run_install_sh("check")
+        # User runtime data survives the re-install ...
+        self.assertEqual(runtime.read_text(encoding="utf-8"),
+                         "user runtime data\n")
+        # ... while the codebase is refreshed cleanly.
+        self.assertFalse(stale.exists())
+        self.assertTrue((self.install_dir / "ck").is_file())
+        self.assertTrue(self.ck_link.is_symlink())
+
+    def test_shell_hint_bash_zsh_and_fish(self):
+        cases = {
+            "/bin/bash": ".bashrc",
+            "/bin/zsh": ".zshrc",
+            "/usr/bin/fish": "fish_add_path",
+        }
+        for shell, needle in cases.items():
+            with self.subTest(shell=shell):
+                result = self._run(env=self._env({"SHELL": shell}))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                out = result.stdout
+                self.assertIn("not on your PATH", out)
+                self.assertIn(needle, out)
+                self.assertIn(str(self.bin_dir), out)
+
+    def test_no_hint_when_local_bin_is_on_path(self):
+        env = self._env({"PATH": os.pathsep.join(
+            [str(self.bin_dir), str(self.fakebin),
+             os.environ.get("PATH", "")])})
+        result = self._run(env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
-        # Should mention Python, git, EDITOR.
-        out = (result.stdout + result.stderr).lower()
-        self.assertTrue("python" in out or "git" in out,
-                        f"missing diagnostic: {result.stdout}")
+        self.assertIn("already on your PATH", result.stdout)
 
-    def test_uninstall_removes_install_and_snapshot(self):
-        if not _INSTALL_SH.exists():
-            self.skipTest("install.sh not present")
-        _run_install_sh()  # install
-        home = Path(self._tmp_home.name)
-        target = home / ".local" / "bin" / "ck"
-        legacy_dev = home / ".local" / "bin" / "ck-dev"
-        snapshot = home / ".local" / "share" / "ck"
-        self.assertTrue(target.is_file())
-        self.assertFalse(target.is_symlink())
-        # Legacy dev leftover is cleaned up too.
-        legacy_dev.symlink_to(_REPO_ROOT / "ck-dev")
-        result = _run_install_sh("uninstall")
+    def test_uninstall_removes_source_and_symlink(self):
+        self._run()
+        self.assertTrue(self.ck_link.exists())
+        result = self._run(["uninstall"])
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse(target.exists())
-        self.assertFalse(target.is_symlink())
-        self.assertFalse(legacy_dev.exists())
-        self.assertFalse(snapshot.exists())
+        self.assertFalse(os.path.lexists(self.ck_link))
+        self.assertFalse(self.install_dir.exists())
 
-    def test_uninstall_when_not_installed_is_graceful(self):
-        if not _INSTALL_SH.exists():
-            self.skipTest("install.sh not present")
-        result = _run_install_sh("uninstall")
-        self.assertEqual(result.returncode, 0,
-                         f"stderr: {result.stderr}")
+    def test_help_and_unknown_argument(self):
+        helptext = self._run(["--help"])
+        self.assertEqual(helptext.returncode, 0, helptext.stderr)
+        self.assertIn("Usage", helptext.stdout)
+
+        bogus = self._run(["frobnicate"])
+        self.assertEqual(bogus.returncode, 2)
+
+
+class TestInstallShPrerequisites(_InstallShHarness):
+    """Missing/too-old prerequisites fail gracefully with a message."""
+
+    def test_missing_python3_reports_clearly(self):
+        path = self._restricted_tool_path(omit=("python3",))
+        result = self._run(env=self._base_env(str(path)))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("python3", result.stderr)
+        self.assertFalse(self.install_dir.exists())
+
+    def test_old_python3_reports_clearly(self):
+        path = self._restricted_tool_path()
+        fake = path / "python3"
+        if fake.exists():
+            fake.unlink()
+        fake.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        fake.chmod(0o755)
+        result = self._run(env=self._base_env(str(path)))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("3.8", result.stderr)
+
+    def test_missing_curl_reports_clearly(self):
+        path = self._restricted_tool_path(omit=("curl",))
+        result = self._run(env=self._base_env(str(path)))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("curl", result.stderr)
+        self.assertFalse(self.install_dir.exists())
+
+    def test_missing_tar_reports_clearly(self):
+        path = self._restricted_tool_path(omit=("tar",))
+        result = self._run(env=self._base_env(str(path)))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("tar", result.stderr)
+        self.assertFalse(self.install_dir.exists())
 
 
 if __name__ == "__main__":
