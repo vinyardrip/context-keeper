@@ -911,9 +911,10 @@ def render_sandbox_banner(*, color: Optional[bool] = None) -> str:
         │ Type 'exit' or press Ctrl+D to return to production      │
         └──────────────────────────────────────────────────────────┘
 
-    ``len()`` measures the padding only: terminal cells for emoji/
-    wide glyphs do not participate in the character-count padding,
-    so rows stay byte-stable across environments.
+    Padding is measured in DISPLAY COLUMNS (see
+    :func:`cklib.ui.display_width`) so wide Unicode — including the
+    double-width warning emoji — cannot push the closing ``│`` out
+    of alignment: every row and both borders share one exact width.
 
     With color enabled the whole box is painted bold yellow (the
     universal warning treatment). ``color`` defaults to the standard
@@ -922,6 +923,14 @@ def render_sandbox_banner(*, color: Optional[bool] = None) -> str:
     the target stream must be a TTY — so piped/non-interactive output
     stays byte-identical plain text.
     """
+    # DISPLAY-WIDTH PADDING: the box frame must align in terminal
+    # COLUMNS, not code points. ``len()`` under/over-counts wide
+    # Unicode (the double-width warning emoji is two columns across
+    # but its selector sequence is counted differently), which pushes
+    # the closing ``│`` off by a column. Measure and pad by display
+    # width so every row and both borders share one exact width.
+    from .ui import display_width, pad_to_width
+
     binary = active_binary_path()
     binary_str = str(binary) if binary is not None else "ck (not found on PATH)"
     rows = (
@@ -929,11 +938,11 @@ def render_sandbox_banner(*, color: Optional[bool] = None) -> str:
         f"{_BANNER_BINARY_LABEL} {binary_str}",
         _BANNER_HINT,
     )
-    pad = max(len(row) for row in rows)
+    pad = max(display_width(row) for row in rows)
     inner = pad + 2  # content rows add '│ ' + ' │' (4); borders add 2
     lines = (
         f"┌{'─' * inner}┐",
-        *(f"│ {row:<{pad}} │" for row in rows),
+        *(f"│ {pad_to_width(row, pad)} │" for row in rows),
         f"└{'─' * inner}┘",
     )
     if color is None:

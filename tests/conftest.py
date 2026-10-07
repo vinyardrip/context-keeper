@@ -43,16 +43,29 @@ def _isolated_sandbox_root(tmp_path):
     tests (sandboxed writes then land in the wrong tree and
     subprocess e2e tests inherit the flags). They are pinned OFF for
     every test the same way ``CK_SANDBOX_ROOT`` is pinned; tests
-    that exercise dev mode set them explicitly.
+    that exercise dev mode set them explicitly. The session markers
+    (``CK_SANDBOX_SHELL``/``CK_SANDBOX_ACTIVE``) are pinned OFF too:
+    running the suite from inside a sandbox session would otherwise
+    force strict binary routing and pin a mirror project, producing
+    environment-dependent output.
     """
     anchor = tmp_path / ".sandbox"
     saved = {
         k: os.environ.get(k)
-        for k in ("CK_SANDBOX_ROOT", "CK_SANDBOX", "CK_DEV")
+        for k in ("CK_SANDBOX_ROOT", "CK_SANDBOX", "CK_DEV",
+                  "CK_SANDBOX_ACTIVE", "CK_SANDBOX_SHELL")
     }
     os.environ["CK_SANDBOX_ROOT"] = str(anchor)
     os.environ.pop("CK_SANDBOX", None)
     os.environ.pop("CK_DEV", None)
+    # Session markers also leak from an ambient sandbox session:
+    # ``CK_SANDBOX_SHELL`` forces strict routing inside
+    # ``active_binary_path`` and ``CK_SANDBOX_ACTIVE`` pins a mirror
+    # project, either of which would make resolution/output differ
+    # from a clean production environment. Pin both off; tests that
+    # exercise them set them explicitly.
+    os.environ.pop("CK_SANDBOX_ACTIVE", None)
+    os.environ.pop("CK_SANDBOX_SHELL", None)
     try:
         yield anchor
     finally:
