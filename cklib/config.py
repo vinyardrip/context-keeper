@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-VERSION = "0.6.1"
+VERSION = "0.6.2"
 CK_DIR_NAME = ".ck"
 # Entries in HISTORY.md before rotation archives it. Runtime
 # override: CK_HISTORY_LIMIT environment variable.
@@ -83,13 +83,17 @@ SPACE_NAMES: tuple[str, ...] = ("local", "remote")
 SPACE_LOCAL = "local"
 SPACE_REMOTE = "remote"
 
-# Title of the seed task written by ``ck init`` (see DEFAULT_PLAN).
-# When the very first ``ck add`` finds a plan holding ONLY this
-# untouched seed task, the seed is REPLACED instead of a second task
-# being appended. Both language variants are recognised.
+# Seed task title written by ``ck init`` (see DEFAULT_PLAN). This is
+# the SINGLE SOURCE OF TRUTH: the init template interpolates it and the
+# replacement guard compares against it, so the two can never drift
+# apart. When the very first ``ck add`` finds a plan holding ONLY this
+# exact, still-open seed task, the seed is REPLACED instead of a
+# second task being appended. Both language variants are recognised.
+DEFAULT_FIRST_TASK_TITLE = "Describe the first task"
+DEFAULT_FIRST_TASK_TITLE_RU = "Описать первую задачу"
 DEFAULT_TASK_TITLES: tuple[str, ...] = (
-    "Describe the first task",
-    "Описать первую задачу",
+    DEFAULT_FIRST_TASK_TITLE,
+    DEFAULT_FIRST_TASK_TITLE_RU,
 )
 
 # Update notifier throttle window.
@@ -127,10 +131,10 @@ PROJECT_CONFIG_FILENAME = ".ck.json"
 # mapping (see cklib.ui.PALETTE_SLOTS).
 COLOR_CONFIG_KEY = "colors"
 
-DEFAULT_PLAN = """# {project_name}
+DEFAULT_PLAN = f"""# {{project_name}}
 
 ## Current Sprint
-- [] Describe the first task
+- [] {DEFAULT_FIRST_TASK_TITLE}
 
 ## Completed
 """
