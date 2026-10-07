@@ -46,6 +46,7 @@ from .config import (
     LEGACY_GLOBAL_CONFIG_FILE,
     PLACEHOLDER_MARKER,
     SANDBOX_BOUNDARY_NAME,
+    SPACE_NAMES,
     compress_archives_enabled,
     history_limit,
     sandbox_search_boundary_active,
@@ -3244,9 +3245,10 @@ def _render_dashboard(ck: Optional[ContextKeeper], *, list_projects,
     """
     entries = list_projects()
     # FIXED TOP SECTION: the out-of-project `local` / `remote` spaces
-    # always render above the Git projects table (and even when no
-    # project is registered) so the dashboard layout is stable.
-    ops_block = spaces.render_system_ops_block()
+    # render as a UNIFIED table (same grid pipeline as the projects
+    # table) above the Git projects table — and even when no project
+    # is registered — so the dashboard layout is stable.
+    ops_block = _render_spaces_table()
     if not entries:
         return (
             ops_block + "\n\n"
@@ -3370,6 +3372,11 @@ def read_active_task_note(project_root: Path) -> Optional[dict]:
 _DASH_HEADERS = ("Project", "Focus Task", "Progress", "Last Active")
 _DASH_KEYS = ("project", "focus", "progress", "last")
 
+# Unified SPACES table header — same four columns as the projects
+# table so both pass through one shared grid pipeline.
+_SPACES_HEADERS = ("Space", "Focus Task", "Progress", "Last Active")
+_SPACES_KEYS = ("space", "focus", "progress", "last")
+
 # Hard caps for the NARROW columns — kept tight so the table fits
 # inside an 80-column terminal (Alacritty etc.) without line wrapping.
 #
@@ -3389,6 +3396,7 @@ _DASH_KEYS = ("project", "focus", "progress", "last")
 # Active keep their natural content width when it falls under the cap.
 _PROJECT_CAP = 25
 _PROGRESS_WIDTH = 9
+_PROGRESS_CAP = 16  # spaces single-line "<done>/<total> (<pct>%)" cell
 _LAST_WIDTH_CAP = 16
 _TABLE_BUDGET = 80
 _FOCUS_TEXT_CAP = 80  # soft cap; table-budget clamp is the real gate
@@ -3530,46 +3538,89 @@ def _render_dashboard_table(states: list) -> str:
             "last": (last,),
         })
 
-    # ---- width computation ------------------------------------------
-    # 1. Per-column natural width = max(header, content).
-    widths: dict[str, int] = {}
-    for h, k in zip(_DASH_HEADERS, _DASH_KEYS):
-        widths[k] = max(
-            len(h),
-            *(len(line) for r in rows for line in r[k]),
-        )
-
-    # 2. Apply hard caps to the narrow columns.
-    widths["project"] = min(widths["project"], _PROJECT_CAP)
-    widths["progress"] = _PROGRESS_WIDTH  # always 9 — 2-line cell
-    widths["last"] = min(widths["last"], _LAST_WIDTH_CAP)
-
-    # 3. Focus Task is the FLUID column: it absorbs the rest of the
-    #    table budget so the whole grid fits inside _TABLE_BUDGET
-    #    columns. Chrome is 5 ``+``/``|`` separators + 2 spaces of
-    #    padding on each cell (4 cells × 2 = 8 spaces of inner pad).
-    chrome = 5 + (4 * 2)  # 13
-    fixed = widths["project"] + widths["progress"] + widths["last"]
-    focus_budget = _TABLE_BUDGET - chrome - fixed
-    widths["focus"] = max(
-        min(widths["focus"], max(focus_budget, _FOCUS_MIN_WIDTH)),
-        _FOCUS_MIN_WIDTH,
+    # Declarative grid render: the SAME pipeline the spaces table
+    # uses (see _render_grid) — width policy is passed as config so
+    # neither table duplicates rendering logic.
+    return _render_grid(
+        "GLOBAL DASHBOARD",
+        _DASH_HEADERS,
+        _DASH_KEYS,
+        rows,
+        caps={"project": _PROJECT_CAP, "last": _LAST_WIDTH_CAP},
+        fixed_widths={"progress": _PROGRESS_WIDTH},
+        fluid_key="focus",
+        footer=_DASH_FOOTER_TIP,
     )
 
-    # 4. Re-truncate focus content if the column shrank below the
-    #    natural content length.
-    for r in rows:
-        head, text = r["focus"]
-        if widths["focus"] < _FOCUS_MIN_WIDTH:
-            widths["focus"] = _FOCUS_MIN_WIDTH
-        if len(text) > widths["focus"]:
-            text = _truncate_right(text, widths["focus"])
-        if len(head) > widths["focus"]:
-            head = _truncate_right(head, widths["focus"])
-        r["focus"] = (head, text)
+
+def _render_grid(title: str, headers: tuple, keys: tuple, rows: list, *,
+                 caps: Optional[dict] = None,
+                 fixed_widths: Optional[dict] = None,
+                 fluid_key: Optional[str] = None,
+                 footer: Optional[str] = None) -> str:
+    """Shared ASCII grid renderer for the dashboard tables.
+
+    Single source of truth for column layout so the Git projects table
+    and the ``LOCAL`` / ``REMOTE`` spaces table are byte-for-byte
+    consistent: compute natural widths, apply hard caps, size the
+    fluid column, then emit a pure-ASCII grid with a divider after
+    every row and multi-line cells stacked vertically.
+
+    Parameters:
+
+    - ``title``        — first line (``GLOBAL DASHBOARD`` /
+                         ``SPACES (GLOBAL CONTEXTS)``);
+    - ``headers``/``keys`` — column titles and the matching ``rows``
+                         dict keys, in display order;
+    - ``rows``         — list of ``{key: tuple_of_cell_lines}``;
+    - ``caps``         — ``{key: max_width}`` hard caps on natural
+                         width (content is expected to be
+                         pre-truncated by the caller);
+    - ``fixed_widths`` — ``{key: width}`` exact column widths;
+    - ``fluid_key``    — the column that absorbs the leftover budget
+                         of the 80-column table so the grid never
+                         wraps; its cell content is re-truncated here;
+    - ``footer``       — optional trailing line after the last row.
+    """
+    caps = caps or {}
+    fixed_widths = fixed_widths or {}
+
+    # 1. Per-column natural width = max(header, content).
+    widths: dict[str, int] = {}
+    for h, k in zip(headers, keys):
+        widths[k] = max(
+            [len(h)] + [len(line) for r in rows for line in r[k]],
+        )
+
+    # 2. Hard caps for the narrow columns.
+    for k, cap in caps.items():
+        widths[k] = min(widths[k], cap)
+    # 3. Exact fixed widths (override the natural width).
+    for k, w in fixed_widths.items():
+        widths[k] = w
+
+    # 4. The FLUID column absorbs the rest of the table budget so the
+    #    whole grid fits inside _TABLE_BUDGET columns. Chrome is
+    #    (n+1) ``|``/``+`` separators + 2 spaces of padding per cell.
+    if fluid_key is not None:
+        chrome = (len(keys) + 1) + (len(keys) * 2)
+        fixed_total = sum(widths[k] for k in keys if k != fluid_key)
+        budget = _TABLE_BUDGET - chrome - fixed_total
+        widths[fluid_key] = max(
+            min(widths[fluid_key], max(budget, _FOCUS_MIN_WIDTH)),
+            _FOCUS_MIN_WIDTH,
+        )
+        # Re-truncate the fluid cell content to the resolved width.
+        for r in rows:
+            head, text = r[fluid_key]
+            if len(text) > widths[fluid_key]:
+                text = _truncate_right(text, widths[fluid_key])
+            if len(head) > widths[fluid_key]:
+                head = _truncate_right(head, widths[fluid_key])
+            r[fluid_key] = (head, text)
 
     def _hr() -> str:
-        return "+" + "+".join("-" * (widths[k] + 2) for k in _DASH_KEYS) + "+"
+        return "+" + "+".join("-" * (widths[k] + 2) for k in keys) + "+"
 
     def _row(values: tuple) -> list:
         """Render one grid row; multi-line cells stack vertically."""
@@ -3579,22 +3630,68 @@ def _render_dashboard_table(states: list) -> str:
         for i in range(height):
             row_cells = [
                 " " + (cell[i] if i < len(cell) else "").ljust(widths[k]) + " "
-                for cell, k in zip(cells, _DASH_KEYS)
+                for cell, k in zip(cells, keys)
             ]
             lines.append("|" + "|".join(row_cells) + "|")
         return lines
 
     out: list[str] = [
-        "GLOBAL DASHBOARD",
+        title,
         _hr(),
-        *_row(tuple((h,) for h in _DASH_HEADERS)),
+        *_row(tuple((h,) for h in headers)),
         _hr(),
     ]
     for r in rows:
-        out.extend(_row((r["project"], r["focus"], r["progress"], r["last"])))
+        out.extend(_row(tuple(r[k] for k in keys)))
         out.append(_hr())
-    out.append(_DASH_FOOTER_TIP)
+    if footer:
+        out.append(footer)
     return "\n".join(out)
+
+
+def _render_spaces_table() -> str:
+    """Unified ``LOCAL`` / ``REMOTE`` spaces table (dashboard top).
+
+    Replaces the old list-style ``[SYSTEM / OPS]`` task dump: both
+    spaces render as standard table rows through the SAME
+    :func:`_render_grid` pipeline as the Git projects table —
+    ``Space`` (name + path), ``Focus Task`` (``[<id>] [>] …`` or
+    ``n/a``), ``Progress`` (``0/5 (0.0%)``) and ``Last Active``
+    (relative timestamp from the space file's mtime).
+    """
+    rows: list[dict] = []
+    for space in SPACE_NAMES:
+        snap = spaces.space_snapshot(space)
+        name_line = _truncate_ellipsis(snap["name"], _PROJECT_CAP)
+        # Path line uses the SAME contraction helper as the projects
+        # table, so both tables render paths identically.
+        path_line = _smart_path(snap["path"], _PROJECT_CAP)
+        if snap["focus_id"] is not None:
+            focus_head = f"[{snap['focus_id']}] [>]"
+            focus_text = _truncate_right(
+                snap["focus_title"] or "", _FOCUS_TEXT_CAP)
+        else:
+            focus_head, focus_text = "n/a", ""
+        progress = (_truncate_right(
+            f"{snap['done']}/{snap['total']} ({snap['pct']}%)",
+            _PROGRESS_CAP),)
+        last = (_relative_time(snap["last"])
+                if snap["last"] else "n/a",)
+        rows.append({
+            "space": (name_line, path_line),
+            "focus": (focus_head, focus_text),
+            "progress": progress,
+            "last": last,
+        })
+    return _render_grid(
+        "SPACES (GLOBAL CONTEXTS)",
+        _SPACES_HEADERS,
+        _SPACES_KEYS,
+        rows,
+        caps={"space": _PROJECT_CAP, "progress": _PROGRESS_CAP,
+              "last": _LAST_WIDTH_CAP},
+        fluid_key="focus",
+    )
 
 
 # ---------------------------------------------------------------------- #

@@ -401,11 +401,12 @@ class TestDashboardVerbose(_IsolatedRegistry, unittest.TestCase):
             ck.register(path=target, name="alpha")
 
             out = self._render(ck)
-            # The fixed [SYSTEM / OPS] section renders above the
+            # The unified SPACES table renders above the
             # projects block view.
             self.assertIn("MY PROJECTS (1)", out)
             self.assertLess(
-                out.index("[SYSTEM / OPS]"), out.index("MY PROJECTS (1)")
+                out.index("SPACES (GLOBAL CONTEXTS)"),
+                out.index("MY PROJECTS (1)")
             )
             # cwd marker: the project block carries [*]
             self.assertIn("> alpha [*]", out)

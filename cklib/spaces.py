@@ -17,13 +17,16 @@ or ``ck remote add``.
 
 The module is import-light and project-independent: the CLI dispatches
 ``ck local`` / ``ck remote`` straight here, and the global dashboard
-reads :func:`render_system_ops_block` for its ``[SYSTEM / OPS]`` top
-section. Every write is atomic and serialised on a sibling ``.lock``
-file (fail-closed), mirroring the project-plan write path.
+calls :func:`space_snapshot` for its unified ``SPACES (GLOBAL
+CONTEXTS)`` table (rendered by ``cklib.core`` through the same grid
+pipeline as the Git projects table). Every write is atomic and
+serialised on a sibling ``.lock`` file (fail-closed), mirroring the
+project-plan write path.
 """
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import config
@@ -181,39 +184,47 @@ def _section_for_new_task(tl: TaskList) -> str:
 # Dashboard overlay
 # ---------------------------------------------------------------------- #
 
-def _space_summary(space: str) -> list[str]:
-    """Indented per-space lines: focus task, then open pending tasks."""
-    tl = load_space(space)
-    lines: list[str] = []
-    focused = tl.focused[0] if tl.focused else None
-    if focused is not None:
-        lines.append(f"    [>] [{focused.id}] {focused.title}")
-    pending = [t for t in tl.open if focused is None or t.id != focused.id]
-    for t in pending:
-        lines.append(f"    [ ] [{t.id}] {t.title}")
-    if not lines:
-        lines.append("    (empty)")
-    return lines
+def space_snapshot(space: str) -> dict:
+    """Aggregate the state of ``space`` for the dashboard table.
 
+    Data only — no rendering. ``cklib.core`` feeds these snapshots
+    through the SAME ``_render_grid`` pipeline the Git projects table
+    uses, so ``LOCAL`` / ``REMOTE`` render as uniform table rows
+    (``Space | Focus Task | Progress | Last Active``) instead of an
+    unformatted task-list dump.
 
-def render_system_ops_block() -> str:
-    """Render the fixed ``[SYSTEM / OPS]`` dashboard top section.
+    Keys:
 
-    Always emitted (even when both spaces are empty) so the dashboard
-    layout is stable::
-
-        [SYSTEM / OPS]
-          LOCAL:
-            [>] [2] install drivers
-            [ ] [3] cleanup _tests
-          REMOTE:
-            [ ] [1] provision VPS
+    - ``name``        — upper-cased space name (``LOCAL`` / ``REMOTE``);
+    - ``path``        — the space's Markdown file path (shown on the
+                        row's second line, home-contracted by the
+                        renderer);
+    - ``focus_id`` / ``focus_title`` — the focused task (or None);
+    - ``done`` / ``total`` / ``pct`` — progress metrics;
+    - ``last``        — ISO-8601 last-modified time of the space file,
+                        or None when it does not exist yet.
     """
-    out: list[str] = ["[SYSTEM / OPS]"]
-    for space in config.SPACE_NAMES:
-        out.append(f"  {space.upper()}:")
-        out.extend(_space_summary(space))
-    return "\n".join(out)
+    if not is_valid_space(space):
+        raise ValueError(f"Unknown space: {space!r}")
+    tl = load_space(space)
+    focused = tl.focused[0] if tl.focused else None
+    last_iso: str | None = None
+    try:
+        mtime = _read_path(space).stat().st_mtime
+        last_iso = datetime.fromtimestamp(
+            mtime, tz=timezone.utc).isoformat()
+    except OSError:
+        pass  # space file not created yet -> no last-active stamp
+    return {
+        "name": space.upper(),
+        "path": str(space_path(space)),
+        "focus_id": focused.id if focused is not None else None,
+        "focus_title": focused.title if focused is not None else None,
+        "done": len(tl.done),
+        "total": tl.total,
+        "pct": tl.completion_pct,
+        "last": last_iso,
+    }
 
 
 __all__ = [
@@ -223,5 +234,5 @@ __all__ = [
     "load_space",
     "add_space_task",
     "list_space",
-    "render_system_ops_block",
+    "space_snapshot",
 ]
