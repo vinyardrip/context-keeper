@@ -2368,18 +2368,27 @@ class UpdateResult:
 def _is_pristine_default_plan(tl: TaskList) -> bool:
     """True when ``tl`` is exactly the untouched ``ck init`` seed.
 
-    The seed is a single OPEN task whose title matches the default
-    placeholder (either language variant). Any edit to that title, a
-    second task, or a done/focused status makes this False, so the
-    default-replacement shortcut in :meth:`ContextKeeper.add_task`
-    only ever fires on a genuinely fresh project.
+    The replacement shortcut in :meth:`ContextKeeper.add_task` fires
+    IF AND ONLY IF all three conditions hold simultaneously:
+
+    1. the plan holds exactly one task (``len(tasks) == 1``);
+    2. that task is still OPEN / incomplete (``[ ]``);
+    3. its title matches the default placeholder written by ``ck init``
+       verbatim (either language variant).
+
+    Any edit to the title — even a single character — a second task,
+    or a done/focused status makes this False, so the placeholder is
+    never overwritten once real work exists. The default titles come
+    from :data:`cklib.config.DEFAULT_TASK_TITLES`, the same single
+    source of truth the init template interpolates.
     """
     if len(tl.tasks) != 1:
         return False
     task = tl.tasks[0]
     if task.status != TaskStatus.OPEN:
         return False
-    return task.title.strip() in DEFAULT_TASK_TITLES
+    title = task.title.strip()
+    return any(title == default.strip() for default in DEFAULT_TASK_TITLES)
 
 
 def _section_for_new_task(tl: TaskList) -> str:
