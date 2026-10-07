@@ -1,6 +1,6 @@
 # ROADMAP / PLAN
 
-Current version: v0.6.3
+Current version: v0.6.4
 
 ## Backlog
 - [x] Инициализировать базовую структуру проекта (.ck/)

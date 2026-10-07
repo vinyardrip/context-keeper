@@ -45,8 +45,10 @@ from .config import (
     HISTORY_FILENAME,
     LEGACY_GLOBAL_CONFIG_FILE,
     PLACEHOLDER_MARKER,
+    SANDBOX_BOUNDARY_NAME,
     compress_archives_enabled,
     history_limit,
+    sandbox_search_boundary_active,
     max_bak_files,
     LOCAL_GITIGNORE_ENTRIES,
     PLAN_FILENAME,
@@ -398,17 +400,25 @@ def _sync_sandbox_plan_mirror(project_root: Path, *,
 def _upward_context_candidates(start: Path) -> list:
     """Directories from ``start`` upward for context resolution.
 
-    Inside a Git work tree the walk stops AT (and includes) the
-    repository root — a ``.ck/`` project living above the repo
-    boundary is deliberately NOT picked up. Outside Git the walk
-    continues to the filesystem root (the classic
-    :func:`find_project_root` behaviour).
+    The walk is BOUNDED so a nested directory can never leak into a
+    parent repository or climb above an active sandbox tree:
+
+    - inside a Git work tree it stops AT (and includes) the repository
+      root — a ``.ck/`` project living above the repo boundary is
+      deliberately NOT picked up;
+    - while a sandbox session is active, an ancestor named
+      ``.sandbox/`` is the last candidate: the host checkout's project
+      above the sandbox is never considered (see
+      :func:`cklib.config.sandbox_search_boundary_active`);
+    - outside Git (and without a sandbox edge) the walk continues to
+      the filesystem root (the classic ``find_project_root`` behaviour).
     """
     try:
         curr = start.resolve()
     except (OSError, RuntimeError):
         curr = Path(os.path.abspath(str(start)))
     git_top = gith.repo_root(curr)
+    sandbox_edge = sandbox_search_boundary_active()
     out = [curr]
     for parent in curr.parents:
         if git_top is not None:
@@ -417,6 +427,8 @@ def _upward_context_candidates(start: Path) -> list:
             except ValueError:
                 break  # escaped the Git repository boundary
         out.append(parent)
+        if sandbox_edge and parent.name == SANDBOX_BOUNDARY_NAME:
+            break  # last candidate: never climb above the sandbox
     return out
 
 
@@ -454,6 +466,10 @@ class ContextKeeper:
     """High-level orchestrator. One instance per CLI invocation."""
 
     def __init__(self, root: Optional[Path] = None) -> None:
+        # Was the root supplied EXPLICITLY? ``ck init`` needs this: it
+        # must always target $PWD and never inherit the upward walk of
+        # an auto-discovered root (see :meth:`init`).
+        self._explicit_root: bool = root is not None
         self.root: Optional[Path] = root or find_project_root()
         # Resolution anchor for READ operations (see resolve_context):
         # the directory the caller bound explicitly, else the process
@@ -480,7 +496,12 @@ class ContextKeeper:
             self.readme_file = None
             self._color_overrides: Optional[dict] = {}
             return
-        self.ck_path: Path = self.root / CK_DIR_NAME
+        self._bind_root(self.root)
+
+    def _bind_root(self, root: Path) -> None:
+        """Point this keeper at ``root``; every project path follows."""
+        self.root: Optional[Path] = root
+        self.ck_path: Path = root / CK_DIR_NAME
         self.state_file: Path = self.ck_path / STATE_FILENAME
         self.plan_file: Path = self.ck_path / PLAN_FILENAME
         self.history_file: Path = self.ck_path / HISTORY_FILENAME
@@ -1456,6 +1477,22 @@ class ContextKeeper:
                 "Not in a valid project directory. "
                 "cd into your project and re-run `ck init`."
             )
+        # STRICT LOCAL INITIALIZATION: `ck init` always targets $PWD.
+        # It must NEVER inherit find_project_root()'s upward walk —
+        # otherwise `ck init` from a subdirectory would reinitialize
+        # an ANCESTOR project instead of creating a fresh `.ck/`
+        # right here. The rootless guard above already handled the
+        # dangling-cwd case, so cwd resolution cannot fail here.
+        if not self._explicit_root:
+            try:
+                cwd = Path.cwd().resolve()
+            except (OSError, RuntimeError) as exc:
+                raise ValueError(
+                    "Not in a valid project directory. "
+                    "cd into your project and re-run `ck init`."
+                ) from exc
+            self._bind_root(cwd)
+            self._start = cwd
         # Boundary guard: initializing in $HOME, /tmp, or the
         # filesystem root affects every command run beneath it.
         if not self.ck_path.exists():

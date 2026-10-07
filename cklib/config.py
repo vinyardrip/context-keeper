@@ -10,8 +10,12 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-VERSION = "0.6.3"
+VERSION = "0.6.4"
 CK_DIR_NAME = ".ck"
+# Traversal-boundary markers. Kept in sync with
+# ``cklib.sandbox.SANDBOX_DIR_NAME`` (".sandbox") and Git's ".git".
+_GIT_MARKER = ".git"
+SANDBOX_BOUNDARY_NAME = ".sandbox"
 # Entries in HISTORY.md before rotation archives it. Runtime
 # override: CK_HISTORY_LIMIT environment variable.
 HISTORY_LIMIT = 1000
@@ -234,12 +238,46 @@ def warn_if_sensitive_root(root: Path) -> bool:
     return False
 
 
-def find_project_root(start: Path | None = None) -> Optional[Path]:
-    """Walk up from ``start`` (default: cwd) until ``.ck/`` is found.
+def sandbox_search_boundary_active() -> bool:
+    """True when a dev-sandbox context bounds the upward project search.
 
-    If no ``.ck/`` exists, returns ``start`` (or cwd). The caller can
-    pass the result through :func:`warn_if_sensitive_root` when a
-    NEW project is about to be created there (``ck init``).
+    While a sandbox session is active (``CK_SANDBOX=1`` / ``ck-dev`` /
+    cwd under ``.sandbox/``), the ``.sandbox/`` tree edge becomes a
+    hard boundary: commands inside the sandbox must never climb above
+    it and attach to the host checkout's project.
+
+    The sandbox module is imported lazily to avoid a ``config`` ->
+    ``sandbox`` import cycle, and every failure degrades to "not
+    active" so root resolution never crashes on a lookup.
+    """
+    try:
+        from .sandbox import dev_context_active
+        return bool(dev_context_active())
+    except Exception:
+        return False
+
+
+def find_project_root(start: Path | None = None) -> Optional[Path]:
+    """Walk up from ``start`` (default: cwd) to a project root or boundary.
+
+    The upward search is STRICTLY BOUNDED — at every directory the
+    first matching rule wins and traversal stops there:
+
+    1. **Project marker** — a directory holding a ``.ck/`` folder or a
+       ``PLAN.md`` file is the project root (returned).
+    2. **Git boundary** — a directory holding ``.git`` (dir or
+       worktree/submodule file) is never crossed above, so the search
+       cannot leak into a parent repository or the host root.
+    3. **Sandbox boundary** — while a sandbox session is active, a
+       ``.sandbox/`` directory edge stops the search so nested
+       in-sandbox directories never attach to the host project above.
+
+    With no marker/boundary hit, the START directory itself is
+    returned (treated as an uninitialized standalone root), so a
+    nested disposable directory is initialized in place instead of
+    inheriting an ancestor project. The caller can pass the result
+    through :func:`warn_if_sensitive_root` when a NEW project is about
+    to be created there (``ck init``).
 
     DANGLING WORKING DIRECTORY: when the process cwd no longer
     exists on disk (the directory was wiped/rebuilt underneath the
@@ -261,9 +299,18 @@ def find_project_root(start: Path | None = None) -> Optional[Path]:
         # cycles) degrade the same way — a broken environment is
         # treated as "no resolvable root", never a crash.
         return None
+    sandbox_edge = sandbox_search_boundary_active()
     for parent in [curr, *curr.parents]:
+        # Rule 1: an explicit project marker here is the answer.
         if (parent / CK_DIR_NAME).is_dir():
             return parent
+        if (parent / PLAN_FILENAME).is_file():
+            return parent
+        # Rules 2 & 3: hard boundaries — stop without climbing higher.
+        if (parent / _GIT_MARKER).exists():
+            break
+        if sandbox_edge and parent.name == SANDBOX_BOUNDARY_NAME:
+            break
     return curr
 
 
