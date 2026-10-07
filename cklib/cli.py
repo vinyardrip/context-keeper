@@ -471,7 +471,35 @@ def _print_focus_result(result) -> None:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    """CLI entry point. Returns a process exit code."""
+    """CLI entry point. Returns a process exit code.
+
+    WORKING-DIRECTORY GUARANTEE: the caller's working directory is
+    captured before dispatch and strictly restored afterwards — on
+    normal return, on error, and after a sandbox subshell exits. No
+    ``ck`` command may leak a directory change into the shell that
+    invoked it.
+    """
+    try:
+        original_cwd: Optional[str] = os.getcwd()
+    except OSError:
+        original_cwd = None
+    try:
+        return _dispatch(argv)
+    finally:
+        if original_cwd is not None:
+            try:
+                current = os.getcwd()
+            except OSError:
+                current = None
+            if current != original_cwd:
+                try:
+                    os.chdir(original_cwd)
+                except OSError:
+                    pass
+
+
+def _dispatch(argv: Optional[List[str]] = None) -> int:
+    """Inner command dispatcher (see :func:`main`)."""
     raw = list(sys.argv[1:] if argv is None else argv)
     argv0 = sys.argv[0] if sys.argv else ""
     is_dev_call = Path(argv0).name.lower() == "ck-dev"

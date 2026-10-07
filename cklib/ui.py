@@ -51,6 +51,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import unicodedata
 from typing import Any, Optional
 
 # ---------------------------------------------------------------------------
@@ -311,6 +312,48 @@ def strip_ansi(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Display width (terminal columns)
+# ---------------------------------------------------------------------------
+
+def char_width(ch: str) -> int:
+    """Number of terminal columns a single character occupies (0, 1, 2).
+
+    ``len()`` counts code points, not columns, so wide and combining
+    glyphs misalign fixed-width boxes. The rules here mirror common
+    terminal behaviour:
+
+    - East Asian Wide / Fullwidth characters occupy two columns;
+    - combining marks, zero-width joiners and format characters
+      occupy none;
+    - the emoji presentation selector (U+FE0F) promotes its base
+      glyph to the two-column emoji form, so it contributes one
+      extra column (``\u26a0\ufe0f`` renders two columns wide).
+    """
+    if ch == "\ufe0f":
+        return 1
+    if ch in ("\u200b", "\u200d"):
+        return 0
+    if unicodedata.combining(ch):
+        return 0
+    if unicodedata.category(ch) in ("Mn", "Me", "Cf"):
+        return 0
+    if unicodedata.east_asian_width(ch) in ("W", "F"):
+        return 2
+    return 1
+
+
+def display_width(text: str) -> int:
+    """Total terminal column width of ``text`` (never negative)."""
+    return sum(char_width(ch) for ch in text)
+
+
+def pad_to_width(text: str, width: int) -> str:
+    """Left-align ``text`` in ``width`` DISPLAY columns (not code points)."""
+    pad = width - display_width(text)
+    return text + " " * pad if pad > 0 else text
+
+
+# ---------------------------------------------------------------------------
 # Uninitialized / no-project state (read commands: ck st & co)
 # ---------------------------------------------------------------------------
 
@@ -356,6 +399,9 @@ __all__ = [
     "color_enabled",
     "get_palette",
     "strip_ansi",
+    "char_width",
+    "display_width",
+    "pad_to_width",
     "NO_PROJECT_HEADING",
     "NO_PROJECT_HINT",
     "render_no_project",

@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 CK_DIR_NAME = ".ck"
 # Entries in HISTORY.md before rotation archives it. Runtime
 # override: CK_HISTORY_LIMIT environment variable.
@@ -473,5 +473,37 @@ def file_lock(path: Path | str, *, timeout: float = 5.0,
                 pass
             try:
                 os.close(fd)
+            except OSError:
+                pass
+
+
+@contextlib.contextmanager
+def working_directory(path: Path | str) -> Iterator[None]:
+    """Temporarily ``chdir`` into ``path`` and ALWAYS restore the cwd.
+
+    Directory changes must never leak into the surrounding process or
+    the user's shell. The caller's original working directory is
+    captured up front and restored in a ``finally`` block, so the
+    process ends every command exactly where it started — on normal
+    return, on exception, and even when the target directory later
+    disappears.
+
+    Usage::
+
+        with working_directory(repo_root):
+            run_git()
+        # cwd is restored here
+    """
+    try:
+        original = os.getcwd()
+    except OSError:
+        original = None
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        if original is not None:
+            try:
+                os.chdir(original)
             except OSError:
                 pass
