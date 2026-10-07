@@ -247,8 +247,8 @@ class TestDashboardWidth(_IsolatedHome, unittest.TestCase):
             root.mkdir()
             ck = ContextKeeper(root=root)
             ck.init()
-            ck.add_task("x" * 120)
-            ck.start(2)
+            ck.add_task("x" * 120)  # replaces the init seed -> id 1
+            ck.start(1)
             ck.register(path=root, name="longtitle")
             out = _render_dashboard(
                 ck,
@@ -262,7 +262,7 @@ class TestDashboardWidth(_IsolatedHome, unittest.TestCase):
                     if l.startswith("| longtitle")]
             self.assertTrue(data)
             head_cell = lines[data[0]].split("|")[2]
-            self.assertIn("[2] [>]", head_cell)
+            self.assertIn("[1] [>]", head_cell)
             self.assertNotIn("x", head_cell)
             text_cell = lines[data[0] + 1].split("|")[2]
             self.assertLessEqual(len(text_cell.strip()), _FOCUS_TEXT_CAP)

@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.5.6-blue)]()
+[![version](https://img.shields.io/badge/version-0.6.0-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -103,7 +103,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.5.6
+ck -v    # → ck version 0.6.0
 ```
 
 ---
@@ -129,7 +129,7 @@ ck -v    # → ck version 0.5.6
 |--------|------------|
 | ck init | Initialize the project locally (.ck/ structure and gitignore rules); does not touch the global registry |
 | ck init --register | Initialize locally and register the project in `~/.config/ck/projects.json` |
-| ck add \<text\> | Add a new open task (inserted before `## Completed`) |
+| ck add \<text\> | Add a new open task (inserted before `## Completed`). On a freshly initialized plan holding only the untouched `ck init` seed task (`Describe the first task` / `Описать первую задачу`), the seed is replaced in place instead of appending a second entry |
 | ck start \<ID\> | Focus a task (`- [>]`); `ck start 0` resets focus. A noted task that loses focus moves to Unfocused / Paused Context (note preserved until `ck done` archives it); a noteless one gets a soft attach-a-note hint |
 | ck done \<ID\|range\|list\> | Mark task(s) done (`- [x]`), e.g. `3`, `2-4`, `1,3,5`. Bare `ck done` completes the CURRENT FOCUS (usage error without one); the completed task's process note is archived into HISTORY.md and cleared |
 | ck note \<text\> | Attach/update a process note on the active task (shown in `ck st`; archived to HISTORY.md by `ck done`) |
@@ -152,6 +152,14 @@ ck -v    # → ck version 0.5.6
 | ck register [-n NAME] [--path PATH] | Add a project to the global registry |
 | ck unregister [--path PATH \| NAME] | Remove a project from the registry |
 | ck prune | Purge registry entries whose folders no longer exist; reports each purged path and a summary count |
+| ck local add \<text\> | Add a task to the workstation space (`~/.config/ck/spaces/local.md`; directories created lazily) |
+| ck local list | List workstation space tasks (pipe-friendly) |
+| ck remote add \<text\> | Add a task to the infrastructure space (`~/.config/ck/spaces/remote.md`) |
+| ck remote list | List infrastructure space tasks |
+
+The `ck dashboard` / `ck -g` output always opens with a fixed `[SYSTEM / OPS]`
+section listing the active focus task and pending open tasks from both the
+`local` and `remote` spaces, rendered above the Git projects table.
 | ck info | Installation diagnostics (version, branch, paths) |
 | ck install | Copy ck to ~/.local/bin/ck (physical executable file, no symlink) + cklib snapshot to ~/.local/share/ck; no sudo |
 | ck uninstall | Remove ~/.local/bin/ck, the cklib snapshot and any legacy ~/.local/bin/ck-dev |

@@ -194,13 +194,14 @@ class TestCliDispatch(_IsolatedHome, unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
             ck = self._make_project(tmp)
+            # Fresh plan: the first add replaces the init seed -> id 1.
             ck.add_task("alpha task")
             ck.add_task("beta task")
 
             out = self._run(["list"], ck.root)
-            self.assertIn("[ ] 1. Describe the first task", out)
-            self.assertIn("[ ] 2. alpha task", out)
-            self.assertIn("[ ] 3. beta task", out)
+            self.assertIn("[ ] 1. alpha task", out)
+            self.assertIn("[ ] 2. beta task", out)
+            self.assertNotIn("Describe the first task", out)
 
     def test_st_l_is_list(self):
         """`ck st -l` prints the same listing as `ck list`."""
@@ -495,6 +496,7 @@ class TestDoneImplicitFocus(_IsolatedHome, unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
             ck = self._make_project(tmp)
+            # Fresh plan: the first add replaces the init seed -> id 1.
             self._run(["add", "alpha task"], ck.root)
             self._run(["add", "beta task"], ck.root)
             self._run(["start", "1"], ck.root)
@@ -504,9 +506,9 @@ class TestDoneImplicitFocus(_IsolatedHome, unittest.TestCase):
             self.assertIn("[ok] Marked done: 1", out)
 
             text = ck.plan_file.read_text(encoding="utf-8")
-            self.assertIn("- [x] Describe the first task", text)
-            self.assertIn("- [ ] alpha task", text)
+            self.assertIn("- [x] alpha task", text)
             self.assertIn("- [ ] beta task", text)
+            self.assertNotIn("Describe the first task", text)
 
     def test_bare_done_via_legacy_dispatch(self):
         """Both parsers (argparse + legacy positional) share the
@@ -514,15 +516,16 @@ class TestDoneImplicitFocus(_IsolatedHome, unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
             ck = self._make_project(tmp)
+            # Fresh plan: the add replaces the seed -> alpha is id 1.
             self._run(["add", "alpha task"], ck.root)
-            self._run(["start", "2"], ck.root)  # alpha (init seed = 1)
+            self._run(["start", "1"], ck.root)
 
             code, out = self._run(["done"], ck.root)
             self.assertEqual(code, 0)
-            self.assertIn("[ok] Marked done: 2", out)
+            self.assertIn("[ok] Marked done: 1", out)
             text = ck.plan_file.read_text(encoding="utf-8")
             self.assertIn("- [x] alpha task", text)
-            self.assertIn("- [ ] Describe the first task", text)
+            self.assertNotIn("Describe the first task", text)
 
     def test_bare_done_without_focus_prints_usage_and_fails(self):
         with tempfile.TemporaryDirectory() as td:
@@ -552,12 +555,13 @@ class TestDoneImplicitFocus(_IsolatedHome, unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
             ck = self._make_project(tmp)
+            # Fresh plan: alpha replaces the seed (id 1), beta is id 2.
             self._run(["add", "alpha task"], ck.root)
             self._run(["add", "beta task"], ck.root)
 
-            code, out = self._run(["done", "3"], ck.root)
+            code, out = self._run(["done", "2"], ck.root)
             self.assertEqual(code, 0)
-            self.assertIn("[ok] Marked done: 3", out)
+            self.assertIn("[ok] Marked done: 2", out)
             self.assertIn("- [x] beta task",
                           ck.plan_file.read_text(encoding="utf-8"))
 

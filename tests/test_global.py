@@ -246,18 +246,19 @@ class TestDashboardTable(_IsolatedRegistry, unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             target = _project_dir(Path(td), "alpha")
             ck = ContextKeeper(root=target)
+            # Fresh plan: the first add REPLACES the init seed -> id 1.
             ck.add_task("implement feature X")
-            ck.start(2)
+            ck.start(1)
             ck.register(path=target, name="alpha")
 
             out = self._render(ck)
             # Focused task renders as a two-line cell: ``[<id>]
             # [>]`` on the head line, the (truncated) text below.
-            self.assertIn("[2] [>]", out)
+            self.assertIn("[1] [>]", out)
             self.assertIn("implement feature X", out)
             # Progress renders as a compact TWO-LINE ratio:
             # ``done/total`` on line 1, ``(pct%)`` on line 2.
-            self.assertIn("0/2", out)
+            self.assertIn("0/1", out)
             self.assertIn("(0.0%)", out)
 
     def test_dashboard_no_focus(self):
@@ -390,27 +391,31 @@ class TestDashboardVerbose(_IsolatedRegistry, unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             target = _project_dir(Path(td), "alpha")
             ck = ContextKeeper(root=target)
-            # Default plan ships one open task (id 1); add prev ->
-            # done, focus -> focused, next -> open.
+            # Fresh plan: the first add REPLACES the init seed (id 1);
+            # add prev -> done, focus -> focused, next -> open.
             ck.add_task("prev task")
             ck.add_task("focus task")
             ck.add_task("next task")
-            ck.done("2")
-            ck.start(3)
+            ck.done("1")
+            ck.start(2)
             ck.register(path=target, name="alpha")
 
             out = self._render(ck)
-            lines = out.splitlines()
-            self.assertEqual(lines[0], "MY PROJECTS (1)")
+            # The fixed [SYSTEM / OPS] section renders above the
+            # projects block view.
+            self.assertIn("MY PROJECTS (1)", out)
+            self.assertLess(
+                out.index("[SYSTEM / OPS]"), out.index("MY PROJECTS (1)")
+            )
             # cwd marker: the project block carries [*]
             self.assertIn("> alpha [*]", out)
             self.assertIn(f"    @ {target.resolve()}", out)
-            self.assertIn("    [%] Progress: 1/4 (25.0%)", out)
+            self.assertIn("    [%] Progress: 1/3 (33.3%)", out)
             self.assertIn("    -> Context:", out)
             # Vertical triad order: PREV < FOCUS < NEXT.
-            idx_prev = out.index("<< [2] prev task [x]")
-            idx_focus = out.index("[>] [3] focus task")
-            idx_next = out.index(">> [4] next task [ ]")
+            idx_prev = out.index("<< [1] prev task [x]")
+            idx_focus = out.index("[>] [2] focus task")
+            idx_next = out.index(">> [3] next task [ ]")
             self.assertLess(idx_prev, idx_focus)
             self.assertLess(idx_focus, idx_next)
             # Each block is isolated by a 61-char separator bar.
@@ -422,9 +427,8 @@ class TestDashboardVerbose(_IsolatedRegistry, unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             target = _project_dir(Path(td), "finished")
             ck = ContextKeeper(root=target)
-            ck.add_task("only task")
+            ck.add_task("only task")  # replaces the init seed -> id 1
             ck.done("1")
-            ck.done("2")
             ck.register(path=target, name="finished")
 
             out = self._render(ck)
@@ -474,12 +478,12 @@ class TestDashboardVerbose(_IsolatedRegistry, unittest.TestCase):
             target = _project_dir(Path(td), "longtitle")
             title = "x" * 120
             ck = ContextKeeper(root=target)
-            ck.add_task(title)
-            ck.start(2)
+            ck.add_task(title)  # replaces the init seed -> id 1
+            ck.start(1)
             ck.register(path=target, name="longtitle")
 
             out = self._render(ck)
-            self.assertIn(f"[>] [2] {title}", out)
+            self.assertIn(f"[>] [1] {title}", out)
 
 
 # A local copy of the safe parse helper that doesn't depend on core's

@@ -369,10 +369,10 @@ class TestAddTaskIsAstBased(IsolatedHomeMixin, unittest.TestCase):
             tmp = Path(td)
             ck = _make_ck(tmp)
 
-            # init() creates a default task (id=1); add_task 3 times
-            # gives ids 2, 3, 4. The new add returns 5.
+            # init() creates the default seed, which the FIRST add
+            # replaces (id=1); beta=2, gamma=3. The new add returns 4.
             new_id = ck.add_task("delta")
-            self.assertEqual(new_id, 5)
+            self.assertEqual(new_id, 4)
             text = ck.plan_file.read_text(encoding="utf-8")
             self.assertIn("- [ ] delta", text)
             self.assertNotIn("- [] delta", text)
@@ -405,7 +405,6 @@ class TestStartAndDone(IsolatedHomeMixin, unittest.TestCase):
             ck = _make_ck(tmp)
             ck.done("1")
             ck.done("2-3")
-            ck.done("4")
             tl = parse_plan_file(ck.plan_file)
             self.assertTrue(all(t.status == TaskStatus.DONE for t in tl.tasks))
 

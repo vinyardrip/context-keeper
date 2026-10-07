@@ -69,6 +69,14 @@ Global (all registered projects):
   unregister [--path PATH | NAME]     Remove a project from the registry
   prune                              Drop entries whose folders no longer exist
 
+Spaces (out-of-project task lists):
+  local add <text>          Add a task to the workstation space
+                            (~/.config/ck/spaces/local.md)
+  local list                List workstation space tasks
+  remote add <text>         Add a task to the infrastructure space
+                            (~/.config/ck/spaces/remote.md)
+  remote list               List infrastructure space tasks
+
 Editor resolution (ck edit / ck log):
   1. "editor" key in .ck.json at the project root
   2. $VISUAL
@@ -319,6 +327,7 @@ _LEGACY_CHOICES = (
     "init", "st", "dashboard", "start", "done", "add", "note", "notes",
     "save", "edit", "log", "install", "uninstall", "update", "help",
     "list", "register", "unregister", "prune", "info",
+    "local", "remote",
     "dev", "sandbox", "ck-clean",
 )
 
@@ -351,6 +360,8 @@ _LEGACY_FLAGS: dict[str, frozenset] = {
     "register": frozenset({"-n", "--name", "--path"}),
     "unregister": frozenset({"--path"}),
     "prune": frozenset(),
+    "local": frozenset(),
+    "remote": frozenset(),
     "install": frozenset({"--dev"}),
     "uninstall": frozenset(),
     "update": frozenset(),
@@ -850,6 +861,8 @@ def _legacy_dispatch(raw: List[str]) -> int:
                 )
             else:
                 print("[ok] Nothing to prune.")
+        elif cmd in ("local", "remote"):
+            return _run_space_command(cmd, rest)
         elif cmd == "install":
             _install_user(dev="--dev" in rest or is_dev_entrypoint())
         elif cmd == "uninstall":
@@ -893,6 +906,45 @@ def _legacy_dispatch(raw: List[str]) -> int:
     except OSError as e:
         _print_error(f"ERROR: I/O error: {e}")
         return 4
+
+
+# ---------------------------------------------------------------------- #
+# Out-of-project spaces (ck local / ck remote)
+# ---------------------------------------------------------------------- #
+
+def _run_space_command(space: str, rest: List[str]) -> int:
+    """Dispatch ``ck local`` / ``ck remote`` (add / list only).
+
+    Strictly explicit: the only accepted forms are
+    ``ck <space> add <text>`` and ``ck <space> list`` — there are no
+    aliases (``-s`` / ``sm`` / ``host`` / ``-m`` / ``virtual`` are
+    deliberately unsupported) and an unknown action is an error.
+    """
+    from . import spaces
+
+    usage = f"Usage: ck {space} <add <text>|list>"
+    if not rest:
+        print(usage)
+        return 2
+    action, args = rest[0], rest[1:]
+    if action == "add":
+        if not args:
+            print(f"Usage: ck {space} add <text>")
+            return 2
+        text = " ".join(args)
+        new_id = spaces.add_space_task(space, text)
+        print(f"[ok] Added task to {space} space (id={new_id}): {text}")
+        return 0
+    if action == "list":
+        if args:
+            _print_error(f"ERROR: `ck {space} list` takes no arguments.")
+            return 2
+        print(spaces.list_space(space))
+        return 0
+    _print_error(
+        f"ERROR: Unknown `ck {space}` action: {action!r}\n   {usage}"
+    )
+    return 2
 
 
 # ---------------------------------------------------------------------- #
