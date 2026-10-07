@@ -112,7 +112,7 @@ class TestAddTaskSanitization(_IsolatedHome, unittest.TestCase):
             ck = self._ck(Path(td))
             new_id = ck.add_task("\x1b[33m\x1b[1mDeploy to prod\x1b[0m")
 
-            self.assertEqual(new_id, 2)  # after the default init task
+            self.assertEqual(new_id, 1)  # replaces the default init task
             text = ck.plan_file.read_text(encoding="utf-8")
             self.assertIn("- [ ] Deploy to prod", text)
             self.assertNotIn("\x1b", text)

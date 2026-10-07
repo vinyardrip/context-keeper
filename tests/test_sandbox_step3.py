@@ -153,7 +153,8 @@ class TestAddTaskInterception(_SnapshottedProject):
 
         os.environ["CK_SANDBOX"] = "1"
         new_id = ck.add_task("dev-mode task")
-        self.assertEqual(new_id, 4)  # init=1, alpha=2, beta=3
+        # First add replaced the init seed (alpha=1), beta=2, new=3.
+        self.assertEqual(new_id, 3)
 
         # Real project: byte-identical, mtimes unchanged.
         after = self.snapshot_tree(root)
@@ -171,19 +172,20 @@ class TestAddTaskInterception(_SnapshottedProject):
         before = self.snapshot_tree(root)
 
         os.environ["CK_SANDBOX"] = "1"
-        ck.start(2)   # alpha task (init=1, alpha=2, beta=3)
-        ck.done("1")  # the default init task
+        ck.start(1)   # alpha task (alpha=1 after seed replacement, beta=2)
+        ck.done("2")  # beta task
 
         self.assertEqual(self.snapshot_tree(root), before)
         from cklib.sandbox import resolve_write_path
         sandboxed = resolve_write_path(ck.plan_file)
         self.assertIn("- [>] alpha task",
                       sandboxed.read_text(encoding="utf-8"))
-        self.assertIn("- [x] Describe the first task",
+        self.assertIn("- [x] beta task",
                       sandboxed.read_text(encoding="utf-8"))
-        # Read-your-writes: BOTH mutations composed in one copy.
-        self.assertIn("- [ ] beta task",
-                      sandboxed.read_text(encoding="utf-8"))
+        # Read-your-writes: BOTH mutations composed in one copy
+        # (the seed was replaced, so it is gone).
+        self.assertNotIn("Describe the first task",
+                         sandboxed.read_text(encoding="utf-8"))
 
 
 class TestRegistryInterception(_SnapshottedProject):
@@ -1080,8 +1082,8 @@ class TestPromotionWithoutRootPlan(_SnapshottedProject):
         # Read commands render the promoted content immediately.
         self.assertIn("brand-new task", keeper.tasks())
         # The compact status block hides tail tasks, but its progress
-        # counters prove the promoted root plan was parsed (4 tasks).
-        self.assertIn("0/4 tasks done", keeper.status())
+        # counters prove the promoted root plan was parsed (3 tasks).
+        self.assertIn("0/3 tasks done", keeper.status())
         self.assertIn("brand-new task", keeper.full_plan_text())
 
     def test_promotion_without_root_plan_converges(self):
@@ -1173,9 +1175,9 @@ class TestPromotionWithoutRootPlan(_SnapshottedProject):
             (["list"], "brand-new task"),
             (["st", "-l"], "brand-new task"),
             # The compact status block hides tail tasks, but its
-            # progress counters prove the promoted root plan (4 tasks
+            # progress counters prove the promoted root plan (3 tasks
             # after the add) was parsed.
-            (["st"], "0/4 tasks done"),
+            (["st"], "0/3 tasks done"),
         ):
             out = subprocess.run(
                 [sys.executable, str(checkout / "ck-dev"), *argv],

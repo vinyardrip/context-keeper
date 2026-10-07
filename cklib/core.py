@@ -21,6 +21,7 @@ from typing import Callable, Optional, Tuple
 
 from . import git as gith
 from . import registry
+from . import spaces
 from . import ui
 from .sandbox import (
     PROJECTS_SUBDIR,
@@ -35,6 +36,7 @@ from .config import (
     CK_DIR_NAME,
     DEFAULT_CK_GITIGNORE,
     DEFAULT_PLAN,
+    DEFAULT_TASK_TITLES,
     DEFAULT_PROMPT,
     DEFAULT_REPO_BRANCH,
     DEFAULT_REPO_URL,
@@ -980,6 +982,20 @@ class ContextKeeper:
             return 1
 
         tl = self._load_plan()
+        # DEFAULT-TASK AUTO-REPLACEMENT: the plan shipped by `ck init`
+        # carries exactly one untouched open seed task ("Describe the
+        # first task"). The very first `ck add` REPLACES that
+        # placeholder in place instead of appending a second task, so
+        # a fresh project never shows a dummy entry next to real work.
+        # Any edit, status change (done/focused), extra task, or
+        # multi-task plan disables the shortcut — normal append
+        # behaviour applies.
+        if _is_pristine_default_plan(tl):
+            seed = tl.tasks[0]
+            seed.title = title
+            self._commit_plan(tl)
+            self._sync_active_task(tl)
+            return seed.id
         section = _section_for_new_task(tl)
         insert_line = _sprint_insert_line(tl)
         new_task = tl.add(
@@ -2349,6 +2365,23 @@ class UpdateResult:
 # AST placement helpers (no string juggling)
 # ---------------------------------------------------------------------- #
 
+def _is_pristine_default_plan(tl: TaskList) -> bool:
+    """True when ``tl`` is exactly the untouched ``ck init`` seed.
+
+    The seed is a single OPEN task whose title matches the default
+    placeholder (either language variant). Any edit to that title, a
+    second task, or a done/focused status makes this False, so the
+    default-replacement shortcut in :meth:`ContextKeeper.add_task`
+    only ever fires on a genuinely fresh project.
+    """
+    if len(tl.tasks) != 1:
+        return False
+    task = tl.tasks[0]
+    if task.status != TaskStatus.OPEN:
+        return False
+    return task.title.strip() in DEFAULT_TASK_TITLES
+
+
 def _section_for_new_task(tl: TaskList) -> str:
     """Pick a sensible section for a brand-new OPEN task.
 
@@ -3151,8 +3184,13 @@ def _render_dashboard(ck: Optional[ContextKeeper], *, list_projects,
     render ``corrupt`` — neither ever crashes the whole table.
     """
     entries = list_projects()
+    # FIXED TOP SECTION: the out-of-project `local` / `remote` spaces
+    # always render above the Git projects table (and even when no
+    # project is registered) so the dashboard layout is stable.
+    ops_block = spaces.render_system_ops_block()
     if not entries:
         return (
+            ops_block + "\n\n"
             "Global Dashboard\n"
             "[i] No registered projects. Run `ck register` "
             "in a project directory to begin.\n"
@@ -3197,7 +3235,7 @@ def _render_dashboard(ck: Optional[ContextKeeper], *, list_projects,
             f"\n\n[i] Found {missing_count} missing project(s). "
             "Run 'ck prune' to cleanup."
         )
-    return rendered
+    return ops_block + "\n\n" + rendered
 
 
 def read_paused_tasks(project_root: Path) -> list[dict]:

@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-VERSION = "0.5.6"
+VERSION = "0.6.0"
 CK_DIR_NAME = ".ck"
 # Entries in HISTORY.md before rotation archives it. Runtime
 # override: CK_HISTORY_LIMIT environment variable.
@@ -75,6 +75,22 @@ GLOBAL_CONFIG_DIR = Path.home() / ".config" / "ck"
 GLOBAL_REGISTRY_FILE = GLOBAL_CONFIG_DIR / "projects.json"
 GLOBAL_STATE_FILE = GLOBAL_CONFIG_DIR / "state.json"
 LEGACY_GLOBAL_CONFIG_FILE = Path.home() / ".ckrc"
+
+# Out-of-project task spaces (``ck local`` / ``ck remote``). Stored
+# as plain Markdown plans under ``~/.config/ck/spaces/<name>.md``.
+SPACES_DIR_NAME = "spaces"
+SPACE_NAMES: tuple[str, ...] = ("local", "remote")
+SPACE_LOCAL = "local"
+SPACE_REMOTE = "remote"
+
+# Title of the seed task written by ``ck init`` (see DEFAULT_PLAN).
+# When the very first ``ck add`` finds a plan holding ONLY this
+# untouched seed task, the seed is REPLACED instead of a second task
+# being appended. Both language variants are recognised.
+DEFAULT_TASK_TITLES: tuple[str, ...] = (
+    "Describe the first task",
+    "Описать первую задачу",
+)
 
 # Update notifier throttle window.
 UPDATE_CHECK_INTERVAL_HOURS = 24
