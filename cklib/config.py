@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-VERSION = "0.6.2"
+VERSION = "0.6.3"
 CK_DIR_NAME = ".ck"
 # Entries in HISTORY.md before rotation archives it. Runtime
 # override: CK_HISTORY_LIMIT environment variable.
@@ -83,12 +83,17 @@ SPACE_NAMES: tuple[str, ...] = ("local", "remote")
 SPACE_LOCAL = "local"
 SPACE_REMOTE = "remote"
 
-# Seed task title written by ``ck init`` (see DEFAULT_PLAN). This is
-# the SINGLE SOURCE OF TRUTH: the init template interpolates it and the
-# replacement guard compares against it, so the two can never drift
-# apart. When the very first ``ck add`` finds a plan holding ONLY this
-# exact, still-open seed task, the seed is REPLACED instead of a
-# second task being appended. Both language variants are recognised.
+# STRUCTURAL PLACEHOLDER MARKER. The ``ck init`` seed task carries
+# this literal HTML comment appended to its raw Markdown line. The very
+# first ``ck add`` replaces that seed IF AND ONLY IF the plan holds a
+# single open task whose raw line still contains this marker. Detection
+# is purely structural — no locale/title string matching — so a task
+# whose title merely resembles the seed is never overwritten.
+PLACEHOLDER_MARKER = "<!-- ck:placeholder -->"
+
+# Display/legacy seed titles, kept so documentation and any external
+# tooling can reference the human-readable seed text. The replacement
+# guard does NOT use these for matching (see PLACEHOLDER_MARKER).
 DEFAULT_FIRST_TASK_TITLE = "Describe the first task"
 DEFAULT_FIRST_TASK_TITLE_RU = "Описать первую задачу"
 DEFAULT_TASK_TITLES: tuple[str, ...] = (
@@ -134,7 +139,7 @@ COLOR_CONFIG_KEY = "colors"
 DEFAULT_PLAN = f"""# {{project_name}}
 
 ## Current Sprint
-- [] {DEFAULT_FIRST_TASK_TITLE}
+- [] {DEFAULT_FIRST_TASK_TITLE} {PLACEHOLDER_MARKER}
 
 ## Completed
 """
