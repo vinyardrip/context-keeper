@@ -9,8 +9,9 @@ Covered surface:
   completed, focused, or accompanied by other tasks.
 - ``ck local`` / ``ck remote`` manage ``~/.config/ck/spaces/*.md``
   with lazily-created parent directories.
-- The ``[SYSTEM / OPS]`` block renders above the Git projects table in
-  ``ck dashboard`` with focus + pending tasks from both spaces.
+- The unified ``SPACES (GLOBAL CONTEXTS)`` table renders above the Git
+  projects table in ``ck dashboard``, using the SAME grid formatter
+  (Space | Focus Task | Progress | Last Active) — no list-style dump.
 """
 
 from __future__ import annotations
@@ -362,19 +363,32 @@ class TestSpacesCli(_IsolatedHome):
 
 
 # --------------------------------------------------------------------------- #
-# 4. [SYSTEM / OPS] dashboard overlay
+# 4. Unified SPACES (GLOBAL CONTEXTS) dashboard table
 # --------------------------------------------------------------------------- #
 
 
-class TestSystemOpsBlock(_IsolatedHome):
-    def test_block_header_and_empty_spaces(self):
-        block = spaces.render_system_ops_block()
-        self.assertEqual(block.splitlines()[0], "[SYSTEM / OPS]")
-        self.assertIn("  LOCAL:", block)
-        self.assertIn("  REMOTE:", block)
-        self.assertIn("(empty)", block)
+class TestSpacesTable(_IsolatedHome):
+    """LOCAL / REMOTE render through the shared table pipeline."""
 
-    def test_block_lists_focus_and_pending(self):
+    def test_spaces_render_in_table_not_list_dump(self):
+        spaces.add_space_task("local", "install drivers")
+        spaces.add_space_task("remote", "provision VPS")
+
+        out = ContextKeeper(root=Path(tempfile.gettempdir())).dashboard()
+
+        # Exactly one header row with the four standard columns.
+        header = [l for l in out.splitlines() if l.startswith("| Space")]
+        self.assertEqual(len(header), 1, f"no spaces header in:\n{out}")
+        cells = [c.strip() for c in header[0].strip("|").split("|")]
+        self.assertEqual(
+            cells, ["Space", "Focus Task", "Progress", "Last Active"])
+        # Both spaces appear as table rows.
+        self.assertIn("LOCAL", out)
+        self.assertIn("REMOTE", out)
+        # The old list-style section is gone.
+        self.assertNotIn("[SYSTEM / OPS]", out)
+
+    def test_spaces_cells_carry_focus_progress_and_last_active(self):
         path = spaces.space_path("local")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
@@ -383,12 +397,21 @@ class TestSystemOpsBlock(_IsolatedHome):
             encoding="utf-8",
         )
         spaces.add_space_task("remote", "provision VPS")
-        block = spaces.render_system_ops_block()
-        self.assertIn("[>] [1] install drivers", block)
-        self.assertIn("[ ] [2] cleanup _tests", block)
-        self.assertIn("[ ] [1] provision VPS", block)
 
-    def test_dashboard_renders_block_above_projects(self):
+        out = ContextKeeper(root=Path(tempfile.gettempdir())).dashboard()
+
+        # Focus cell: [<id>] [>] head plus the focused task title.
+        self.assertIn("[1] [>]", out)
+        self.assertIn("install drivers", out)
+        # Progress cell: single-line "<done>/<total> (<pct>%)".
+        self.assertRegex(out, r"0/2 \(0\.0%\)")
+        # Space cell carries name + path (contracted like projects).
+        self.assertIn("spaces/local.md", out)
+        # The unformatted task list is NOT dumped any more.
+        self.assertNotIn("[SYSTEM / OPS]", out)
+        self.assertNotIn("[ ] [2] cleanup _tests", out)
+
+    def test_spaces_table_renders_above_projects(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "alpha"
             root.mkdir()
@@ -399,20 +422,20 @@ class TestSystemOpsBlock(_IsolatedHome):
             spaces.add_space_task("remote", "infra task")
 
             out = ContextKeeper(root=root).dashboard()
-            self.assertIn("[SYSTEM / OPS]", out)
-            self.assertIn("workstation task", out)
-            self.assertIn("infra task", out)
+            self.assertIn("SPACES (GLOBAL CONTEXTS)", out)
             self.assertIn("GLOBAL DASHBOARD", out)
             self.assertLess(
-                out.index("[SYSTEM / OPS]"), out.index("GLOBAL DASHBOARD")
+                out.index("SPACES (GLOBAL CONTEXTS)"),
+                out.index("GLOBAL DASHBOARD"),
             )
 
-    def test_dashboard_renders_block_with_no_projects(self):
+    def test_spaces_table_renders_with_no_projects(self):
         out = ContextKeeper(root=Path(tempfile.gettempdir())).dashboard()
-        self.assertIn("[SYSTEM / OPS]", out)
+        self.assertIn("SPACES (GLOBAL CONTEXTS)", out)
         self.assertIn("No registered projects", out)
         self.assertLess(
-            out.index("[SYSTEM / OPS]"), out.index("No registered projects")
+            out.index("SPACES (GLOBAL CONTEXTS)"),
+            out.index("No registered projects"),
         )
 
 

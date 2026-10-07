@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.6.4-blue)]()
+[![version](https://img.shields.io/badge/version-0.6.5-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -103,7 +103,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.6.4
+ck -v    # → ck version 0.6.5
 ```
 
 ---
@@ -157,9 +157,10 @@ ck -v    # → ck version 0.6.4
 | ck remote add \<text\> | Add a task to the infrastructure space (`~/.config/ck/spaces/remote.md`) |
 | ck remote list | List infrastructure space tasks |
 
-The `ck dashboard` / `ck -g` output always opens with a fixed `[SYSTEM / OPS]`
-section listing the active focus task and pending open tasks from both the
-`local` and `remote` spaces, rendered above the Git projects table.
+The `ck dashboard` / `ck -g` output always opens with a unified
+`SPACES (GLOBAL CONTEXTS)` table (`Space | Focus Task | Progress | Last
+Active`) covering both the `local` and `remote` spaces, rendered above the
+Git projects table through the same table formatter.
 | ck info | Installation diagnostics (version, branch, paths) |
 | ck install | Copy ck to ~/.local/bin/ck (physical executable file, no symlink) + cklib snapshot to ~/.local/share/ck; no sudo |
 | ck uninstall | Remove ~/.local/bin/ck, the cklib snapshot and any legacy ~/.local/bin/ck-dev |

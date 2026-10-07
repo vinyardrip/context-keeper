@@ -290,11 +290,14 @@ class TestDashboardWidth(_IsolatedHome, unittest.TestCase):
             "p",                        # short path, still contracts
             "a-very-long-project-directory-name-that-keeps-going",
         ])
+        # Scope to the PROJECTS table: the unified spaces table above
+        # it renders its OWN contracted path cells too.
+        projects = out.split("GLOBAL DASHBOARD", 1)[-1]
         def _is_path_line(l: str) -> bool:
             cell = l.split("|")[1] if l.startswith("|") else ""
             return cell.strip().startswith(("/../", "~/../"))
 
-        path_lines = [l for l in out.splitlines() if _is_path_line(l)]
+        path_lines = [l for l in projects.splitlines() if _is_path_line(l)]
         self.assertEqual(len(path_lines), 2,
                          f"expected two contracted path lines:\n{out}")
         for line in path_lines:
@@ -317,7 +320,10 @@ class TestDashboardWidth(_IsolatedHome, unittest.TestCase):
         """Deeply nested paths keep the LAST TWO segments: the
         immediate parent dir plus the project dir."""
         out = self._render_with(["myproject"])
-        line = next(l for l in out.splitlines()
+        # Scope to the PROJECTS table (the spaces table above it also
+        # emits contracted path cells).
+        projects = out.split("GLOBAL DASHBOARD", 1)[-1]
+        line = next(l for l in projects.splitlines()
                     if l.startswith("|")
                     and l.split("|")[1].strip().startswith(("/../", "~/../")))
         cell = line.split("|")[1].strip()
