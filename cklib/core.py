@@ -36,7 +36,6 @@ from .config import (
     CK_DIR_NAME,
     DEFAULT_CK_GITIGNORE,
     DEFAULT_PLAN,
-    DEFAULT_TASK_TITLES,
     DEFAULT_PROMPT,
     DEFAULT_REPO_BRANCH,
     DEFAULT_REPO_URL,
@@ -45,6 +44,7 @@ from .config import (
     GLOBAL_STATE_FILE,
     HISTORY_FILENAME,
     LEGACY_GLOBAL_CONFIG_FILE,
+    PLACEHOLDER_MARKER,
     compress_archives_enabled,
     history_limit,
     max_bak_files,
@@ -2366,29 +2366,42 @@ class UpdateResult:
 # ---------------------------------------------------------------------- #
 
 def _is_pristine_default_plan(tl: TaskList) -> bool:
-    """True when ``tl`` is exactly the untouched ``ck init`` seed.
+    """True when ``tl`` still holds the untouched ``ck init`` seed.
 
     The replacement shortcut in :meth:`ContextKeeper.add_task` fires
     IF AND ONLY IF all three conditions hold simultaneously:
 
     1. the plan holds exactly one task (``len(tasks) == 1``);
     2. that task is still OPEN / incomplete (``[ ]``);
-    3. its title matches the default placeholder written by ``ck init``
-       verbatim (either language variant).
+    3. the RAW Markdown source line of that task contains the
+       structural marker :data:`cklib.config.PLACEHOLDER_MARKER`
+       (``<!-- ck:placeholder -->``).
 
-    Any edit to the title — even a single character — a second task,
-    or a done/focused status makes this False, so the placeholder is
-    never overwritten once real work exists. The default titles come
-    from :data:`cklib.config.DEFAULT_TASK_TITLES`, the same single
-    source of truth the init template interpolates.
+    Detection is purely structural: no locale or title string is ever
+    compared, so a user task that merely resembles the seed text is
+    never overwritten. Once the seed is replaced the marker is gone,
+    so subsequent adds always append with an incremented ID.
     """
     if len(tl.tasks) != 1:
         return False
     task = tl.tasks[0]
     if task.status != TaskStatus.OPEN:
         return False
-    title = task.title.strip()
-    return any(title == default.strip() for default in DEFAULT_TASK_TITLES)
+    return PLACEHOLDER_MARKER in _raw_source_line(tl, task)
+
+
+def _raw_source_line(tl: TaskList, task: Task) -> str:
+    """The original Markdown line backing ``task`` (empty if unknown).
+
+    Reads from ``tl.source_text`` (the on-disk document captured at
+    parse time) using the task's 1-based ``line_number``, so the check
+    sees the raw text exactly as written — including HTML comments
+    that a title-only view might obscure.
+    """
+    lines = tl.source_text.splitlines()
+    if 1 <= task.line_number <= len(lines):
+        return lines[task.line_number - 1]
+    return ""
 
 
 def _section_for_new_task(tl: TaskList) -> str:

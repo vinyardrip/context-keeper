@@ -6,10 +6,11 @@ call reads and writes ``.ck/PLAN.md``, so the test fails if the
 placeholder-replacement guard keeps matching a single-task list after
 the placeholder has already been replaced (the v0.6.2 regression).
 
-The replacement rule is strict: task #1 is replaced IF AND ONLY IF the
-plan holds exactly ONE task, that task is still open (``[ ]``), and its
-title matches the `ck init` placeholder verbatim. Otherwise new tasks
-are appended with incrementing IDs.
+The replacement rule is strict and structural: task #1 is replaced IF
+AND ONLY IF the plan holds exactly ONE task, that task is still open
+(``[ ]``), and its RAW Markdown line contains the
+``<!-- ck:placeholder -->`` marker. Otherwise new tasks are appended
+with incrementing IDs.
 """
 
 from __future__ import annotations
@@ -44,8 +45,10 @@ def _task_count(listing: str) -> int:
 def test_init_then_consecutive_add_replaces_then_appends(tmp_path, monkeypatch):
     plan = tmp_path / ".ck" / "PLAN.md"
 
-    # 1. ck init -> a single default placeholder task (#1).
+    # 1. ck init -> a single default placeholder task (#1) carrying
+    # the structural marker in its raw PLAN.md line.
     _cli(tmp_path, ["init"], monkeypatch)
+    assert "<!-- ck:placeholder -->" in plan.read_text(encoding="utf-8")
     listing = _cli(tmp_path, ["list"], monkeypatch)
     assert "[ ] 1. Describe the first task" in listing
     assert _task_count(listing) == 1
@@ -55,7 +58,9 @@ def test_init_then_consecutive_add_replaces_then_appends(tmp_path, monkeypatch):
     listing = _cli(tmp_path, ["list"], monkeypatch)
     assert "[ ] 1. First User Task" in listing
     assert _task_count(listing) == 1
-    assert "Describe the first task" not in plan.read_text(encoding="utf-8")
+    text = plan.read_text(encoding="utf-8")
+    assert "Describe the first task" not in text
+    assert "<!-- ck:placeholder -->" not in text
 
     # 3. Second add APPENDS as #2; #1 must be preserved untouched.
     _cli(tmp_path, ["add", "Second User Task"], monkeypatch)

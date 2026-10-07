@@ -110,14 +110,16 @@ class TestDefaultTaskReplacement(_IsolatedHome):
             # Exactly one task in the plan — no duplicate seed.
             self.assertEqual(ck.tasks().count(". "), 1)
 
-    def test_replacement_recognizes_russian_seed(self):
+    def test_replacement_recognizes_marked_seed(self):
+        """A localized seed carrying the structural marker is replaced."""
         with tempfile.TemporaryDirectory() as td:
             root = Path(td) / "project"
             root.mkdir()
             ck = ContextKeeper(root=root)
             ck.ck_path.mkdir(parents=True, exist_ok=True)
             ck.plan_file.write_text(
-                "# P\n## Current Sprint\n- [] Описать первую задачу\n"
+                "# P\n## Current Sprint\n"
+                "- [] Описать первую задачу <!-- ck:placeholder -->\n"
                 "\n## Completed\n",
                 encoding="utf-8",
             )
@@ -127,6 +129,7 @@ class TestDefaultTaskReplacement(_IsolatedHome):
             text = ck.plan_file.read_text(encoding="utf-8")
             self.assertIn("- [ ] собрать релиз", text)
             self.assertNotIn("Описать первую задачу", text)
+            self.assertNotIn("<!-- ck:placeholder -->", text)
 
     def test_cli_add_replaces_seed(self):
         with tempfile.TemporaryDirectory() as td:
