@@ -9,6 +9,11 @@ Covered surface:
   completed, focused, or accompanied by other tasks.
 - ``ck local`` / ``ck remote`` manage ``~/.config/ck/spaces/*.md``
   with lazily-created parent directories.
+- Space command routing: ``ck <space> done|focus|note <ID>`` works
+  for the built-in spaces (``local`` / ``remote``) AND for any
+  custom space file discovered in ``~/.config/ck/spaces/``
+  (dynamic space routing through the centralized
+  :class:`cklib.spaces.SpaceManager`).
 - The unified ``SPACES (GLOBAL CONTEXTS)`` table renders above the Git
   projects table in ``ck dashboard``, using the SAME grid formatter
   (Space | Focus Task | Progress | Last Active) — no list-style dump.
@@ -17,6 +22,7 @@ Covered surface:
 from __future__ import annotations
 
 import io
+import json
 import os
 import tempfile
 import unittest
@@ -437,6 +443,596 @@ class TestSpacesTable(_IsolatedHome):
             out.index("SPACES (GLOBAL CONTEXTS)"),
             out.index("No registered projects"),
         )
+
+
+# --------------------------------------------------------------------------- #
+# 5. Space command routing: done / focus / note (built-in spaces)
+# --------------------------------------------------------------------------- #
+
+
+class TestSpaceCommandRouting(_IsolatedHome):
+    """``ck <space> done|focus|note <ID>`` for local and remote.
+
+    Every action persists into the space's Markdown file through
+    the centralized SpaceManager (the same Task/Plan engine a
+    project PLAN.md uses) and is reflected by ``ck dashboard``
+    / ``ck -g``.
+    """
+
+    def _run(self, argv) -> tuple[int, str]:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = main(argv)
+        return code, buf.getvalue()
+
+    def _seed(self, space: str, *titles: str) -> None:
+        for title in titles:
+            code, out = self._run([space, "add", title])
+            self.assertEqual(code, 0, out)
+
+    def _space_text(self, space: str) -> str:
+        path = spaces.space_path(space)
+        self.assertTrue(path.is_file(), f"{space}.md was not created")
+        return path.read_text(encoding="utf-8")
+
+    # ------------------------- done ------------------------- #
+
+    def test_local_done_persists_to_space_file(self):
+        self._seed("local", "first task", "second task")
+
+        code, out = self._run(["local", "done", "1"])
+
+        self.assertEqual(code, 0)
+        self.assertIn("[ok] Marked done: 1", out)
+        text = self._space_text("local")
+        self.assertIn("- [x] first task", text)
+        self.assertIn("- [ ] second task", text)
+        _, listing = self._run(["local", "list"])
+        self.assertIn("[x] 1. first task", listing)
+        self.assertIn("[local] 1/2 done", listing)
+
+    def test_local_done_range(self):
+        self._seed("local", "alpha", "beta", "gamma")
+
+        code, out = self._run(["local", "done", "1-2"])
+
+        self.assertEqual(code, 0)
+        self.assertIn("[ok] Marked done: 1, 2", out)
+        text = self._space_text("local")
+        self.assertIn("- [x] alpha", text)
+        self.assertIn("- [x] beta", text)
+        self.assertIn("- [ ] gamma", text)
+
+    def test_local_done_bare_completes_current_focus(self):
+        self._seed("local", "first task", "second task")
+        self._run(["local", "focus", "2"])
+
+        code, out = self._run(["local", "done"])
+
+        self.assertEqual(code, 0)
+        self.assertIn("[ok] Marked done: 2", out)
+        self.assertIn("- [x] second task", self._space_text("local"))
+
+    def test_local_done_bare_without_focus_is_usage_error(self):
+        self._seed("local", "first task")
+
+        code, out = self._run(["local", "done"])
+
+        self.assertEqual(code, 2)
+        self.assertIn("Usage: ck local done", out)
+
+    def test_local_done_unknown_id_is_clean_error(self):
+        self._seed("local", "first task")
+
+        code, out = self._run(["local", "done", "99"])
+
+        self.assertEqual(code, 2)
+        self.assertIn("ERROR", out)
+        self.assertIn("Unknown task ID", out)
+        # Nothing was mutated.
+        self.assertNotIn("[x]", self._space_text("local"))
+
+    def test_local_done_invalid_spec_is_clean_error(self):
+        self._seed("local", "first task")
+
+        code, out = self._run(["local", "done", "abc"])
+
+        self.assertEqual(code, 2)
+        self.assertIn("ERROR", out)
+
+    def test_remote_done_persists_to_space_file(self):
+        self._seed("remote", "provision VPS", "open firewall")
+
+        code, out = self._run(["remote", "done", "1"])
+
+        self.assertEqual(code, 0)
+        self.assertIn("[ok] Marked done: 1", out)
+        text = self._space_text("remote")
+        self.assertIn("- [x] provision VPS", text)
+        self.assertIn("- [ ] open firewall", text)
+        _, listing = self._run(["remote", "list"])
+        self.assertIn("[x] 1. provision VPS", listing)
+        self.assertIn("[remote] 1/2 done", listing)
+
+    def test_remote_done_bare_completes_current_focus(self):
+        self._seed("remote", "provision VPS", "open firewall")
+        self._run(["remote", "focus", "2"])
+
+        code, out = self._run(["remote", "done"])
+
+        self.assertEqual(code, 0)
+        self.assertIn("[ok] Marked done: 2", out)
+        self.assertIn("- [x] open firewall", self._space_text("remote"))
+
+    def test_remote_done_unknown_id_is_clean_error(self):
+        self._seed("remote", "provision VPS")
+
+        code, out = self._run(["remote", "done", "42"])
+
+        self.assertEqual(code, 2)
+        self.assertIn("ERROR", out)
+        self.assertIn("Unknown task ID", out)
+
+    # ------------------------- focus ------------------------- #
+
+    def test_local_focus_persists_focus_marker(self):
+        self._seed("local", "first task", "second task")
+
+        code, out = self._run(["local", "focus", "2"])
+
+        self.assertEqual(code, 0)
+        self.assertIn("-> Focused [2]: second task", out)
+        text = self._space_text("local")
+        self.assertIn("- [>] second task", text)
+        self.assertIn("- [ ] first task", text)
+        _, listing = self._run(["local", "list"])
+        self.assertIn("[>] 2. second task", listing)
+
+    def test_local_focus_demotes_previous_focus(self):
+        self._seed("local", "first task", "second task")
+        self._run(["local", "focus", "1"])
+
+        code, out = self._run(["local", "focus", "2"])
+
+        self.assertEqual(code, 0)
+        self.assertIn("-> Focused [2]: second task", out)
+        text = self._space_text("local")
+        self.assertIn("- [>] second task", text)
+        self.assertIn("- [ ] first task", text)
+
+    def test_local_focus_is_idempotent(self):
+        self._seed("local", "first task", "second task")
+        self._run(["local", "focus", "2"])
+
+        code, out = self._run(["local", "focus", "2"])
+
+        self.assertEqual(code, 0)
+        self.assertIn("Task #2 is already focused.", out)
+        # Exactly one focus marker survives.
+        self.assertEqual(self._space_text("local").count("[>]"), 1)
+
+    def test_local_focus_reset_with_zero(self):
+        self._seed("local", "first task", "second task")
+        self._run(["local", "focus", "1"])
+
+        code, out = self._run(["local", "focus", "0"])
+
+        self.assertEqual(code, 0)
+        self.assertIn("[ok] Focus reset.", out)
+        self.assertNotIn("[>]", self._space_text("local"))
+
+    def test_local_focus_unknown_id_is_clean_error(self):
+        self._seed("local", "first task")
+
+        code, out = self._run(["local", "focus", "99"])
+
+        self.assertEqual(code, 2)
+        self.assertIn("ERROR", out)
+        self.assertIn("No task with id 99", out)
+
+    def test_local_focus_invalid_id_is_clean_error(self):
+        self._seed("local", "first task")
+
+        code, out = self._run(["local", "focus", "abc"])
+
+        self.assertEqual(code, 2)
+        self.assertIn("ERROR", out)
+        self.assertIn("Invalid task ID", out)
+
+    def test_remote_focus_persists_focus_marker(self):
+        self._seed("remote", "provision VPS", "open firewall")
+
+        code, out = self._run(["remote", "focus", "2"])
+
+        self.assertEqual(code, 0)
+        self.assertIn("-> Focused [2]: open firewall", out)
+        text = self._space_text("remote")
+        self.assertIn("- [>] open firewall", text)
+        self.assertIn("- [ ] provision VPS", text)
+
+    def test_remote_focus_demotes_previous_focus(self):
+        self._seed("remote", "provision VPS", "open firewall")
+        self._run(["remote", "focus", "1"])
+
+        code, out = self._run(["remote", "focus", "2"])
+
+        self.assertEqual(code, 0)
+        self.assertIn("-> Focused [2]: open firewall", out)
+        text = self._space_text("remote")
+        self.assertIn("- [>] open firewall", text)
+        self.assertIn("- [ ] provision VPS", text)
+
+    def test_remote_focus_reset_with_zero(self):
+        self._seed("remote", "provision VPS")
+        self._run(["remote", "focus", "1"])
+
+        code, out = self._run(["remote", "focus", "0"])
+
+        self.assertEqual(code, 0)
+        self.assertIn("[ok] Focus reset.", out)
+        self.assertNotIn("[>]", self._space_text("remote"))
+
+    def test_remote_focus_unknown_id_is_clean_error(self):
+        self._seed("remote", "provision VPS")
+
+        code, out = self._run(["remote", "focus", "7"])
+
+        self.assertEqual(code, 2)
+        self.assertIn("ERROR", out)
+        self.assertIn("No task with id 7", out)
+
+    # ------------------------- note ------------------------- #
+
+    def test_local_note_persists_to_state_sidecar(self):
+        self._seed("local", "first task", "second task")
+
+        code, out = self._run(["local", "note", "1", "debugging auth"])
+
+        self.assertEqual(code, 0)
+        self.assertIn("* Note saved for [1]: debugging auth", out)
+        # The note survives in the space's JSON sidecar (the
+        # analogue of a project's .ck/state.json).
+        state = json.loads(
+            spaces.state_path("local").read_text(encoding="utf-8")
+        )
+        self.assertEqual(state["notes"]["1"], "debugging auth")
+        self.assertEqual(
+            spaces.SpaceManager("local").get_note(1), "debugging auth"
+        )
+
+    def test_local_note_updates_existing_note(self):
+        self._seed("local", "first task")
+        self._run(["local", "note", "1", "first note"])
+
+        code, out = self._run(["local", "note", "1", "updated note"])
+
+        self.assertEqual(code, 0)
+        self.assertIn("* Note saved for [1]: updated note", out)
+        state = json.loads(
+            spaces.state_path("local").read_text(encoding="utf-8")
+        )
+        self.assertEqual(state["notes"]["1"], "updated note")
+
+    def test_local_note_unknown_id_is_clean_error(self):
+        self._seed("local", "first task")
+
+        code, out = self._run(["local", "note", "99", "x"])
+
+        self.assertEqual(code, 2)
+        self.assertIn("ERROR", out)
+        self.assertIn("No task with id 99", out)
+
+    def test_local_note_without_text_is_usage_error(self):
+        self._seed("local", "first task")
+
+        code, out = self._run(["local", "note", "1"])
+
+        self.assertEqual(code, 2)
+        self.assertIn("Usage: ck local note", out)
+
+    def test_local_note_invalid_id_is_clean_error(self):
+        self._seed("local", "first task")
+
+        code, out = self._run(["local", "note", "abc", "x"])
+
+        self.assertEqual(code, 2)
+        self.assertIn("ERROR", out)
+        self.assertIn("Invalid task ID", out)
+
+    def test_remote_note_persists_to_state_sidecar(self):
+        self._seed("remote", "provision VPS")
+
+        code, out = self._run(["remote", "note", "1", "waiting for IP"])
+
+        self.assertEqual(code, 0)
+        self.assertIn("* Note saved for [1]: waiting for IP", out)
+        state = json.loads(
+            spaces.state_path("remote").read_text(encoding="utf-8")
+        )
+        self.assertEqual(state["notes"]["1"], "waiting for IP")
+        self.assertEqual(
+            spaces.SpaceManager("remote").get_note(1), "waiting for IP"
+        )
+
+    def test_remote_note_unknown_id_is_clean_error(self):
+        self._seed("remote", "provision VPS")
+
+        code, out = self._run(["remote", "note", "5", "x"])
+
+        self.assertEqual(code, 2)
+        self.assertIn("ERROR", out)
+        self.assertIn("No task with id 5", out)
+
+    # ----------------- dashboard / ck -g reflection ----------------- #
+
+    def test_local_done_reflected_in_dashboard(self):
+        self._seed("local", "first task", "second task")
+        self._run(["local", "done", "1"])
+
+        out = ContextKeeper(root=Path(tempfile.gettempdir())).dashboard()
+
+        self.assertIn("LOCAL", out)
+        self.assertIn("1/2 (50.0%)", out)
+
+    def test_local_focus_reflected_in_dashboard(self):
+        self._seed("local", "first task", "second task")
+        self._run(["local", "focus", "2"])
+
+        out = ContextKeeper(root=Path(tempfile.gettempdir())).dashboard()
+
+        self.assertIn("[2] [>]", out)
+        self.assertIn("second task", out)
+
+    def test_local_actions_reflected_in_global_dashboard_shorthand(self):
+        self._seed("local", "first task", "second task")
+        self._run(["local", "focus", "2"])
+        self._run(["local", "done", "1"])
+
+        code, out = self._run(["-g"])
+
+        self.assertEqual(code, 0)
+        self.assertIn("SPACES (GLOBAL CONTEXTS)", out)
+        self.assertIn("LOCAL", out)
+        self.assertIn("[2] [>]", out)
+        self.assertIn("second task", out)
+        self.assertIn("1/2 (50.0%)", out)
+
+    def test_remote_actions_reflected_in_dashboard(self):
+        self._seed("remote", "provision VPS", "open firewall")
+        self._run(["remote", "focus", "1"])
+        self._run(["remote", "done", "2"])
+
+        out = ContextKeeper(root=Path(tempfile.gettempdir())).dashboard()
+
+        self.assertIn("REMOTE", out)
+        self.assertIn("[1] [>]", out)
+        self.assertIn("provision VPS", out)
+        self.assertIn("1/2 (50.0%)", out)
+
+    def test_local_and_remote_state_stay_isolated(self):
+        self._seed("local", "local task")
+        self._seed("remote", "remote task")
+        self._run(["local", "note", "1", "local note"])
+
+        # The local note never leaks into the remote sidecar.
+        remote_state_path = spaces.state_path("remote")
+        self.assertFalse(remote_state_path.exists())
+        self.assertEqual(
+            spaces.SpaceManager("remote").get_note(1), ""
+        )
+
+
+# --------------------------------------------------------------------------- #
+# 6. Dynamic space routing (custom space files)
+# --------------------------------------------------------------------------- #
+
+
+class TestDynamicSpaceRouting(_IsolatedHome):
+    """Any space file placed in ~/.config/ck/spaces/ routes uniformly."""
+
+    def _run(self, argv) -> tuple[int, str]:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = main(argv)
+        return code, buf.getvalue()
+
+    def test_placed_space_file_is_discovered(self):
+        # A space file "placed" by hand (no registration) is
+        # discovered and routable with the full CLI interface.
+        path = spaces.space_path("custom")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "# custom\n## Current Sprint\n- [ ] pre-existing task\n"
+            "\n## Completed\n",
+            encoding="utf-8",
+        )
+
+        self.assertIn("custom", spaces.existing_space_names())
+
+        code, out = self._run(["custom", "list"])
+        self.assertEqual(code, 0)
+        self.assertIn("[ ] 1. pre-existing task", out)
+
+    def test_dynamic_space_full_command_surface(self):
+        code, out = self._run(["custom", "add", "dynamic task"])
+        self.assertEqual(code, 0)
+        self.assertIn("[ok] Added task to custom space (id=1)", out)
+        self.assertTrue(spaces.space_path("custom").is_file())
+
+        code, out = self._run(["custom", "focus", "1"])
+        self.assertEqual(code, 0)
+        self.assertIn("-> Focused [1]: dynamic task", out)
+        self.assertIn("- [>] dynamic task",
+                      spaces.space_path("custom").read_text(encoding="utf-8"))
+
+        code, out = self._run(["custom", "note", "1", "custom note"])
+        self.assertEqual(code, 0)
+        self.assertIn("* Note saved for [1]: custom note", out)
+        state = json.loads(
+            spaces.state_path("custom").read_text(encoding="utf-8")
+        )
+        self.assertEqual(state["notes"]["1"], "custom note")
+
+        code, out = self._run(["custom", "done", "1"])
+        self.assertEqual(code, 0)
+        self.assertIn("[ok] Marked done: 1", out)
+        self.assertIn("- [x] dynamic task",
+                      spaces.space_path("custom").read_text(encoding="utf-8"))
+
+        code, out = self._run(["custom", "list"])
+        self.assertEqual(code, 0)
+        self.assertIn("[custom] 1/1 done", out)
+
+    def test_missing_space_file_is_clean_error(self):
+        code, out = self._run(["nosuchspace", "list"])
+        self.assertEqual(code, 2)
+        self.assertIn("ERROR", out)
+        self.assertIn("not found", out)
+
+        code, out = self._run(["nosuchspace", "done", "1"])
+        self.assertEqual(code, 2)
+        self.assertIn("ERROR", out)
+        self.assertIn("not found", out)
+
+    def test_add_creates_dynamic_space_lazily(self):
+        self.assertFalse(spaces.space_path("fresh").exists())
+
+        code, out = self._run(["fresh", "add", "brand new space"])
+
+        self.assertEqual(code, 0)
+        self.assertTrue(spaces.space_path("fresh").is_file())
+        self.assertIn("- [ ] brand new space",
+                      spaces.space_path("fresh").read_text(encoding="utf-8"))
+
+    def test_dynamic_space_renders_in_dashboard(self):
+        self._run(["custom", "add", "dynamic task"])
+        self._run(["custom", "focus", "1"])
+
+        out = ContextKeeper(root=Path(tempfile.gettempdir())).dashboard()
+
+        self.assertIn("CUSTOM", out)
+        self.assertIn("[1] [>]", out)
+        self.assertIn("dynamic task", out)
+        self.assertIn("spaces/custom.md", out)
+
+    def test_unsafe_names_never_route(self):
+        """Path separators / traversal attempts are rejected, not routed."""
+        for argv in (["../evil", "add", "x"],
+                     ["a/b", "add", "x"],
+                     ["..", "add", "x"],
+                     [".", "add", "x"],
+                     ["", "add", "x"]):
+            code, _ = self._run(argv)
+            self.assertNotEqual(code, 0, f"unsafe name routed: {argv!r}")
+        # Nothing was created outside the spaces directory.
+        self.assertFalse((spaces.spaces_dir().parent / "evil.md").exists())
+
+    def test_space_commands_work_without_project_root(self):
+        """Space commands are global: no project root is required."""
+        # The fake home has no .ck/ project anywhere — space
+        # commands must still dispatch (the keeper is rootless).
+        code, out = self._run(["local", "add", "no project needed"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("no project needed",
+                      spaces.space_path("local").read_text(encoding="utf-8"))
+
+
+# --------------------------------------------------------------------------- #
+# 7. SpaceManager unit surface (centralized engine)
+# --------------------------------------------------------------------------- #
+
+
+class TestSpaceManager(_IsolatedHome):
+    """Direct unit tests for the centralized space engine."""
+
+    def test_unknown_space_rejected_by_manager(self):
+        with self.assertRaises(ValueError):
+            spaces.SpaceManager("bogus")
+        with self.assertRaises(ValueError):
+            spaces.SpaceManager("../evil")
+
+    def test_manager_roundtrip_add_focus_done_note(self):
+        mgr = spaces.SpaceManager("local", create=True)
+        first = mgr.add_task("first")
+        second = mgr.add_task("second")
+        self.assertEqual((first, second), (1, 2))
+
+        result = mgr.focus(second)
+        self.assertEqual(result["task_id"], 2)
+        self.assertEqual(result["title"], "second")
+
+        note = mgr.set_note(second, "mid-refactor")
+        self.assertEqual(note["note"], "mid-refactor")
+        self.assertEqual(mgr.get_note(second), "mid-refactor")
+
+        transitioned = mgr.done("1")
+        self.assertEqual(transitioned, [1])
+
+        tl = mgr.load()
+        self.assertEqual(tl.by_id(1).status.value, "done")
+        self.assertEqual(tl.by_id(2).status.value, "focused")
+
+    def test_manager_focus_demotes_and_resets(self):
+        mgr = spaces.SpaceManager("local", create=True)
+        mgr.add_task("first")
+        mgr.add_task("second")
+        mgr.focus(1)
+
+        result = mgr.focus(2)
+        self.assertEqual(result["demoted_id"], 1)
+
+        reset = mgr.focus(0)
+        self.assertEqual(reset["task_id"], 0)
+        self.assertEqual(reset["demoted_id"], 2)
+        self.assertIsNone(mgr.current_focus_id())
+
+    def test_manager_done_rejects_unknown_and_invalid(self):
+        mgr = spaces.SpaceManager("local", create=True)
+        mgr.add_task("first")
+
+        with self.assertRaises(KeyError):
+            mgr.done("99")
+        with self.assertRaises(ValueError):
+            mgr.done("not-a-spec")
+
+    def test_manager_note_rejects_unknown_and_empty(self):
+        mgr = spaces.SpaceManager("local", create=True)
+        mgr.add_task("first")
+
+        with self.assertRaises(KeyError):
+            mgr.set_note(99, "x")
+        with self.assertRaises(ValueError):
+            mgr.set_note(1, "   ")
+
+    def test_manager_already_focused(self):
+        mgr = spaces.SpaceManager("local", create=True)
+        mgr.add_task("first")
+        self.assertFalse(mgr.already_focused(1))
+        mgr.focus(1)
+        self.assertTrue(mgr.already_focused(1))
+        self.assertFalse(mgr.already_focused(2))
+
+    def test_existing_space_names_discovers_only_md_files(self):
+        spaces_dir = spaces.spaces_dir()
+        spaces_dir.mkdir(parents=True, exist_ok=True)
+        (spaces_dir / "alpha.md").write_text(
+            "# alpha\n## Current Sprint\n\n## Completed\n", encoding="utf-8")
+        # Non-markdown files and unsafe stems are ignored.
+        (spaces_dir / "beta.txt").write_text("noise", encoding="utf-8")
+
+        names = spaces.existing_space_names()
+        self.assertIn("alpha", names)
+        self.assertNotIn("beta", names)
+
+    def test_is_valid_space_covers_builtins_and_discovered(self):
+        self.assertTrue(spaces.is_valid_space("local"))
+        self.assertTrue(spaces.is_valid_space("remote"))
+        self.assertFalse(spaces.is_valid_space("ghost"))
+        spaces_dir = spaces.spaces_dir()
+        spaces_dir.mkdir(parents=True, exist_ok=True)
+        (spaces_dir / "ghost.md").write_text(
+            "# ghost\n## Current Sprint\n\n## Completed\n", encoding="utf-8")
+        self.assertTrue(spaces.is_valid_space("ghost"))
 
 
 if __name__ == "__main__":

@@ -3650,17 +3650,26 @@ def _render_grid(title: str, headers: tuple, keys: tuple, rows: list, *,
 
 
 def _render_spaces_table() -> str:
-    """Unified ``LOCAL`` / ``REMOTE`` spaces table (dashboard top).
+    """Unified spaces table (dashboard top): built-ins + discovered.
 
-    Replaces the old list-style ``[SYSTEM / OPS]`` task dump: both
-    spaces render as standard table rows through the SAME
+    Replaces the old list-style ``[SYSTEM / OPS]`` task dump: every
+    space renders as a standard table row through the SAME
     :func:`_render_grid` pipeline as the Git projects table —
     ``Space`` (name + path), ``Focus Task`` (``[<id>] [>] …`` or
     ``n/a``), ``Progress`` (``0/5 (0.0%)``) and ``Last Active``
     (relative timestamp from the space file's mtime).
+
+    The built-in defaults (``LOCAL`` / ``REMOTE``) are always
+    listed first; every space file DISCOVERED in
+    ``~/.config/ck/spaces/`` (dynamic spaces) follows with the same
+    rendering — no registration step, no allow-list update.
     """
+    space_order = list(SPACE_NAMES) + [
+        name for name in spaces.existing_space_names()
+        if name not in SPACE_NAMES
+    ]
     rows: list[dict] = []
-    for space in SPACE_NAMES:
+    for space in space_order:
         snap = spaces.space_snapshot(space)
         name_line = _truncate_ellipsis(snap["name"], _PROJECT_CAP)
         # Path line uses the SAME contraction helper as the projects
