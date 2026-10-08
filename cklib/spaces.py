@@ -106,30 +106,79 @@ def _is_safe_space_name(name: str) -> bool:
     return bool(_SAFE_SPACE_NAME_RE.match(name))
 
 
+def spaces_dirs() -> list[Path]:
+    """Every directory that can hold space files RIGHT NOW.
+
+    The production spaces dir first, then — when a dev-mode session is
+    active — its sandboxed counterpart (``.sandbox/config/spaces/``),
+    because dev-mode writes are redirected there by :func:`_write_path`.
+
+    Every PROBE of the space tree (discovery, validity, duplicate
+    checks) must scan all of these: probing only the production dir
+    makes a space created inside a sandbox session invisible to
+    ``ck space list`` / the dashboard AND reports it as "not found" to
+    ``ck <space> …`` — the space exists, it simply lives in the
+    sandbox copy the current session writes to. The read path already
+    preferred the sandbox copy (``_read_path``); discovery now matches
+    that contract exactly.
+    """
+    dirs: list[Path] = [spaces_dir()]
+    try:
+        from .sandbox import dev_context_active, resolve_write_path
+        if dev_context_active():
+            # create=False: a probe is PURE — never materialise the
+            # sandbox skeleton just to look for space files.
+            sandboxed = resolve_write_path(
+                spaces_dir(), create=False, force=True)
+            if sandboxed not in dirs:
+                dirs.append(sandboxed)
+    except Exception:
+        pass
+    return dirs
+
+
 def existing_space_names() -> list[str]:
-    """Discovered space names — every ``*.md`` file in the spaces dir.
+    """Discovered space names — every ``*.md`` file in the spaces dir(s).
 
     DYNAMIC DISCOVERY: any space file placed in
     ``~/.config/ck/spaces/`` is automatically a routable space with
     the full CLI interface (``add`` / ``list`` / ``st`` / ``done`` /
     ``focus`` / ``start`` / ``note`` / ``edit``) — no registration,
-    no allow-list update.
-    Only structurally safe names are reported.
+    no allow-list update. A brand-new, still-empty space file counts:
+    discovery keys off the FILE, never off its task count.
+
+    Scans every directory of :func:`spaces_dirs` (production + the
+    dev-mode sandbox copy), so a space created in either place is
+    discovered exactly once. Only structurally safe names are
+    reported.
     """
-    try:
-        if not spaces_dir().is_dir():
-            return []
-        return sorted(
-            p.stem for p in spaces_dir().glob("*.md")
-            if _is_safe_space_name(p.stem)
-        )
-    except OSError:
-        return []
+    names: set = set()
+    for directory in spaces_dirs():
+        try:
+            if not directory.is_dir():
+                continue
+            names.update(
+                p.stem for p in directory.glob("*.md")
+                if _is_safe_space_name(p.stem)
+            )
+        except OSError:
+            continue
+    return sorted(names)
 
 
 def is_valid_space(space: str) -> bool:
-    """True for the built-in defaults and every discovered space file."""
-    return is_builtin_space(space) or space_path(space).is_file()
+    """True for the built-in defaults and every discovered space file.
+
+    Probes the same directory set as :func:`existing_space_names`, so
+    a space living in the dev-mode sandbox copy is as valid as one in
+    production.
+    """
+    if is_builtin_space(space):
+        return True
+    return any(
+        (directory / f"{space}.md").is_file()
+        for directory in spaces_dirs()
+    )
 
 
 def routable_space_name(name: str) -> Optional[str]:
@@ -279,19 +328,17 @@ def _state_write_path(space: str) -> Path:
 # ---------------------------------------------------------------------- #
 
 def _space_exists_anywhere(name: str) -> bool:
-    """True when ``<name>.md`` exists in production OR in the sandbox.
+    """True when ``<name>.md`` exists in ANY space directory.
 
-    Existence checks must respect the dev-mode write target: a space
+    Existence checks must cover the dev-mode write target too: a space
     created inside a sandbox session lives in ``.sandbox/``, so a
     production-only probe would wrongly report "free" and let a second
     ``create`` silently overwrite the first.
     """
-    if space_path(name).exists():
-        return True
-    try:
-        return _write_path(name).exists()
-    except OSError:
-        return False
+    return any(
+        (directory / f"{name}.md").exists()
+        for directory in spaces_dirs()
+    )
 
 
 def create_space(name: str) -> Path:
@@ -902,6 +949,7 @@ def space_context(space: str) -> dict:
 
 __all__ = [
     "spaces_dir",
+    "spaces_dirs",
     "space_path",
     "state_path",
     "is_builtin_space",

@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.7.0-blue)]()
+[![version](https://img.shields.io/badge/version-0.7.1-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -103,7 +103,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.7.0
+ck -v    # → ck version 0.7.1
 ```
 
 ---
@@ -152,7 +152,7 @@ ck -v    # → ck version 0.7.0
 | ck register [-n NAME] [--path PATH] | Add a project to the global registry |
 | ck unregister [--path PATH \| NAME] | Remove a project from the registry |
 | ck prune | Purge registry entries whose folders no longer exist; reports each purged path and a summary count |
-| ck space list / ls | Space management view: every global space plus the active project as `[PROJECT] <name>` — the context un-prefixed commands (`ck st`, `ck list`) resolve against |
+| ck space list / ls | Space management view: every discovered global space (dynamically scanned from `~/.config/ck/spaces/*.md`, including empty ones) plus the active project as `[PROJECT] <name>` — the context un-prefixed commands (`ck st`, `ck list`) resolve against |
 | ck space create \<name\> / new | Create a new space from the default template (`## Current Sprint` / `## Completed`); rejects unsafe, reserved (`list`/`create`/`rename`/`delete`/`project`/`local`/`remote`) and taken names |
 | ck space rename \<old\> \<new\> / mv | Rename a space, carrying its `.json` note sidecar along so no process notes are lost |
 | ck space delete \<name\> [-y] | Permanently delete a space **and** its note sidecar. Asks `Are you sure …? [y/N]` on a terminal, refuses without confirmation when non-interactive, and refuses the built-in `local` / `remote` entirely. No `rm` alias — the verb is spelled out |
