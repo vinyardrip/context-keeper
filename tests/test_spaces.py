@@ -1991,6 +1991,148 @@ class TestSpacesVerboseDashboard(_IsolatedHome):
 
 
 # --------------------------------------------------------------------------- #
+# 12. Dynamic space discovery (regression: user spaces must be visible)
+# --------------------------------------------------------------------------- #
+
+
+class TestDynamicSpaceDiscovery(_IsolatedHome):
+    """A user-created space is discovered WITHOUT any registration.
+
+    Discovery keys off the space FILE, never off a hardcoded name list
+    and never off the task count — a brand-new, still-empty space must
+    show up in ``ck space list`` and in both dashboard views at once.
+    """
+
+    BAR = "+" + "=" * 62 + "+"
+
+    def _run(self, argv) -> tuple[int, str]:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = main(argv)
+        return code, buf.getvalue()
+
+    def _dashboard(self, verbose: bool = False) -> str:
+        return ContextKeeper(
+            root=Path(tempfile.gettempdir())).dashboard(verbose=verbose)
+
+    def test_created_space_is_listed_immediately_even_when_empty(self):
+        """`ck space create` -> visible in `ck space list` right away."""
+        self.assertNotIn("test-custom", spaces.existing_space_names())
+
+        code, out = self._run(["space", "create", "test-custom"])
+        self.assertEqual(code, 0, out)
+
+        # Discovered dynamically (no registration step).
+        self.assertIn("test-custom", spaces.existing_space_names())
+        self.assertTrue(spaces.is_valid_space("test-custom"))
+
+        code, listing = self._run(["space", "list"])
+        self.assertEqual(code, 0, listing)
+        self.assertIn("TEST-CUSTOM", listing)
+        # Brand new and empty: 0/0, not skipped.
+        self.assertIn("0/0 (0.0%)", listing)
+
+    def test_created_space_appears_in_compact_dashboard(self):
+        self._run(["space", "create", "test-custom"])
+
+        out = self._dashboard(verbose=False)
+
+        self.assertIn("SPACES (GLOBAL CONTEXTS)", out)
+        self.assertIn("TEST-CUSTOM", out)
+        self.assertIn("spaces/test-custom.md", out)
+
+    def test_created_space_appears_in_verbose_dashboard(self):
+        self._run(["space", "create", "test-custom"])
+
+        out = self._dashboard(verbose=True)
+
+        self.assertIn("MY SPACES", out)
+        self.assertIn("> TEST-CUSTOM", out)
+
+    def test_built_in_spaces_sort_before_custom_ones(self):
+        self._run(["space", "create", "zeta"])
+        self._run(["space", "create", "alpha"])
+
+        code, listing = self._run(["space", "list"])
+
+        self.assertEqual(code, 0, listing)
+        self.assertLess(listing.index("LOCAL"), listing.index("ALPHA"))
+        self.assertLess(listing.index("REMOTE"), listing.index("ALPHA"))
+        # Custom spaces follow alphabetical order among themselves.
+        self.assertLess(listing.index("ALPHA"), listing.index("ZETA"))
+
+    def test_project_marker_stays_first(self):
+        project = Path(tempfile.gettempdir()) / "disc-proj"
+        (project / ".ck").mkdir(parents=True, exist_ok=True)
+        (project / ".ck" / "PLAN.md").write_text(
+            "# disc-proj\n## Current Sprint\n- [ ] a task\n",
+            encoding="utf-8")
+        self._run(["space", "create", "test-custom"])
+        cwd = os.getcwd()
+        os.chdir(project)
+        self.addCleanup(os.chdir, cwd)
+
+        code, listing = self._run(["space", "list"])
+
+        self.assertEqual(code, 0, listing)
+        rows = [i for i, line in enumerate(listing.splitlines())
+                if line.startswith("| ") and "|" in line[2:]]
+        self.assertLess(rows[0], listing.index("LOCAL"))
+
+    def test_dev_mode_space_is_discovered(self):
+        """REGRESSION: a space created in a sandbox session is visible.
+
+        Dev-mode writes land in ``.sandbox/``; a discovery pass that
+        scanned only ``~/.config/ck/spaces/`` made the space invisible
+        in every listing AND reported it as "not found" to routed
+        actions.
+        """
+        os.environ["CK_SANDBOX"] = "1"
+        self.addCleanup(os.environ.pop, "CK_SANDBOX", None)
+
+        code, out = self._run(["space", "create", "test-custom"])
+        self.assertEqual(code, 0, out)
+        # It really did land in the sandbox, not in production.
+        self.assertFalse(spaces.space_path("test-custom").exists())
+        self.assertTrue(cksandbox.is_within_sandbox(
+            spaces._write_path("test-custom")))
+
+        # 1) discovered, 2) listed, 3) routable, 4) on the dashboard.
+        self.assertIn("test-custom", spaces.existing_space_names())
+        self.assertTrue(spaces.is_valid_space("test-custom"))
+        code, listing = self._run(["space", "list"])
+        self.assertEqual(code, 0, listing)
+        self.assertIn("TEST-CUSTOM", listing)
+        self.assertEqual(self._run(["test-custom", "list"])[0], 0)
+        self.assertIn("TEST-CUSTOM", self._dashboard(verbose=False))
+        self.assertIn("> TEST-CUSTOM", self._dashboard(verbose=True))
+
+    def test_discovery_does_not_materialize_the_sandbox(self):
+        """Probing is PURE: a read never creates the sandbox skeleton."""
+        os.environ["CK_SANDBOX"] = "1"
+        self.addCleanup(os.environ.pop, "CK_SANDBOX", None)
+
+        self.assertEqual(spaces.existing_space_names(), [])
+        self.assertFalse(spaces.is_valid_space("ghost"))
+
+        sandboxed = cksandbox.sandbox_root() / "config" / "spaces"
+        self.assertFalse(sandboxed.exists())
+
+    def test_space_present_in_both_dirs_is_reported_once(self):
+        self._run(["space", "create", "test-custom"])
+        os.environ["CK_SANDBOX"] = "1"
+        self.addCleanup(os.environ.pop, "CK_SANDBOX", None)
+        self._run(["space", "create", "test-custom-sandbox"])
+
+        names = spaces.existing_space_names()
+
+        # A space living in both trees is discovered exactly once.
+        self.assertEqual(names.count("test-custom"), 1)
+        self.assertIn("test-custom-sandbox", names)
+        self.assertEqual(names, sorted(set(names)))
+
+
+# --------------------------------------------------------------------------- #
 # 11. Space management: ck space list / create / rename / delete
 # --------------------------------------------------------------------------- #
 
