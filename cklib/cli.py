@@ -79,10 +79,10 @@ Space Management (manage global spaces):
   space rename <old> <new>   Rename a space, carrying its notes
                              along (alias: mv)
   space delete <name>        Permanently delete a space and its
-                             process notes; asks for
-                             confirmation, `-y` skips it.
-                             Built-in `local` / `remote` cannot
-                             be deleted
+                             process notes; the target is checked
+                             first, then `-y` skips the [y/N]
+                             confirmation. Built-in `local` /
+                             `remote` cannot be deleted
 
 Spaces (out-of-project task lists, ~/.config/ck/spaces/):
   local add <text>          Add a task to the workstation space
@@ -1014,6 +1014,13 @@ def _run_space_mgmt(rest: List[str]) -> int:
                     "ERROR: `ck space delete` takes exactly one name.")
                 return 2
             name = names[0]
+            # PRE-FLIGHT: validate the TARGET before asking anything.
+            # A space that does not exist (or a protected built-in) can
+            # never be deleted, so the honest ERROR wins — the user is
+            # never asked to confirm a no-op, and a script piping into
+            # `ck space delete` never blocks on a prompt it could only
+            # meaningfully answer "yes" to.
+            spaces.validate_deletable_space(name)
             # Confirmation gate: `-y` / `--yes` / `--force` bypass the
             # prompt for automation; otherwise ask interactively and
             # REFUSE on a non-TTY (never delete on a bare newline,

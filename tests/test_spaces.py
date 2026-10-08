@@ -1816,12 +1816,13 @@ class TestSpacesVerboseDashboard(_IsolatedHome):
     """``ck dashboard -v`` renders a styled CARD per space.
 
     Spaces get the SAME verbose treatment as registered projects:
-    a bordered card whose body is the progress line plus the full
+    a rule-framed card whose body is the progress line plus the full
     PREV / FOCUS / NEXT context triad with process notes, painted by
-    the shared triad renderer.
+    the shared triad renderer. Cards carry TOP and BOTTOM rules only —
+    no vertical side rails.
     """
 
-    BAR = "+" + "=" * 62 + "+"
+    RULE = "=" * 61
 
     def _dashboard(self, *, verbose: bool = True) -> str:
         return ContextKeeper(
@@ -1840,11 +1841,12 @@ class TestSpacesVerboseDashboard(_IsolatedHome):
 
         section = self._spaces_section(self._dashboard())
 
-        # Heading + one bordered CARD per space (both built-ins).
+        # Heading + one CARD per space (both built-ins), framed by
+        # ONE shared rule: two openings + one closing.
         self.assertIn("MY SPACES (2)", section)
         self.assertIn(" > LOCAL", section)
         self.assertIn(" > REMOTE", section)
-        self.assertEqual(section.count(self.BAR), 4)  # 2 cards x top+bottom
+        self.assertEqual(section.count(self.RULE), 3)
         # Path line, progress and the triad, inside the card.
         self.assertIn(f"@ {spaces.space_path('local')}", section)
         self.assertIn("[%] Progress: 1/3 tasks done (33.3%)", section)
@@ -1860,34 +1862,40 @@ class TestSpacesVerboseDashboard(_IsolatedHome):
         self.assertIn("- [3] third task", section)
         self.assertIn("* Note: waiting on deps", section)
 
-    def test_verbose_card_rows_share_one_width(self):
+    def test_verbose_cards_have_no_side_rails(self):
+        """Cards are delimited by rules only — no `|` borders."""
         for title in ("first task", "second task"):
             spaces.add_space_task("local", title)
         spaces.SpaceManager("local").focus(2)
 
         section = self._spaces_section(self._dashboard())
 
-        # Every card row shares ONE width: | + space + 61 + space + |
-        # (identical to the horizontal border between them).
-        border_width = len(self.BAR)
-        widths = {len(line) for line in section.splitlines()
-                  if line.startswith("|")}
-        self.assertEqual(widths, {border_width})
+        for line in section.splitlines():
+            self.assertNotIn("|", line)
+            self.assertFalse(line.startswith("+"), line)
 
-    def test_verbose_card_body_is_inside_the_border(self):
+    def test_verbose_card_lines_carry_no_trailing_whitespace(self):
+        for title in ("first task", "second task"):
+            spaces.add_space_task("local", title)
+
+        section = self._spaces_section(self._dashboard())
+
+        for line in section.splitlines():
+            self.assertEqual(line, line.rstrip(), repr(line))
+
+    def test_verbose_card_body_is_indented_not_railed(self):
         spaces.add_space_task("local", "a task")
 
         section = self._spaces_section(self._dashboard())
-        start = section.index(self.BAR)
-        end = section.index(self.BAR, start + 1)
-        card = section[start:end + len(self.BAR)]
+        start = section.index(self.RULE)
+        end = section.index(self.RULE, start + 1)
+        body = section[start + len(self.RULE) + 1:end].splitlines()
 
-        # Every non-border body line is wrapped in the card's rails.
-        rows = card.splitlines()[1:-1]
-        self.assertTrue(rows)
-        for line in rows:
-            self.assertTrue(line.startswith("|"), line)
-            self.assertTrue(line.endswith("|"), line)
+        self.assertTrue(body)
+        # Title first, then the (muted) path, then the triad body.
+        self.assertEqual(body[0], " > LOCAL")
+        self.assertTrue(body[1].startswith("   @ "))
+        self.assertIn("    [%] Progress: 0/1 tasks done (0.0%)", body)
 
     def test_verbose_triad_vertical_order(self):
         for title in ("prev task", "focus task", "next task"):
@@ -1967,7 +1975,7 @@ class TestSpacesVerboseDashboard(_IsolatedHome):
 
     def test_space_card_uses_project_triad_renderer(self):
         """Space cards and project cards share one renderer."""
-        from cklib.core import _render_card, _render_verbose_triad
+        from cklib.core import _render_card_body, _render_verbose_triad
 
         for title in ("prev task", "focus task", "next task"):
             spaces.add_space_task("local", title)
@@ -1978,12 +1986,13 @@ class TestSpacesVerboseDashboard(_IsolatedHome):
 
         section = self._spaces_section(self._dashboard())
 
-        # The space's card is the shared renderer fed with the
+        # The space's card body is the shared renderer fed with the
         # space's own plan + note ledger.
-        expected = _render_card(
+        expected = _render_card_body(
             data["name"], data["path"], data["tl"], data["note"],
             data["paused"])
-        self.assertIn(expected, section)
+        for line in expected:
+            self.assertIn(line, section)
         # And its body is exactly the shared triad output.
         body = _render_verbose_triad(data["tl"], data["note"], data["paused"])
         for line in body:
@@ -2547,6 +2556,73 @@ class TestSpaceManagement(_IsolatedHome):
 
         self.assertEqual(code, 2)
         self.assertIn("not found", out)
+
+    def test_delete_missing_space_errors_before_prompting(self):
+        """REGRESSION: existence is checked BEFORE the prompt.
+
+        A space that does not exist can never be deleted, so the CLI
+        must report the error immediately — never ask the user to
+        confirm a no-op (and never block a piped script on a prompt
+        whose only sensible answer is "yes").
+        """
+        with self._answer_prompt("y") as prompt:
+            code, out = self._run(["space", "delete", "ghost"])
+
+        self.assertEqual(code, 2)
+        # No prompt was ever shown, not even on a real TTY.
+        self.assertEqual(prompt.prompts, [])
+        self.assertIn("ERROR: Space 'ghost' not found", out)
+        self.assertNotIn("Are you sure", out)
+
+    def test_delete_missing_space_does_not_read_stdin(self):
+        """Non-interactive: the error must not depend on stdin."""
+        with self._answer_prompt("y", interactive=False) as prompt:
+            code, out = self._run(["space", "delete", "ghost"])
+
+        self.assertEqual(code, 2)
+        self.assertEqual(prompt.prompts, [])
+        self.assertIn("ERROR: Space 'ghost' not found", out)
+        self.assertNotIn("non-interactive", out)
+
+    def test_delete_builtin_errors_before_prompting(self):
+        """A protected built-in is reported without asking anything."""
+        for name in ("local", "remote"):
+            with self.subTest(name=name):
+                with self._answer_prompt("y") as prompt:
+                    code, out = self._run(["space", "delete", name])
+                self.assertEqual(code, 2)
+                self.assertEqual(prompt.prompts, [])
+                self.assertIn("built-in space", out)
+
+    def test_delete_invalid_name_errors_before_prompting(self):
+        with self._answer_prompt("y") as prompt:
+            code, out = self._run(["space", "delete", "bad name"])
+
+        self.assertEqual(code, 2)
+        self.assertEqual(prompt.prompts, [])
+        self.assertIn("ERROR", out)
+
+    def test_validate_deletable_space_is_the_preflight_contract(self):
+        """The pre-flight helper is importable and self-contained."""
+        self.assertFalse(spaces.space_path("ghost").exists())
+        with self.assertRaises(ValueError) as ctx:
+            spaces.validate_deletable_space("ghost")
+        self.assertIn("not found", str(ctx.exception))
+        # Built-ins are refused by the same helper.
+        with self.assertRaises(ValueError):
+            spaces.validate_deletable_space("local")
+
+        self._run(["space", "create", "work"])
+        self.assertEqual(
+            spaces.validate_deletable_space("work"),
+            spaces.space_path("work"))
+
+    def test_delete_space_validates_target_before_confirmation(self):
+        """Library order: a missing space reports THAT, not 'unconfirmed'."""
+        with self.assertRaises(ValueError) as ctx:
+            spaces.delete_space("ghost")
+
+        self.assertIn("not found", str(ctx.exception))
 
     def test_delete_rejects_invalid_name(self):
         code, out = self._run(["space", "delete", "bad name", "-y"])

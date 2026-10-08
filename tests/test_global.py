@@ -73,16 +73,17 @@ class _IsolatedRegistry:
 # Helpers
 # ---------------------------------------------------------------------------
 
-# One verbose dashboard card's horizontal rail: `+` + the card's rule
-# run + `+`. Every body row between two rails is exactly this wide.
-CARD_BORDER = "+" + "=" * 62 + "+"
+# One verbose dashboard card's horizontal separator. Cards are framed
+# by these rules alone — no vertical side rails.
+CARD_RULE = "=" * 61
 
 
-def _first_card(text: str) -> str:
-    """The first complete card (top rail, body, bottom rail)."""
-    start = text.index(CARD_BORDER)
-    end = text.index(CARD_BORDER, start + 1)
-    return text[start:end + len(CARD_BORDER)]
+def _first_card_body(text: str) -> str:
+    """The first complete card's body (between the opening and closing
+    rule)."""
+    start = text.index(CARD_RULE)
+    end = text.index(CARD_RULE, start + 1)
+    return text[start + len(CARD_RULE) + 1:end]
 
 
 def _project_dir(parent: Path, name: str, *, init: bool = True) -> Path:
@@ -440,12 +441,12 @@ class TestDashboardVerbose(_IsolatedRegistry, unittest.TestCase):
                             out.index("[2] focus task"))
             self.assertLess(out.index("[2] focus task"),
                             out.index("[3] next task [ ]"))
-            # Each card is a bordered box (top + bottom rail).
-            self.assertIn(CARD_BORDER, out)
-            self.assertTrue(out.rstrip().endswith(CARD_BORDER))
+            # Each card is framed by horizontal rules.
+            self.assertIn(CARD_RULE, out)
+            self.assertTrue(out.rstrip().endswith(CARD_RULE))
 
-    def test_verbose_card_body_rows_are_bordered(self):
-        """Every body line sits between the card's rails."""
+    def test_verbose_card_body_has_no_side_rails(self):
+        """Cards are delimited by rules only — no `|` borders."""
         with tempfile.TemporaryDirectory() as td:
             target = _project_dir(Path(td), "alpha")
             ck = ContextKeeper(root=target)
@@ -453,13 +454,16 @@ class TestDashboardVerbose(_IsolatedRegistry, unittest.TestCase):
             ck.register(path=target, name="alpha")
 
             projects = self._projects_section(self._render(ck))
-            card = _first_card(projects)
+            body = _first_card_body(projects)
 
-            rows = card.splitlines()[1:-1]
-            self.assertTrue(rows)
-            for line in rows:
-                self.assertTrue(line.startswith("|"), line)
-                self.assertTrue(line.endswith("|"), line)
+            self.assertTrue(body.strip())
+            for line in body.splitlines():
+                self.assertNotIn("|", line)
+                # No right-padding is forced either.
+                self.assertEqual(line, line.rstrip(), repr(line))
+            # The body keeps its internal indentation instead.
+            self.assertEqual(body.splitlines()[0], " > alpha [*]")
+            self.assertTrue(body.splitlines()[1].startswith("   @ "))
 
     def test_verbose_all_done_project(self):
         """All-done projects collapse the triad to a single line."""
@@ -509,8 +513,8 @@ class TestDashboardVerbose(_IsolatedRegistry, unittest.TestCase):
             self.assertIn("[!] missing", projects)
             self.assertIn("[!] corrupt", projects)
             self.assertIn("> [MISSING] ghost", projects)
-            # Degraded cards still render their two rails: 2 cards.
-            self.assertEqual(projects.count(CARD_BORDER), 4)
+            # Degraded cards still render their rules (2 openings + closing).
+            self.assertEqual(projects.count(CARD_RULE), 3)
 
     def test_verbose_no_truncation_of_titles(self):
         """Unlike the table, the card view never truncates titles."""

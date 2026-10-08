@@ -408,21 +408,24 @@ def rename_space(old_name: str, new_name: str) -> dict:
     }
 
 
-def delete_space(name: str, *, confirmed: bool = False) -> dict:
-    """Permanently delete a space file and its note sidecar.
+def validate_deletable_space(name: str) -> Path:
+    """Validate that ``name`` may be deleted; return its file path.
 
-    STRICTLY CONFIRMED: the caller MUST pass ``confirmed=True`` (the
-    ``ck space delete`` prompt / ``-y`` flag). Without it nothing is
-    removed and the function refuses — an accidental call can never
-    destroy a space.
+    The PRE-FLIGHT check every delete flow must run BEFORE asking the
+    user to confirm anything:
 
-    Built-in default spaces (``local`` / ``remote``) are PROTECTED and
-    can never be deleted. Returns ``{"name", "removed", "notes"}``.
+    1. a built-in default (``local`` / ``remote``) is PROTECTED and can
+       never be deleted;
+    2. the name must be structurally safe;
+    3. the space file must actually exist — probed across every
+       directory of :func:`spaces_dirs`, so a dev-mode space is found
+       where it actually lives.
+
+    Raises :class:`ValueError` with a user-facing message on any
+    failure; the CLI turns that into a clean ``ERROR:`` line WITHOUT
+    ever showing the confirmation prompt for a space that cannot be
+    deleted anyway.
     """
-    if not confirmed:
-        raise ValueError(
-            f"Refusing to delete space {name!r} without confirmation. "
-            "Re-run with confirmation (the CLI prompts, or pass -y).")
     if is_builtin_space(name):
         raise ValueError(
             f"Cannot delete the built-in space {name!r}: it is a "
@@ -437,6 +440,29 @@ def delete_space(name: str, *, confirmed: bool = False) -> dict:
             f"Space {name!r} not found: {space_path(name)} "
             f"does not exist."
         )
+    return path
+
+
+def delete_space(name: str, *, confirmed: bool = False) -> dict:
+    """Permanently delete a space file and its note sidecar.
+
+    The TARGET is validated first (:func:`validate_deletable_space`):
+    asking to confirm the deletion of a space that does not exist — or
+    of a protected built-in — is a pointless prompt, so the honest
+    error wins.
+
+    STRICTLY CONFIRMED: the caller MUST then pass ``confirmed=True``
+    (the ``ck space delete`` prompt / ``-y`` flag). Without it nothing
+    is removed and the function refuses — an accidental call can never
+    destroy a space.
+
+    Returns ``{"name", "removed", "notes"}``.
+    """
+    path = validate_deletable_space(name)
+    if not confirmed:
+        raise ValueError(
+            f"Refusing to delete space {name!r} without confirmation. "
+            "Re-run with confirmation (the CLI prompts, or pass -y).")
     # Serialised on the space's own lock (fail-closed), so a delete can
     # never interleave with a concurrent write.
     with file_lock(path):
@@ -960,6 +986,7 @@ __all__ = [
     "validate_new_space_name",
     "create_space",
     "rename_space",
+    "validate_deletable_space",
     "delete_space",
     "SpaceManager",
     "load_space",
