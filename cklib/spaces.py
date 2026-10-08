@@ -400,7 +400,7 @@ class SpaceManager:
         ``Unfocused / Paused Context`` / ``>> Backlog``).
 
         The only space-specific adaptation is the data
-        source: :class:`_SpaceStatusView` supplies the
+        source: :class:`_SpaceKeeperView` supplies the
         space's display name, the note bound to the focused
         task (from the JSON sidecar), and the space's
         paused ledger (open, noted, non-focused tasks —
@@ -409,7 +409,48 @@ class SpaceManager:
         # Imported lazily: core imports this module at load time.
         from .core import _render_local_status
         return _render_local_status(
-            _SpaceStatusView(self), self.load())
+            _SpaceKeeperView(self), self.load())
+
+    def notes(self) -> str:
+        """Render all active process notes for the space.
+
+        Uses the SAME renderer as the project ``ck notes``
+        (``cklib.core._render_notes_listing``), so the listing is
+        formatted identically: the ``[>] Active Focus:`` section
+        for the focused task's bound note, the ``[!] Unfocused /
+        Paused Context:`` section for every note on an open,
+        non-focused task, and the single ``[i] No active process
+        notes found.`` line when nothing is noted.
+
+        The space analogue of a project's paused registry is the
+        set of OPEN, NOTED, non-focused tasks (see
+        :class:`_SpaceKeeperView`): those are exactly the tasks
+        whose notes are still live process context.
+        """
+        # Imported lazily: core imports this module at load time.
+        from .core import _render_notes_listing
+        return _render_notes_listing(
+            _SpaceKeeperView(self), self.load())
+
+    def context_data(self) -> dict:
+        """Plan + note ledger for a cross-space dashboard block.
+
+        The read-side twin of :meth:`snapshot`: where the compact
+        table needs only aggregates (focus id/title, counts, mtime),
+        the verbose ``ck dashboard -v`` block needs the parsed plan
+        and the note ledger to resolve the PREV / FOCUS / NEXT
+        triad. Returning them together keeps the dashboard a pure
+        RENDERER and keeps this module the single owner of space
+        file I/O.
+        """
+        view = _SpaceKeeperView(self)
+        return {
+            "name": self.space.upper(),
+            "path": str(space_path(self.space)),
+            "tl": self.load(),
+            "note": view.get_note(),
+            "paused": view._paused_tasks(),
+        }
 
     def edit(self) -> None:
         """Open the space's Markdown file in the user's editor.
@@ -582,14 +623,14 @@ class SpaceManager:
         }
 
 
-class _SpaceStatusView:
-    """Minimal keeper surface for space status rendering.
+class _SpaceKeeperView:
+    """Minimal keeper surface shared by the space renderers.
 
-    ``cklib.core._render_local_status`` — the engine behind
-    ``ck st`` — reads exactly four things off its keeper:
-    the root name (header), the active-task note, the
-    paused-task ledger and palette overrides. This adapter
-    supplies the space equivalents:
+    The core renderers — ``cklib.core._render_local_status``
+    (behind ``ck st``) and ``cklib.core._render_notes_listing``
+    (behind ``ck notes``) — read a small, fixed set of things off
+    their keeper. This adapter supplies the space equivalents so
+    both engines render a space exactly as they render a project:
 
     - ``root.name`` — the space's display name (upper-cased,
       matching the dashboard's Space column);
@@ -661,9 +702,19 @@ def list_space(space: str) -> str:
     return SpaceManager(space).list_tasks()
 
 
+def list_space_notes(space: str) -> str:
+    """Render ``space``'s active process notes (``ck <space> notes``)."""
+    return SpaceManager(space).notes()
+
+
 def space_snapshot(space: str) -> dict:
     """Aggregate the state of ``space`` for the dashboard table."""
     return SpaceManager(space).snapshot()
+
+
+def space_context(space: str) -> dict:
+    """Plan + note ledger of ``space`` for a dashboard block."""
+    return SpaceManager(space).context_data()
 
 
 __all__ = [
@@ -678,5 +729,7 @@ __all__ = [
     "load_space",
     "add_space_task",
     "list_space",
+    "list_space_notes",
     "space_snapshot",
+    "space_context",
 ]

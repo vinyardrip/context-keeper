@@ -77,6 +77,11 @@ Spaces (out-of-project task lists, ~/.config/ck/spaces/):
                              as `ck st`: header, progress,
                              current focus, notes, context);
                              `status` is an exact alias
+  local st -l|--list        Space task listing (as `ck st -l`)
+  local st -e|--edit        Open the space file in $EDITOR
+                             (as `ck st -e`)
+  local st -g|--global      Global dashboard (as `ck st -g`);
+                             same as `ck local dashboard`
   local done <ID|range>     Mark workstation task(s) done ([x]);
                              bare `ck local done` completes the
                              CURRENT FOCUS of the space
@@ -85,15 +90,23 @@ Spaces (out-of-project task lists, ~/.config/ck/spaces/):
   local start <ID>          Alias for `ck local focus <ID>`
   local note <ID> <text>    Attach a process note to a
                              workstation task
+  local notes               List every active process note
+                             (focused task + paused/unfocused
+                             tasks)
   local edit                Open the workstation space file
                              (~/.config/ck/spaces/local.md) in
                              your editor
+  local dashboard           Alias for `ck dashboard`; `-v` adds
+                             the detailed PREV/FOCUS/NEXT blocks
+                             (spaces are listed there too)
   remote ...                Same commands for the infrastructure
                              space (~/.config/ck/spaces/remote.md)
   <space> ...               ANY space file placed in
                              ~/.config/ck/spaces/<name>.md is
                              automatically routable with the same
-                             commands (dynamic spaces)
+                             commands (dynamic spaces); spaces
+                             also render a detailed PREV/FOCUS/NEXT
+                             block under `ck dashboard -v`
 
 Editor resolution (ck edit / ck log):
   1. "editor" key in .ck.json at the project root
@@ -354,9 +367,24 @@ _LEGACY_CHOICES = (
 # (local / remote) or any file discovered in
 # ~/.config/ck/spaces/ (dynamic spaces).
 _SPACE_ACTIONS = frozenset({
-    "add", "list", "done", "focus", "start", "note",
-    "st", "status", "edit",
+    "add", "list", "done", "focus", "start", "note", "notes",
+    "st", "status", "edit", "dashboard",
 })
+
+# Flags each SPACE ACTION accepts (keyed by the action, not by the
+# space name — `local`, `remote` and every dynamic space share one
+# table). Mirrors the project flag sets in ``_LEGACY_FLAGS``:
+# ``st``/``status`` carry the same three view shorthands as
+# ``ck st`` (documented for projects in :data:`_STATUS_SHORTCUTS`),
+# and ``dashboard`` carries the verbose switch. Every other space
+# action takes no flags at all, so a stray ``-x`` is reported as an
+# error instead of being swallowed into task text.
+_SPACE_ACTION_FLAGS: dict[str, frozenset] = {
+    "st": frozenset({"-l", "--list", "-e", "--edit", "-g", "--global"}),
+    "status": frozenset({"-l", "--list", "-e", "--edit",
+                         "-g", "--global"}),
+    "dashboard": frozenset({"-v", "--verbose"}),
+}
 
 # Head tokens that are real commands. The built-in space names are
 # EXCLUDED: `ck local …` / `ck remote …` route through the space
@@ -405,15 +433,26 @@ _LEGACY_FLAGS: dict[str, frozenset] = {
 }
 
 
-def _reject_unknown_flags(cmd: str, rest: List[str]) -> Optional[List[str]]:
+def _reject_unknown_flags(cmd: str, rest: List[str],
+                          *,
+                          allowed: Optional[frozenset] = None
+                          ) -> Optional[List[str]]:
     """Validate legacy flags for ``cmd``.
 
     Returns the argument list with the ``--`` escape marker removed,
     or None (after printing an error) when an unknown flag appears.
     A literal ``--`` marks everything after it as positional text —
     e.g. ``ck add -- --not-a-flag``.
+
+    ``allowed`` overrides the ``_LEGACY_FLAGS`` lookup for callers
+    whose flag set is decided per INVOCATION rather than per
+    command name — the space dispatcher validates against the
+    ACTION's table, since ``ck local st -l`` is valid while
+    ``ck local add -l`` is not. When it is None the command's own
+    entry is used, exactly as before.
     """
-    allowed = _LEGACY_FLAGS.get(cmd, frozenset())
+    if allowed is None:
+        allowed = _LEGACY_FLAGS.get(cmd, frozenset())
     out: list[str] = []
     positional_only = False
     for tok in rest:
@@ -1059,7 +1098,10 @@ def _run_space_command(space: str, rest: List[str]) -> int:
     - ``st`` / ``status``     — detailed status view (same
                                  layout as ``ck st``: header,
                                  progress, current focus, notes,
-                                 work context);
+                                 work context). Accepts the same
+                                 view flags as ``ck st``: ``-l``
+                                 (list), ``-e`` (edit), ``-g``
+                                 (global dashboard);
     - ``done <ID|range>``     — mark task(s) done (bare form
                                  completes the space's CURRENT
                                  FOCUS, mirroring ``ck done``);
@@ -1067,10 +1109,16 @@ def _run_space_command(space: str, rest: List[str]) -> int:
                                  focus (``0`` resets focus);
     - ``start <ID>``          — alias for ``focus <ID>``;
     - ``note <ID> <text>``    — attach a process note to a task;
+    - ``notes``               — list every active process note
+                                 (focused task + paused/unfocused
+                                 tasks);
     - ``edit``                — open the space's Markdown file in
                                  the user's editor (resolved with
                                  the project's standard editor
-                                 resolution logic).
+                                 resolution logic);
+    - ``dashboard``           — alias for ``ck dashboard``
+                                 (``-v`` adds the detailed
+                                 PREV/FOCUS/NEXT blocks).
 
     All mutations go through the centralized
     :class:`cklib.spaces.SpaceManager`, which re-uses the core
@@ -1082,15 +1130,23 @@ def _run_space_command(space: str, rest: List[str]) -> int:
     """
     from . import spaces
 
-    validated = _reject_unknown_flags(space, rest)
+    action = rest[0] if rest else ""
+    # Flag validity is decided by the ACTION (see
+    # ``_SPACE_ACTION_FLAGS``): `ck local st -l` is valid,
+    # `ck local add -l` is not. Errors name the full invocation
+    # (`ck local st`) so the fix is obvious.
+    validated = _reject_unknown_flags(
+        f"{space} {action}" if action else space, rest,
+        allowed=_SPACE_ACTION_FLAGS.get(action, frozenset()))
     if validated is None:
         return 2
     rest = validated
 
     usage = (
         f"Usage: ck {space} "
-        "<add <text>|list|st|status|done <ID|range>|"
-        "focus <ID>|start <ID>|note <ID> <text>|edit>"
+        "<add <text>|list|st|status [-l|-e|-g]|done <ID|range>|"
+        "focus <ID>|start <ID>|note <ID> <text>|notes|edit|"
+        "dashboard [-v]>"
     )
     if not rest:
         print(usage)
@@ -1123,10 +1179,42 @@ def _run_space_command(space: str, rest: List[str]) -> int:
         return 0
 
     if action in ("st", "status"):
+        # VIEW FLAGS: `ck <space> st -l/-e/-g` are exact synonyms of
+        # `ck <space> list/edit/dashboard`, checked in the same order
+        # as the project `ck st` dispatcher.
+        if "-l" in args or "--list" in args:
+            print(mgr.list_tasks())
+            return 0
+        if "-e" in args or "--edit" in args:
+            mgr.edit()
+            return 0
+        if "-g" in args or "--global" in args:
+            print(ContextKeeper().dashboard())
+            return 0
         if args:
             _print_error(f"ERROR: `ck {space} st` takes no arguments.")
             return 2
         print(mgr.status())
+        return 0
+
+    if action == "dashboard":
+        # `ck <space> dashboard` is a direct alias of the global
+        # dashboard (the dashboard is global state, never
+        # space-scoped — `-v` adds the detailed blocks).
+        if [a for a in args if a not in ("-v", "--verbose")]:
+            _print_error(
+                f"ERROR: `ck {space} dashboard` takes no arguments.")
+            return 2
+        verbose = "-v" in args or "--verbose" in args
+        print(ContextKeeper().dashboard(verbose=verbose))
+        return 0
+
+    if action == "notes":
+        if args:
+            _print_error(
+                f"ERROR: `ck {space} notes` takes no arguments.")
+            return 2
+        print(mgr.notes())
         return 0
 
     if action == "edit":

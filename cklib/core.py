@@ -3273,8 +3273,10 @@ def _render_dashboard(ck: Optional[ContextKeeper], *, list_projects,
     # FIXED TOP SECTION: the out-of-project `local` / `remote` spaces
     # render as a UNIFIED table (same grid pipeline as the projects
     # table) above the Git projects table — and even when no project
-    # is registered — so the dashboard layout is stable.
-    ops_block = _render_spaces_table()
+    # is registered — so the dashboard layout is stable. Verbose mode
+    # also gives every space the same PREV/FOCUS/NEXT detail blocks
+    # the registered projects get below.
+    ops_block = _render_spaces_table(verbose=verbose)
     if not entries:
         return (
             ops_block + "\n\n"
@@ -3675,7 +3677,21 @@ def _render_grid(title: str, headers: tuple, keys: tuple, rows: list, *,
     return "\n".join(out)
 
 
-def _render_spaces_table() -> str:
+def _space_order() -> list[str]:
+    """Dashboard space ordering: built-ins first, then discovered.
+
+    The single source of truth for WHICH spaces the dashboard shows
+    and in WHAT order — shared by the compact spaces table and the
+    verbose per-space blocks so both views always cover exactly the
+    same set.
+    """
+    return list(SPACE_NAMES) + [
+        name for name in spaces.existing_space_names()
+        if name not in SPACE_NAMES
+    ]
+
+
+def _render_spaces_table(*, verbose: bool = False) -> str:
     """Unified spaces table (dashboard top): built-ins + discovered.
 
     Replaces the old list-style ``[SYSTEM / OPS]`` task dump: every
@@ -3689,11 +3705,13 @@ def _render_spaces_table() -> str:
     listed first; every space file DISCOVERED in
     ``~/.config/ck/spaces/`` (dynamic spaces) follows with the same
     rendering — no registration step, no allow-list update.
+
+    ``verbose=True`` keeps the table and appends the per-space
+    PREV/FOCUS/NEXT blocks (``MY SPACES``) that registered
+    projects already get under ``ck dashboard -v`` — spaces get the
+    SAME detailed treatment, never a lesser view.
     """
-    space_order = list(SPACE_NAMES) + [
-        name for name in spaces.existing_space_names()
-        if name not in SPACE_NAMES
-    ]
+    space_order = _space_order()
     rows: list[dict] = []
     for space in space_order:
         snap = spaces.space_snapshot(space)
@@ -3718,7 +3736,7 @@ def _render_spaces_table() -> str:
             "progress": progress,
             "last": last,
         })
-    return _render_grid(
+    grid = _render_grid(
         "SPACES (GLOBAL CONTEXTS)",
         _SPACES_HEADERS,
         _SPACES_KEYS,
@@ -3727,11 +3745,144 @@ def _render_spaces_table() -> str:
               "last": _LAST_WIDTH_CAP},
         fluid_key="focus",
     )
+    if verbose:
+        return grid + "\n\n" + _render_spaces_verbose(space_order)
+    return grid
+
+
+def _render_spaces_verbose(space_order: list) -> str:
+    """One isolated block per space with the full triad context.
+
+    Mirrors :func:`_render_dashboard_verbose` for spaces — same
+    heading shape, same ``@`` path line, and the SAME progress +
+    PREV/FOCUS/NEXT triad renderer registered projects use::
+
+        MY SPACES (<count>)
+
+         > LOCAL
+            @ ~/.config/ck/spaces/local.md
+            [%] Progress: 1/3 (33.3%)
+            -> Context:
+               << [1] first task [x]
+               [>] [2] second task
+                  * Note: halfway through
+               >> [3] third task [ ]
+               Unfocused / Paused Context:
+                  - [3] third task
+                    * Note: waiting on deps
+
+        =============================================================
+
+    No ``[*]`` cwd marker: a space is global and never
+    directory-scoped. Notes come from the space's JSON sidecar
+    (surfaced by :meth:`cklib.spaces.SpaceManager.context_data`).
+    """
+    bar = "=" * 61
+    out: list[str] = [f"MY SPACES ({len(space_order)})", ""]
+    for space in space_order:
+        data = spaces.space_context(space)
+        out.append(f" > {data['name']}")
+        out.append(f"    @ {data['path']}")
+        out.extend(_render_verbose_triad(
+            data["tl"], data["note"], data["paused"]))
+        out.append("")
+        out.append(bar)
+    return "\n".join(out)
 
 
 # ---------------------------------------------------------------------- #
 # Dashboard: verbose block view (-v / --verbose)
 # ---------------------------------------------------------------------- #
+
+
+def _render_verbose_triad(tl: TaskList, note_data: Optional[dict],
+                          paused_entries: list) -> list[str]:
+    """Progress + PREV / FOCUS / NEXT lines for ONE verbose block.
+
+    Shared by the registered-project blocks and the global-space
+    blocks so the two views can never drift apart: both resolve the
+    same :func:`_status_triad` from the same parsed plan and paint
+    the same ledger:
+
+    - ``note_data`` — ``{"id", "note"}`` for the plan's active note
+      (a project's ``.ck/state.json`` ``active_task`` / a space's
+      JSON sidecar), or None;
+    - ``paused_entries`` — ``{"id", "title", "note"}`` records of
+      the unfocused/paused ledger, already resolved for this plan
+      by the caller.
+
+    The anchor (``focus``, else ``next``) renders its own note
+    INLINE, never duplicated into the ledger below it.
+    """
+    out: list[str] = []
+    done_count = len(tl.done)
+    out.append(
+        f"    [%] Progress: {done_count}/{tl.total} "
+        f"({tl.completion_pct}%)"
+    )
+    if tl.total > 0 and done_count == tl.total:
+        out.append("    -> Context: (all tasks completed)")
+        return out
+
+    out.append("    -> Context:")
+    prev, focus, nxt, note_id, note_text = _status_triad(tl, note_data)
+    # Paused ledger: every open task that lost focus (or, for
+    # spaces, every open task carrying a note), with its bound note.
+    # The Focus/Next anchor is excluded — its note renders inline
+    # instead (a noteless pause stays visible).
+    anchor = focus if focus is not None else nxt
+    paused_map: dict = {}
+    for p_entry in paused_entries:
+        p_task = tl.by_id(p_entry["id"])
+        if p_task is None or p_task.status != TaskStatus.OPEN:
+            continue
+        if anchor is not None and p_task.id == anchor.id:
+            continue
+        paused_map[p_task.id] = (p_task.title, p_entry["note"])
+    # Legacy bridge: an active_task note pointing at a non-anchored
+    # open task (state written by an older version) renders as a
+    # paused entry too.
+    if (note_id is not None and note_text
+            and (anchor is None or note_id != anchor.id)):
+        noted = tl.by_id(note_id)
+        if (noted is not None
+                and noted.status == TaskStatus.OPEN
+                and noted.id not in paused_map):
+            paused_map[noted.id] = (noted.title, note_text)
+    # The note bound to the anchor renders inline under it — from
+    # the active slot or the paused ledger.
+    inline_note = ""
+    if anchor is not None:
+        if note_id == anchor.id and note_text:
+            inline_note = note_text
+        else:
+            for p_entry in paused_entries:
+                if (p_entry["id"] == anchor.id and p_entry["note"]):
+                    inline_note = p_entry["note"]
+                    break
+    if prev is not None:
+        out.append(f"       << [{prev.id}] {prev.title} [x]")
+    else:
+        out.append("       << (none completed)")
+    if focus is not None:
+        out.append(f"       [>] [{focus.id}] {focus.title}")
+        if inline_note:
+            out.append(f"          * Note: {inline_note}")
+    else:
+        out.append("       [>] (no focus selected)")
+    if nxt is not None:
+        out.append(f"       >> [{nxt.id}] {nxt.title} [ ]")
+        if focus is None and inline_note:
+            out.append(f"          * Note: {inline_note}")
+    else:
+        out.append("       >> (no open tasks)")
+    if paused_map:
+        out.append("       Unfocused / Paused Context:")
+        for pid, (ptitle, pnote) in paused_map.items():
+            out.append(f"          - [{pid}] {ptitle}")
+            if pnote:
+                out.append(f"            * Note: {pnote}")
+    return out
 
 
 def _render_dashboard_verbose(states: list) -> str:
@@ -3773,80 +3924,9 @@ def _render_dashboard_verbose(states: list) -> str:
             label = "missing" if s["condition"] == "missing" else "corrupt"
             out.append(f"    [!] {label}")
         else:
-            done_count = len(tl_local.done)
-            out.append(
-                f"    [%] Progress: {done_count}/{tl_local.total} "
-                f"({tl_local.completion_pct}%)"
-            )
-            if tl_local.total > 0 and done_count == tl_local.total:
-                out.append(
-                    "    -> Context: (all tasks completed)"
-                )
-            else:
-                out.append("    -> Context:")
-                note_data = read_active_task_note(entry.path)
-                prev, focus, nxt, note_id, note_text = _status_triad(
-                    tl_local, note_data)
-                # Paused ledger: every open task that previously held
-                # focus, with its bound note. The Focus/Next anchor is
-                # excluded — its note renders inline instead (a
-                # noteless pause stays visible; the anchor's bound
-                # note is looked up from the registry below).
-                anchor = focus if focus is not None else nxt
-                paused_map: dict = {}
-                for p_entry in read_paused_tasks(entry.path):
-                    p_task = tl_local.by_id(p_entry["id"])
-                    if p_task is None or p_task.status != TaskStatus.OPEN:
-                        continue
-                    if anchor is not None and p_task.id == anchor.id:
-                        continue
-                    paused_map[p_task.id] = (
-                        p_task.title, p_entry["note"])
-                # Legacy bridge: an active_task note pointing at a
-                # non-anchored open task (state written by an older
-                # version) renders as a paused entry too.
-                if (note_id is not None and note_text
-                        and (anchor is None or note_id != anchor.id)):
-                    noted = tl_local.by_id(note_id)
-                    if (noted is not None
-                            and noted.status == TaskStatus.OPEN
-                            and noted.id not in paused_map):
-                        paused_map[noted.id] = (noted.title, note_text)
-                # The note bound to the anchor renders inline under
-                # it — from the active slot or the paused registry.
-                inline_note = ""
-                if anchor is not None:
-                    if note_id == anchor.id and note_text:
-                        inline_note = note_text
-                    else:
-                        for p_entry in read_paused_tasks(entry.path):
-                            if (p_entry["id"] == anchor.id
-                                    and p_entry["note"]):
-                                inline_note = p_entry["note"]
-                                break
-                if prev is not None:
-                    out.append(f"       << [{prev.id}] {prev.title} [x]")
-                else:
-                    out.append("       << (none completed)")
-                if focus is not None:
-                    out.append(f"       [>] [{focus.id}] {focus.title}")
-                    if inline_note:
-                        out.append(f"          * Note: {inline_note}")
-                else:
-                    out.append("       [>] (no focus selected)")
-                if nxt is not None:
-                    out.append(f"       >> [{nxt.id}] {nxt.title} [ ]")
-                    if focus is None and inline_note:
-                        out.append(f"          * Note: {inline_note}")
-                else:
-                    out.append("       >> (no open tasks)")
-                if paused_map:
-                    out.append(
-                        "       Unfocused / Paused Context:")
-                    for pid, (ptitle, pnote) in paused_map.items():
-                        out.append(f"          - [{pid}] {ptitle}")
-                        if pnote:
-                            out.append(f"            * Note: {pnote}")
+            out.extend(_render_verbose_triad(
+                tl_local, read_active_task_note(entry.path),
+                read_paused_tasks(entry.path)))
 
         # Each project is an isolated block: trailing blank line +
         # separator bar close it off before the next block.
