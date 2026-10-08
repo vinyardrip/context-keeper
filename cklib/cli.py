@@ -69,13 +69,22 @@ Global (all registered projects):
   unregister [--path PATH | NAME]     Remove a project from the registry
   prune                              Drop entries whose folders no longer exist
 
-Spaces (out-of-project task lists):
+Spaces (out-of-project task lists, ~/.config/ck/spaces/):
   local add <text>          Add a task to the workstation space
-                            (~/.config/ck/spaces/local.md)
   local list                List workstation space tasks
-  remote add <text>         Add a task to the infrastructure space
-                            (~/.config/ck/spaces/remote.md)
-  remote list               List infrastructure space tasks
+  local done <ID|range>     Mark workstation task(s) done ([x]);
+                             bare `ck local done` completes the
+                             CURRENT FOCUS of the space
+  local focus <ID>          Focus a workstation task ([>]);
+                             0 resets focus
+  local note <ID> <text>    Attach a process note to a
+                             workstation task
+  remote ...                Same commands for the infrastructure
+                             space (~/.config/ck/spaces/remote.md)
+  <space> ...               ANY space file placed in
+                             ~/.config/ck/spaces/<name>.md is
+                             automatically routable with the same
+                             commands (dynamic spaces)
 
 Editor resolution (ck edit / ck log):
   1. "editor" key in .ck.json at the project root
@@ -331,6 +340,18 @@ _LEGACY_CHOICES = (
     "dev", "sandbox", "ck-clean",
 )
 
+# Space-routed actions: `ck <space> <action> [...]` dispatches to
+# the space's Markdown file for ANY space — the built-in defaults
+# (local / remote) or any file discovered in
+# ~/.config/ck/spaces/ (dynamic spaces).
+_SPACE_ACTIONS = frozenset({"add", "list", "done", "focus", "note"})
+
+# Head tokens that are real commands. The built-in space names are
+# EXCLUDED: `ck local …` / `ck remote …` route through the space
+# dispatcher (uniformly with every dynamic space) instead of the
+# generic command dispatch.
+_COMMAND_HEADS = frozenset(_LEGACY_CHOICES) - {"local", "remote"}
+
 # Top-level shorthands for the ``st`` view flags: ``ck -l`` is an
 # exact synonym for ``ck st -l``, ``ck -e`` for ``ck st -e`` and
 # ``ck -g`` for ``ck st -g``. They are TRANSLATED to the canonical
@@ -401,6 +422,70 @@ def _reject_unknown_flags(cmd: str, rest: List[str]) -> Optional[List[str]]:
         else:
             out.append(tok)
     return out
+
+
+def _dispatch_space(space: str, rest: List[str]) -> int:
+    """Run a space command with the shared CLI error translation.
+
+    Space commands are dispatched from two sites (the dynamic
+    routing in :func:`_dispatch` and the legacy positional path in
+    :func:`_legacy_dispatch`); this wrapper gives both the same
+    fail-closed error handling as every other command: domain
+    errors (unknown task ID, bad spec, missing space) print a clean
+    ``ERROR:`` line and exit 2 instead of raising a traceback.
+    """
+    try:
+        return _run_space_command(space, rest)
+    except KeyError as e:
+        _print_error(f"ERROR: {e}")
+        return 2
+    except ValueError as e:
+        _print_error(f"ERROR: {e}")
+        return 2
+    except (LockTimeoutError, RegistryCorruptError) as e:
+        # Fail-closed concurrency / data-integrity guards: surface a
+        # clean diagnostic instead of an unlocked write or a wipe.
+        _print_error(f"ERROR: {e}")
+        return 3
+    except EOFError:
+        # Non-interactive stdin (piped / /dev/null / Ctrl-D) on an
+        # interactive prompt — abort cleanly instead of a traceback.
+        _print_error("ERROR: Non-interactive input: command aborted.")
+        return 4
+    except UnicodeDecodeError as e:
+        # Non-UTF-8 space file reads.
+        _print_error(f"ERROR: Cannot decode file contents as UTF-8: {e}")
+        return 4
+    except OSError as e:
+        # Unreadable files, permission errors, …
+        _print_error(f"ERROR: I/O error: {e}")
+        return 4
+
+
+def _space_routed_command(raw: List[str]) -> Optional[str]:
+    """Space name when ``raw`` is a ``ck <space> <action>`` invocation.
+
+    DYNAMIC SPACE ROUTING: ``ck <space> <action>`` routes to the
+    space's Markdown file whenever the head token is NOT a known
+    command (or is a built-in space name) and the second token is a
+    space action (``add`` / ``list`` / ``done`` / ``focus`` /
+    ``note``). The space itself may be a built-in default
+    (``local`` / ``remote``), any file discovered in
+    ``~/.config/ck/spaces/``, or a brand-new name whose file the
+    ``add`` action creates lazily on first write (read/mutate
+    actions on a missing space file fail with a clean
+    ``Space '<name>' not found`` error).
+
+    Returns None for every non-space invocation so command dispatch
+    is completely unaffected.
+    """
+    if len(raw) < 2 or raw[1] not in _SPACE_ACTIONS:
+        return None
+    head = raw[0]
+    if head.startswith("-") or head in _COMMAND_HEADS:
+        return None
+    from . import spaces
+    return spaces.routable_space_name(head)
 
 
 def _prompt_note_before_switch(ck: ContextKeeper, *, no_input: bool = False,
@@ -554,6 +639,16 @@ def _dispatch(argv: Optional[List[str]] = None) -> int:
     if raw[0] in _LOCAL_ONLY_COMMANDS and find_project_root() is None:
         print(_NO_ROOT_MESSAGE)
         return 1
+
+    # DYNAMIC SPACE ROUTING: `ck <space> <action>` routes to the
+    # targeted space file for ANY space — the built-in defaults
+    # (local / remote) or any file discovered in
+    # ~/.config/ck/spaces/. Space commands are global
+    # (project-independent), so they work from any working
+    # directory, including a dangling one.
+    routed_space = _space_routed_command(raw)
+    if routed_space is not None:
+        return _dispatch_space(routed_space, raw[1:])
 
     # Always use legacy positional dispatch (handles all known
     # commands including the global registry ones).
@@ -941,34 +1036,126 @@ def _legacy_dispatch(raw: List[str]) -> int:
 # ---------------------------------------------------------------------- #
 
 def _run_space_command(space: str, rest: List[str]) -> int:
-    """Dispatch ``ck local`` / ``ck remote`` (add / list only).
+    """Dispatch ``ck <space> <action>`` for ANY space.
 
-    Strictly explicit: the only accepted forms are
-    ``ck <space> add <text>`` and ``ck <space> list`` — there are no
-    aliases (``-s`` / ``sm`` / ``host`` / ``-m`` / ``virtual`` are
-    deliberately unsupported) and an unknown action is an error.
+    Works identically for the built-in defaults (``local`` /
+    ``remote``) and every dynamic space discovered in
+    ``~/.config/ck/spaces/``. Accepted actions:
+
+    - ``add <text>``          — append a new open task;
+    - ``list``                — pipe-friendly task listing;
+    - ``done <ID|range>``     — mark task(s) done (bare form
+                                completes the space's CURRENT
+                                FOCUS, mirroring ``ck done``);
+    - ``focus <ID>``          — focus a task, demoting any other
+                                focus (``0`` resets focus);
+    - ``note <ID> <text>``    — attach a process note to a task.
+
+    All mutations go through the centralized
+    :class:`cklib.spaces.SpaceManager`, which re-uses the core
+    Task/Plan parsing and editing engine on the space's Markdown
+    file. Strictly explicit: there are no aliases (``-s`` / ``sm``
+    / ``host`` / ``-m`` / ``virtual`` are deliberately unsupported
+    unless a matching space file exists) and an unknown action is
+    an error.
     """
     from . import spaces
 
-    usage = f"Usage: ck {space} <add <text>|list>"
+    validated = _reject_unknown_flags(space, rest)
+    if validated is None:
+        return 2
+    rest = validated
+
+    usage = (
+        f"Usage: ck {space} "
+        "<add <text>|list|done <ID|range>|focus <ID>|"
+        "note <ID> <text>>"
+    )
     if not rest:
         print(usage)
         return 2
     action, args = rest[0], rest[1:]
+
+    # `create` lets the `add` action materialize a brand-new
+    # dynamic space lazily (the built-ins behave the same way);
+    # every other action on a missing space file is a clean error.
+    try:
+        mgr = spaces.SpaceManager(space, create=(action == "add"))
+    except ValueError as e:
+        _print_error(f"ERROR: {e}")
+        return 2
+
     if action == "add":
         if not args:
             print(f"Usage: ck {space} add <text>")
             return 2
         text = " ".join(args)
-        new_id = spaces.add_space_task(space, text)
+        new_id = mgr.add_task(text)
         print(f"[ok] Added task to {space} space (id={new_id}): {text}")
         return 0
+
     if action == "list":
         if args:
             _print_error(f"ERROR: `ck {space} list` takes no arguments.")
             return 2
-        print(spaces.list_space(space))
+        print(mgr.list_tasks())
         return 0
+
+    if action == "done":
+        spec = args[0] if args else ""
+        if not spec:
+            # IMPLICIT FOCUS TARGET: bare `ck <space> done` completes
+            # the CURRENT FOCUS of the space (usage error without one).
+            focus_id = mgr.current_focus_id()
+            if focus_id is None:
+                print(f"Usage: ck {space} done <ID|range|list>")
+                return 2
+            spec = str(focus_id)
+        ids = mgr.done(spec)
+        print(f"[ok] Marked done: {', '.join(map(str, ids))}")
+        return 0
+
+    if action == "focus":
+        if not args:
+            print(f"Usage: ck {space} focus <ID>")
+            return 2
+        try:
+            tid = int(args[0])
+        except ValueError:
+            _print_error(f"ERROR: Invalid task ID: {args[0]!r}")
+            return 2
+        # IDEMPOTENCY: re-focusing the already-focused task is a
+        # clean no-op — no plan mutation.
+        if tid > 0 and mgr.already_focused(tid):
+            print(f"Task #{tid} is already focused.")
+            return 0
+        result = mgr.focus(tid)
+        if result["task_id"] > 0:
+            print(f"-> Focused [{result['task_id']}]: {result['title']}")
+        else:
+            print("[ok] Focus reset.")
+        if result.get("demoted_id") is not None:
+            print(
+                f"[i] Task #{result['demoted_id']} "
+                f"{result['demoted_title']} lost focus "
+                "(demoted to open)."
+            )
+        return 0
+
+    if action == "note":
+        if len(args) < 2:
+            print(f"Usage: ck {space} note <ID> <text>")
+            return 2
+        try:
+            tid = int(args[0])
+        except ValueError:
+            _print_error(f"ERROR: Invalid task ID: {args[0]!r}")
+            return 2
+        text = " ".join(args[1:])
+        info = mgr.set_note(tid, text)
+        print(f"* Note saved for [{info['id']}]: {info['note']}")
+        return 0
+
     _print_error(
         f"ERROR: Unknown `ck {space}` action: {action!r}\n   {usage}"
     )
