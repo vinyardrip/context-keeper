@@ -418,7 +418,7 @@ class TestCliDispatch(_IsolatedHome, unittest.TestCase):
 
             out = self._run(["dashboard"], ck.root)
             self.assertIn("GLOBAL DASHBOARD", out)
-            self.assertIn("| Project", out)
+            self.assertIn("│ Project", out)
             self.assertNotIn("MY PROJECTS", out)
 
     def test_removed_flags_are_rejected(self):

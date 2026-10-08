@@ -408,6 +408,17 @@ def rename_space(old_name: str, new_name: str) -> dict:
     }
 
 
+class SpaceNotFoundError(ValueError):
+    """A space (or its file) does not exist.
+
+    A DISTINCT domain error so callers can map "not found" to its own
+    exit code instead of lumping it in with usage errors — ``ck space
+    delete`` reports a missing target with exit 1, while malformed
+    input keeps the generic exit 2. Subclasses :class:`ValueError`, so
+    any existing ``except ValueError`` handler still catches it.
+    """
+
+
 def validate_deletable_space(name: str) -> Path:
     """Validate that ``name`` may be deleted; return its file path.
 
@@ -436,7 +447,7 @@ def validate_deletable_space(name: str) -> Path:
             "'.', '_' and '-' only.")
     path = _write_path(name)
     if not path.is_file():
-        raise ValueError(
+        raise SpaceNotFoundError(
             f"Space {name!r} not found: {space_path(name)} "
             f"does not exist."
         )
@@ -987,6 +998,7 @@ __all__ = [
     "create_space",
     "rename_space",
     "validate_deletable_space",
+    "SpaceNotFoundError",
     "delete_space",
     "SpaceManager",
     "load_space",

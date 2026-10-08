@@ -1732,7 +1732,7 @@ class ContextKeeper:
                 name = Path(ctx.root).name
             except (OSError, ValueError):
                 name = path = None
-        return _render_space_manager_list(name, path)
+        return _render_space_manager_list(name, path, _chrome_palette(self))
 
     def dashboard(self, *, verbose: bool = False) -> str:
         """Return the cross-project dashboard as a string.
@@ -3263,6 +3263,25 @@ def _relative_time(iso: str, *, now: Optional[datetime] = None) -> str:
     return dt.strftime("%Y-%m-%d %H:%M")
 
 
+def _chrome_palette(ck: Optional["ContextKeeper"] = None) -> ui.Palette:
+    """Structural-chrome palette for tables and cards.
+
+    One palette for a whole dashboard view: built from the project's
+    ``.ck.json`` colour overrides so an explicit ``"border"`` entry is
+    honoured everywhere, with the ``border`` slot otherwise defaulting
+    to a quiet bright-black hairline (see
+    :func:`cklib.ui.get_chrome_palette`). A rootless/absent keeper
+    simply gets the defaults.
+    """
+    overrides: dict = {}
+    if ck is not None:
+        try:
+            overrides = ck.color_overrides() or {}
+        except Exception:
+            overrides = {}
+    return ui.get_chrome_palette(overrides)
+
+
 def _render_dashboard(ck: Optional[ContextKeeper], *, list_projects,
                       parse_plan_file, verbose: bool = False) -> str:
     """Render the global dashboard.
@@ -3297,6 +3316,11 @@ def _render_dashboard(ck: Optional[ContextKeeper], *, list_projects,
     render ``corrupt`` — neither ever crashes the whole table.
     """
     entries = list_projects()
+    # STRUCTURAL CHROME: one palette for every table and card in this
+    # dashboard, so the project's .ck.json colour overrides (including
+    # an explicit "border") apply uniformly instead of being honoured
+    # by one table and ignored by the next.
+    chrome = _chrome_palette(ck)
     # FIXED TOP SECTION: the out-of-project spaces always lead the
     # dashboard — and render even when no project is registered, so
     # the layout stays stable.
@@ -3308,8 +3332,8 @@ def _render_dashboard(ck: Optional[ContextKeeper], *, list_projects,
     # (focus id, counts, mtime) than the cards already show, so
     # printing both would be pure duplication.
     ops_block = (
-        _render_spaces_verbose(_space_order()) if verbose
-        else _render_spaces_table()
+        _render_spaces_verbose(_space_order(), chrome) if verbose
+        else _render_spaces_table(chrome)
     )
     if not entries:
         return (
@@ -3347,8 +3371,8 @@ def _render_dashboard(ck: Optional[ContextKeeper], *, list_projects,
         states.append(state)
 
     rendered = (
-        _render_dashboard_verbose(states)
-        if verbose else _render_dashboard_table(states)
+        _render_dashboard_verbose(states, chrome)
+        if verbose else _render_dashboard_table(states, chrome)
     )
     missing_count = sum(
         1 for state in states if state["condition"] == "missing"
@@ -3526,7 +3550,8 @@ def _smart_path(path: str, width: int) -> str:
     return contracted
 
 
-def _render_dashboard_table(states: list) -> str:
+def _render_dashboard_table(states: list,
+                            palette: Optional[ui.Palette] = None) -> str:
     """Compact priority table: Project | Focus Task | Progress | Last Active.
 
     Multi-line pure-ASCII grid (designed for an 80-column terminal):
@@ -3612,6 +3637,7 @@ def _render_dashboard_table(states: list) -> str:
         fixed_widths={"progress": _PROGRESS_WIDTH},
         fluid_key="focus",
         footer=_DASH_FOOTER_TIP,
+        palette=palette,
     )
 
 
@@ -3619,14 +3645,35 @@ def _render_grid(title: str, headers: tuple, keys: tuple, rows: list, *,
                  caps: Optional[dict] = None,
                  fixed_widths: Optional[dict] = None,
                  fluid_key: Optional[str] = None,
-                 footer: Optional[str] = None) -> str:
-    """Shared ASCII grid renderer for the dashboard tables.
+                 footer: Optional[str] = None,
+                 palette: Optional[ui.Palette] = None) -> str:
+    """Shared Unicode grid renderer for the dashboard tables.
 
     Single source of truth for column layout so the Git projects table
     and the ``LOCAL`` / ``REMOTE`` spaces table are byte-for-byte
     consistent: compute natural widths, apply hard caps, size the
-    fluid column, then emit a pure-ASCII grid with a divider after
-    every row and multi-line cells stacked vertically.
+    fluid column, then emit a THIN UNICODE box-drawing grid with a
+    divider after every row and multi-line cells stacked vertically.
+
+    Structure (thin box-drawing glyphs, one terminal column each — the
+    same column budget as the old ASCII grid)::
+
+        ┌────────┬───────────┐
+        │ Space  │ Focus Task│
+        ├────────┼───────────┤
+        │ LOCAL  │ [1] [>]   │
+        ├────────┼───────────┤
+        │ REMOTE │ n/a       │
+        └────────┴───────────┘
+
+    Borders are painted with the ``border`` palette slot (quiet bright
+    black by default, overridable per project). Cell CONTENT is never
+    painted as a whole: only the ``│`` glyphs carry the frame, so a
+    styled cell keeps its own colour and the column padding stays
+    exact — measured with :func:`cklib.ui.display_width`, which is
+    ANSI-aware so escape sequences never skew a column.
+
+    ``palette`` defaults to :func:`cklib.ui.get_chrome_palette`.
 
     Parameters:
 
@@ -3644,14 +3691,17 @@ def _render_grid(title: str, headers: tuple, keys: tuple, rows: list, *,
                          wraps; its cell content is re-truncated here;
     - ``footer``       — optional trailing line after the last row.
     """
+    p = palette if palette is not None else ui.get_chrome_palette()
     caps = caps or {}
     fixed_widths = fixed_widths or {}
 
-    # 1. Per-column natural width = max(header, content).
+    # 1. Per-column natural width = max(header, content), measured in
+    #    DISPLAY columns so wide/styled content still lines up.
     widths: dict[str, int] = {}
     for h, k in zip(headers, keys):
         widths[k] = max(
-            [len(h)] + [len(line) for r in rows for line in r[k]],
+            [ui.display_width(h)]
+            + [ui.display_width(line) for r in rows for line in r[k]],
         )
 
     # 2. Hard caps for the narrow columns.
@@ -3663,7 +3713,7 @@ def _render_grid(title: str, headers: tuple, keys: tuple, rows: list, *,
 
     # 4. The FLUID column absorbs the rest of the table budget so the
     #    whole grid fits inside _TABLE_BUDGET columns. Chrome is
-    #    (n+1) ``|``/``+`` separators + 2 spaces of padding per cell.
+    #    (n+1) ``│`` separators + 2 spaces of padding per cell.
     if fluid_key is not None:
         chrome = (len(keys) + 1) + (len(keys) * 2)
         fixed_total = sum(widths[k] for k in keys if k != fluid_key)
@@ -3675,14 +3725,15 @@ def _render_grid(title: str, headers: tuple, keys: tuple, rows: list, *,
         # Re-truncate the fluid cell content to the resolved width.
         for r in rows:
             head, text = r[fluid_key]
-            if len(text) > widths[fluid_key]:
+            if ui.display_width(text) > widths[fluid_key]:
                 text = _truncate_right(text, widths[fluid_key])
-            if len(head) > widths[fluid_key]:
+            if ui.display_width(head) > widths[fluid_key]:
                 head = _truncate_right(head, widths[fluid_key])
             r[fluid_key] = (head, text)
 
-    def _hr() -> str:
-        return "+" + "+".join("-" * (widths[k] + 2) for k in keys) + "+"
+    def _rule(left: str, mid: str, right: str) -> str:
+        return p.border(
+            left + mid.join("─" * (widths[k] + 2) for k in keys) + right)
 
     def _row(values: tuple) -> list:
         """Render one grid row; multi-line cells stack vertically."""
@@ -3691,46 +3742,62 @@ def _render_grid(title: str, headers: tuple, keys: tuple, rows: list, *,
         lines = []
         for i in range(height):
             row_cells = [
-                " " + (cell[i] if i < len(cell) else "").ljust(widths[k]) + " "
+                " " + ui.pad_to_width(
+                    cell[i] if i < len(cell) else "", widths[k]) + " "
                 for cell, k in zip(cells, keys)
             ]
-            lines.append("|" + "|".join(row_cells) + "|")
+            # Only the vertical glyphs carry the border paint; cell
+            # content keeps whatever styling it was given.
+            sep = p.border("│")
+            lines.append(sep + sep.join(row_cells) + sep)
         return lines
 
+    top = _rule("┌", "┬", "┐")
+    middle = _rule("├", "┼", "┤")
+    bottom = _rule("└", "┴", "┘")
     out: list[str] = [
         title,
-        _hr(),
+        top,
         *_row(tuple((h,) for h in headers)),
-        _hr(),
+        middle,
     ]
     for r in rows:
         out.extend(_row(tuple(r[k] for k in keys)))
-        out.append(_hr())
+        out.append(middle)
+    # The divider that followed the LAST row closes the grid instead.
+    out[-1] = bottom
     if footer:
         out.append(footer)
     return "\n".join(out)
 
 
 def _render_space_manager_list(project_name: Optional[str],
-                              project_path: Optional[str]) -> str:
+                              project_path: Optional[str],
+                              palette: Optional[ui.Palette] = None
+                              ) -> str:
     """``ck space list`` — spaces plus the active PROJECT context row.
 
-    The PROJECT row is rendered FIRST and tagged ``[PROJECT]`` so the
-    resolution order is explicit: un-prefixed commands (``ck st``,
-    ``ck list``, …) always apply to that project, while every global
-    space is reached by prefixing its name (``ck local st``). When no
-    project resolves, a note says so explicitly instead of faking a
-    row.
+    The PROJECT row is rendered FIRST and marked by ACCENT ONLY — a
+    bold/cyan name, no text tag — so the resolution order is explicit
+    (un-prefixed commands ``ck st`` / ``ck list`` always apply to that
+    project, while every global space is reached by prefixing its name,
+    ``ck local st``) WITHOUT the literal ``[PROJECT]`` prefix widening
+    the Space column and wrapping long project names. When no project
+    resolves, a note says so explicitly instead of faking a row.
 
     Reuses the SAME grid pipeline and cell shape as the dashboard's
     ``SPACES (GLOBAL CONTEXTS)`` table, so the two views can never
     disagree about a space's focus, progress or last-active stamp.
     """
-    p = ui.get_palette()
+    p = palette if palette is not None else ui.get_chrome_palette()
     rows: list[dict] = []
     if project_name is not None and project_path is not None:
+        # The active project is marked by ACCENT ONLY — a bold/cyan
+        # name and nothing else. A literal `[PROJECT]` tag used to
+        # widen the Space column and wrap long project names; colour
+        # costs no columns, so the grid keeps its layout.
         rows.append({
-            "space": (p.bold_cyan(f"[PROJECT] {project_name}"),
+            "space": (p.bold_cyan(project_name),
                       p.muted(_smart_path(project_path, _PROJECT_CAP))),
             "focus": (p.muted("n/a"), ""),
             "progress": (p.muted("n/a"),),
@@ -3760,6 +3827,7 @@ def _render_space_manager_list(project_name: Optional[str],
         caps={"space": _PROJECT_CAP, "progress": _PROGRESS_CAP,
               "last": _LAST_WIDTH_CAP},
         fluid_key="focus",
+        palette=p,
     )
     if project_name is None or project_path is None:
         out += (
@@ -3770,8 +3838,8 @@ def _render_space_manager_list(project_name: Optional[str],
     else:
         out += (
             f"\n[i] Un-prefixed commands (`ck st`, `ck list`, …) apply "
-            f"to [PROJECT] {project_name}. Use `ck <space> <cmd>` for "
-            "a space."
+            f"to the highlighted project ({project_name}). Use "
+            "`ck <space> <cmd>` for a space."
         )
     return out
 
@@ -3790,7 +3858,8 @@ def _space_order() -> list[str]:
     ]
 
 
-def _render_spaces_table() -> str:
+def _render_spaces_table(
+        palette: Optional[ui.Palette] = None) -> str:
     """Unified spaces table (dashboard top): built-ins + discovered.
 
     Replaces the old list-style ``[SYSTEM / OPS]`` task dump: every
@@ -3842,10 +3911,12 @@ def _render_spaces_table() -> str:
         caps={"space": _PROJECT_CAP, "progress": _PROGRESS_CAP,
               "last": _LAST_WIDTH_CAP},
         fluid_key="focus",
+        palette=palette,
     )
 
 
-def _render_spaces_verbose(space_order: list) -> str:
+def _render_spaces_verbose(space_order: list,
+                           palette: Optional[ui.Palette] = None) -> str:
     """One styled CARD per space with the full triad context.
 
     Spaces get exactly the SAME treatment as registered projects —
@@ -3985,21 +4056,25 @@ def _render_verbose_triad(tl: TaskList, note_data: Optional[dict],
     return out
 
 
-# Width of the horizontal rule that frames every verbose card.
+# Width of the thin horizontal divider that frames every verbose card.
 _CARD_WIDTH = 61
 
 
 def _card_rule(palette: Optional[ui.Palette] = None) -> str:
-    """The horizontal separator that frames verbose cards.
+    """The thin horizontal divider that frames verbose cards.
 
     Cards are delimited by TOP and BOTTOM rules only — no vertical side
-    rails. A ``|`` at the end of every body line doubled the noise
+    rails. A ``│`` at the end of every body line doubled the noise
     (one extra glyph per line, plus the trailing-whitespace problem
     that right-padding forced) while adding no structure the rule
     doesn't already provide.
+
+    The divider itself is a THIN ``─`` run painted with the ``border``
+    palette slot, so it reads as a quiet hairline instead of a heavy
+    ``=`` fence.
     """
-    p = palette if palette is not None else ui.get_palette()
-    return p.border("=" * _CARD_WIDTH)
+    p = palette if palette is not None else ui.get_chrome_palette()
+    return p.border("─" * _CARD_WIDTH)
 
 
 def _render_card_body(title: str, path: str, tl: Optional[TaskList],
@@ -4088,7 +4163,8 @@ def _render_card_section(heading: str, bodies: list,
     return "\n".join(out)
 
 
-def _render_dashboard_verbose(states: list) -> str:
+def _render_dashboard_verbose(states: list,
+                              palette: Optional[ui.Palette] = None) -> str:
     """One CARD per project with the full triad context.
 
     Structure (pure ASCII — see :func:`_render_card_body` for the body

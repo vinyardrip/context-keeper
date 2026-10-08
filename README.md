@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.7.2-blue)]()
+[![version](https://img.shields.io/badge/version-0.7.3-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -103,7 +103,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.7.2
+ck -v    # → ck version 0.7.3
 ```
 
 ---
@@ -148,14 +148,14 @@ ck -v    # → ck version 0.7.2
 | ck -g / --global | Top-level shorthand for `ck st -g` (global dashboard) |
 | ck list | Print the task list to STDOUT (pipe-friendly) |
 | ck dashboard | Cross-project dashboard (compact table: Project \| Focus Task \| Progress \| Last Active) |
-| ck dashboard -v / --verbose | Detailed view: one rule-framed card per project **and** per space, each with the progress line and the full `<< PREV` / `[>] FOCUS` / `>> NEXT` triad plus its process notes |
+| ck dashboard -v / --verbose | Detailed view: one card per project **and** per space, framed by thin `─` dividers (no side rails, so long titles never wrap), each carrying the progress line and the full `<< PREV` / `[>] FOCUS` / `>> NEXT` triad plus its process notes |
 | ck register [-n NAME] [--path PATH] | Add a project to the global registry |
 | ck unregister [--path PATH \| NAME] | Remove a project from the registry |
 | ck prune | Purge registry entries whose folders no longer exist; reports each purged path and a summary count |
-| ck space list / ls | Space management view: every discovered global space (dynamically scanned from `~/.config/ck/spaces/*.md`, including empty ones) plus the active project as `[PROJECT] <name>` — the context un-prefixed commands (`ck st`, `ck list`) resolve against |
+| ck space list / ls | Space management view: every discovered global space (dynamically scanned from `~/.config/ck/spaces/*.md`, including empty ones) plus the active project as the FIRST row — highlighted with bold/cyan accent on its name (no text tag), i.e. the context un-prefixed commands (`ck st`, `ck list`) resolve against. Rendered as a thin box-drawing table (`┌─┬┐ │ ├─┼┤ └─┴┘`) with quiet hairline borders |
 | ck space create \<name\> / new | Create a new space from the default template (`## Current Sprint` / `## Completed`); rejects unsafe, reserved (`list`/`create`/`rename`/`delete`/`project`/`local`/`remote`) and taken names |
 | ck space rename \<old\> \<new\> / mv | Rename a space, carrying its `.json` note sidecar along so no process notes are lost |
-| ck space delete \<name\> [-y] | Permanently delete a space **and** its note sidecar. The target is validated **first** (a missing space or a protected built-in reports `ERROR:` immediately, without ever prompting); an existing space asks `Are you sure …? [y/N]` on a terminal and refuses without confirmation when non-interactive. Built-in `local` / `remote` can never be deleted. No `rm` alias — the verb is spelled out |
+| ck space delete \<name\> [-y] | Permanently delete a space **and** its note sidecar. The target is validated **first** (a missing space reports `ERROR:` with exit 1 immediately — no stdin read, no prompt; invalid input exits 2), and an existing space asks `Are you sure …? [y/N]` on a terminal and refuses without confirmation when non-interactive. Built-in `local` / `remote` can never be deleted. No `rm` alias — the verb is spelled out |
 | ck local add \<text\> | Add a task to the workstation space (`~/.config/ck/spaces/local.md`; directories created lazily) |
 | ck local list | List workstation space tasks in the project `ck list` layout (`##` section headers, `[ ]`/`[>]`/`[x]` markers), with attached process notes rendered as `* Note:` lines under their tasks |
 | ck local st / ck local status | Detailed workstation space status view — same layout as `ck st` (header bar, progress, CURRENT FOCUS with its process note, WORK CONTEXT: Done / Skipped / Focus / Next / Upcoming / Unfocused-Paused / Backlog) |

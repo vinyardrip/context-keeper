@@ -302,6 +302,33 @@ def get_palette(stream: Any = None,
     return Palette(color_enabled(stream), colors)
 
 
+# Default colour for STRUCTURAL chrome — table rules, card dividers.
+# Bright black renders as a quiet hairline that structures a table on
+# dark themes without competing with its content; an explicit "border"
+# key in the project's .ck.json always wins over it.
+DEFAULT_BORDER_COLOR = "bright-black"
+
+
+def get_chrome_palette(colors: Optional[dict] = None,
+                       stream: Any = None) -> Palette:
+    """Palette for STRUCTURAL chrome (table borders, card dividers).
+
+    Same slots as :func:`get_palette`, with one deliberate difference:
+    the ``border`` slot defaults to :data:`DEFAULT_BORDER_COLOR`
+    (bright black) instead of inheriting the native text color, so
+    grid rules and dividers read as a quiet frame rather than as more
+    content.
+
+    Explicit configuration still wins — a ``"border"`` key in the
+    project's ``.ck.json`` (e.g. ``"white"``, ``"bold cyan"``,
+    ``"none"``) is used verbatim, and ``"none"`` restores native
+    inheritance.
+    """
+    cfg = dict(colors) if isinstance(colors, dict) else {}
+    cfg.setdefault("border", DEFAULT_BORDER_COLOR)
+    return Palette(color_enabled(stream), cfg)
+
+
 def strip_ansi(text: str) -> str:
     """Remove every SGR escape sequence from ``text``.
 
@@ -343,8 +370,13 @@ def char_width(ch: str) -> int:
 
 
 def display_width(text: str) -> int:
-    """Total terminal column width of ``text`` (never negative)."""
-    return sum(char_width(ch) for ch in text)
+    """Total terminal column width of ``text`` (never negative).
+
+    ANSI SGR escape sequences are stripped first: they are a transport
+    detail of styling, not content, and occupy ZERO columns — counting
+    them would misalign every painted line in a fixed-width box.
+    """
+    return sum(char_width(ch) for ch in _ANSI_SGR_RE.sub("", text))
 
 
 def pad_to_width(text: str, width: int) -> str:

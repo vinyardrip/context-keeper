@@ -172,6 +172,10 @@ class TestGapDisplay(_IsolatedHome, unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+# Horizontal rules of the dashboard grid (thin box-drawing).
+_RULE_HEADS = ("\u250c", "\u251c", "\u2514")
+
+
 class TestDashboardWidth(_IsolatedHome, unittest.TestCase):
     """Dashboard table columns are content-capped before layout.
 
@@ -197,9 +201,9 @@ class TestDashboardWidth(_IsolatedHome, unittest.TestCase):
     def test_column_priority_order(self):
         """Header columns: Project | Focus Task | Progress | Last Active."""
         out = self._render_with(["p"])
-        header = [l for l in out.splitlines() if l.startswith("| Project")]
+        header = [l for l in out.splitlines() if l.startswith("│ Project")]
         self.assertEqual(len(header), 1)
-        cells = [c.strip() for c in header[0].strip("|").split("|")]
+        cells = [c.strip() for c in header[0].strip("│").split("│")]
         self.assertEqual(
             cells, ["Project", "Focus Task", "Progress", "Last Active"]
         )
@@ -225,9 +229,9 @@ class TestDashboardWidth(_IsolatedHome, unittest.TestCase):
             )
         lines = out.splitlines()
         idx = next(i for i, l in enumerate(lines)
-                   if l.startswith("| progproj"))
-        ratio = lines[idx].split("|")[3].strip()
-        pct = lines[idx + 1].split("|")[3].strip()
+                   if l.startswith("│ progproj"))
+        ratio = lines[idx].split("│")[3].strip()
+        pct = lines[idx + 1].split("│")[3].strip()
         self.assertRegex(ratio, r"^\d+/\d+$")
         self.assertRegex(pct, r"^\(\d+(\.\d+)?%\)$")
         self.assertLessEqual(len(ratio), _PROGRESS_WIDTH)
@@ -259,12 +263,12 @@ class TestDashboardWidth(_IsolatedHome, unittest.TestCase):
             # at the focus cap with a TRAILING (right-side) ellipsis.
             lines = out.splitlines()
             data = [i for i, l in enumerate(lines)
-                    if l.startswith("| longtitle")]
+                    if l.startswith("│ longtitle")]
             self.assertTrue(data)
-            head_cell = lines[data[0]].split("|")[2]
+            head_cell = lines[data[0]].split("│")[2]
             self.assertIn("[1] [>]", head_cell)
             self.assertNotIn("x", head_cell)
-            text_cell = lines[data[0] + 1].split("|")[2]
+            text_cell = lines[data[0] + 1].split("│")[2]
             self.assertLessEqual(len(text_cell.strip()), _FOCUS_TEXT_CAP)
             self.assertTrue(text_cell.strip().endswith("..."),
                             f"ellipsis must trail, got {text_cell!r}")
@@ -276,9 +280,9 @@ class TestDashboardWidth(_IsolatedHome, unittest.TestCase):
         # Project names cap at 40 chars.
         lines = out.splitlines()
         data = [i for i, l in enumerate(lines)
-                if l.startswith("| a-very-long")]
+                if l.startswith("│ a-very-long")]
         self.assertTrue(data)
-        project_cell = lines[data[0]].split("|")[1]
+        project_cell = lines[data[0]].split("│")[1]
         self.assertLessEqual(len(project_cell.strip()), 25)
         self.assertIn("...", project_cell)
 
@@ -294,7 +298,7 @@ class TestDashboardWidth(_IsolatedHome, unittest.TestCase):
         # it renders its OWN contracted path cells too.
         projects = out.split("GLOBAL DASHBOARD", 1)[-1]
         def _is_path_line(l: str) -> bool:
-            cell = l.split("|")[1] if l.startswith("|") else ""
+            cell = l.split("│")[1] if l.startswith("│") else ""
             return cell.strip().startswith(("/../", "~/../"))
 
         path_lines = [l for l in projects.splitlines() if _is_path_line(l)]
@@ -302,7 +306,7 @@ class TestDashboardWidth(_IsolatedHome, unittest.TestCase):
                          f"expected two contracted path lines:\n{out}")
         for line in path_lines:
             # Flush left: a single cell-padding space, NO indent.
-            cell = line.split("|")[1]
+            cell = line.split("│")[1]
             self.assertTrue(cell.startswith(" "),
                             f"path line lost its cell padding: {cell!r}")
             self.assertFalse(cell.startswith("  "),
@@ -324,9 +328,9 @@ class TestDashboardWidth(_IsolatedHome, unittest.TestCase):
         # emits contracted path cells).
         projects = out.split("GLOBAL DASHBOARD", 1)[-1]
         line = next(l for l in projects.splitlines()
-                    if l.startswith("|")
-                    and l.split("|")[1].strip().startswith(("/../", "~/../")))
-        cell = line.split("|")[1].strip()
+                    if l.startswith("│")
+                    and l.split("│")[1].strip().startswith(("/../", "~/../")))
+        cell = line.split("│")[1].strip()
         # The registry fixture nests under a tmp dir; the last two
         # segments must be <tmp-parent>/myproject.
         self.assertTrue(cell.endswith("/myproject"), cell)
@@ -338,14 +342,14 @@ class TestDashboardWidth(_IsolatedHome, unittest.TestCase):
         # the ``..`` marker ("/../<parent>/<project>") — no OTHER
         # cell may carry an ellipsis.
         table_lines = [l for l in out.splitlines()
-                       if l.startswith("|")]
+                       if l.startswith("│")]
         for line in table_lines:
-            for cell in line.strip("|").split("|"):
+            for cell in line.strip("│").split("│"):
                 cell = cell.strip()
                 if cell.startswith("/../") or cell.startswith("~/../"):
                     continue  # the path line's structural marker
                 self.assertNotIn("...", cell)
-        self.assertIn("| p ", out)
+        self.assertIn("│ p ", out)
 
     def test_table_lines_bounded_for_80_col_terminal(self):
         """Every table line fits inside an 80-column terminal — even
@@ -356,7 +360,7 @@ class TestDashboardWidth(_IsolatedHome, unittest.TestCase):
         ])
         table_lines = [
             l for l in out.splitlines()
-            if l.startswith("|") or l.startswith("+")
+            if l.startswith("│") or l.startswith("+")
         ]
         self.assertTrue(table_lines)
         for line in table_lines:
@@ -368,7 +372,7 @@ class TestDashboardWidth(_IsolatedHome, unittest.TestCase):
     def test_single_table_line_stays_bounded(self):
         out = self._render_with(["p"])
         for line in out.splitlines():
-            if line.startswith("|") or line.startswith("+"):
+            if line.startswith("│") or line.startswith("+"):
                 self.assertLessEqual(len(line), 80)
 
 

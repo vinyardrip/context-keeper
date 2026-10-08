@@ -73,9 +73,9 @@ class _IsolatedRegistry:
 # Helpers
 # ---------------------------------------------------------------------------
 
-# One verbose dashboard card's horizontal separator. Cards are framed
-# by these rules alone — no vertical side rails.
-CARD_RULE = "=" * 61
+# One verbose dashboard card's thin horizontal divider. Cards are
+# framed by these rules alone — no vertical side rails.
+CARD_RULE = "\u2500" * 61
 
 
 def _first_card_body(text: str) -> str:
@@ -243,15 +243,15 @@ class TestDashboardTable(_IsolatedRegistry, unittest.TestCase):
             # Exactly the four spec columns, in priority order:
             # Project | Focus Task | Progress | Last Active.
             header = [l for l in out.splitlines()
-                      if l.startswith("| Project")]
+                      if l.startswith("│ Project")]
             self.assertEqual(len(header), 1, f"no header row in:\n{out}")
-            cells = [c.strip() for c in header[0].strip("|").split("|")]
+            cells = [c.strip() for c in header[0].strip("│").split("│")]
             self.assertEqual(
                 cells, ["Project", "Focus Task", "Progress", "Last Active"]
             )
             # Project row present
             data_rows = [l for l in out.splitlines()
-                         if l.startswith("|") and "alpha" in l]
+                         if l.startswith("│") and "alpha" in l]
             self.assertTrue(data_rows, f"no data row for alpha in:\n{out}")
 
     def test_dashboard_active_focus(self):
