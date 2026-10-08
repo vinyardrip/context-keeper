@@ -132,7 +132,9 @@ Editor resolution (ck edit / ck log):
 Color overrides ("colors" keys in .ck.json, optional):
   text, muted, border, accent -> "none" (native), "cyan", "bold blue",
   "bright-black", or raw SGR ("38;5;208"); unset keys inherit your
-  terminal's native text color
+  terminal's native text color. The `border` slot paints the thin
+  table/card rules and defaults to a quiet "bright-black" hairline
+  (use "none" to inherit the native color).
 
 System commands:
   install                    Copy the ck launcher to {USER_INSTALL_PATH}
@@ -1050,6 +1052,13 @@ def _run_space_mgmt(rest: List[str]) -> int:
                 print("     Process notes (sidecar) deleted too.")
             return 0
 
+    except spaces.SpaceNotFoundError as e:
+        # "Not found" is its own outcome, not a usage error: report it
+        # with exit 1 so a script can tell "you asked for something
+        # that isn't there" apart from "you asked for something
+        # invalid". Handled before the generic ValueError branch.
+        _print_error(f"ERROR: {e}")
+        return 1
     except ValueError as e:
         _print_error(f"ERROR: {e}")
         return 2

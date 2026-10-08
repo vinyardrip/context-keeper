@@ -335,9 +335,15 @@ class _IsolatedHome(unittest.TestCase):
 
 
 class TestAsciiOnlyOutput(_IsolatedHome):
-    """Every read command must emit STRICT 7-bit ASCII text: no emoji,
-    no box-drawing bars, no typographic dashes — zero broken fallback
-    glyphs (▯) in terminals without Nerd Fonts."""
+    """Read commands emit STRICT 7-bit ASCII text: no emoji, no
+    box-drawing bars, no typographic dashes — zero broken fallback
+    glyphs (▯) in terminals without Nerd Fonts.
+
+    ONE deliberate exception: the dashboard tables and verbose cards
+    use THIN box-drawing characters (``┌ ─ │ ┐`` …), which render
+    natively in every terminal. Its scope is pinned by
+    :meth:`test_dashboard_outputs_use_only_thin_box_glyphs`.
+    """
 
     PLAN = (
         "# P\n## Current Sprint\n"
@@ -431,10 +437,22 @@ class TestAsciiOnlyOutput(_IsolatedHome):
         self.assertIn("* Note saved for [2]: test", buf.getvalue())
         self.assertTrue(buf.getvalue().isascii())
 
-    def test_dashboard_outputs_are_ascii(self):
-        from cklib.core import _render_dashboard, _safe_parse_plan
+    def test_dashboard_outputs_use_only_thin_box_glyphs(self):
+        """Dashboard chrome uses THIN box-drawing glyphs — nothing else.
+
+        Read commands stay strict 7-bit ASCII (see the rest of this
+        class); the dashboard tables/cards are the one deliberate
+        exception, and the exception is deliberately NARROW: only the
+        nine thin box-drawing characters (U+2500 block) plus the
+        ellipsis may appear. No emoji, no heavy/blocks glyphs, no
+        Nerd-Font characters — so a terminal without those fonts still
+        renders a clean frame.
+        """
+        from cklib.core import _render_dashboard
         from cklib import registry as ckregistry
         from cklib.parser import parse_plan_file
+
+        ALLOWED = set("┌┬┐├┼┤└┴┘─│…")
 
         ck = self._project()
         ckregistry.register_project(ck.root, name="project")
@@ -445,10 +463,81 @@ class TestAsciiOnlyOutput(_IsolatedHome):
                 parse_plan_file=parse_plan_file,
                 verbose=verbose,
             )
+            non_ascii = {ch for ch in out if not ch.isascii()}
             self.assertTrue(
-                out.isascii(),
-                f"non-ASCII bytes (verbose={verbose}): {out!r}",
+                non_ascii <= ALLOWED,
+                f"unexpected non-ASCII {sorted(non_ascii)} "
+                f"(verbose={verbose}) in:\n{out}")
+
+    def test_dashboard_tables_use_thin_unicode_borders(self):
+        """Compact tables are boxed with U+2500 thin box-drawing."""
+        from cklib.core import _render_dashboard
+        from cklib import registry as ckregistry
+        from cklib.parser import parse_plan_file
+
+        ck = self._project()
+        ckregistry.register_project(ck.root, name="project")
+        out = _render_dashboard(
+            ck,
+            list_projects=ckregistry.list_projects,
+            parse_plan_file=parse_plan_file,
+        )
+        # Top / header-separator / bottom rules plus row cells.
+        for glyph in ("┌", "┬", "┐", "├", "┼", "┤", "└", "┴", "┘", "│"):
+            self.assertIn(glyph, out)
+        self.assertIn("─", out)
+        # The old ASCII fence is gone.
+        for glyph in ("+",):
+            self.assertNotIn(glyph, out)
+        self.assertNotIn("|", out)
+
+    def test_dashboard_borders_honor_project_border_color(self):
+        """A `.ck.json` "border" entry paints the grid, chrome only."""
+        import os
+
+        from cklib.core import _render_dashboard
+        from cklib import registry as ckregistry
+        from cklib.parser import parse_plan_file
+
+        ck = self._project()
+        (ck.root / ".ck.json").write_text(
+            '{"colors": {"border": "white"}}\n', encoding="utf-8")
+        ckregistry.register_project(ck.root, name="project")
+        # Colors are off in this suite (NO_COLOR is pinned) — force
+        # them on so the border paint is observable.
+        with mock.patch.dict(os.environ,
+                             {"NO_COLOR": "", "FORCE_COLOR": "1"}):
+            out = _render_dashboard(
+                ck,
+                list_projects=ckregistry.list_projects,
+                parse_plan_file=parse_plan_file,
             )
+        # The border code wraps the glyphs and nothing else.
+        self.assertIn("\033[37m┌", out)
+        # Content is never repainted as part of the frame.
+        self.assertNotIn("\033[37mL", out)
+        self.assertNotIn("\033[37mP", out)
+
+    def test_default_border_is_a_bright_black_hairline(self):
+        """Without config, chrome falls back to bright black (SGR 90)."""
+        self.assertEqual(
+            ui.resolve_color(ui.DEFAULT_BORDER_COLOR), "\033[90m")
+        enabled = ui.Palette(True, {"border": ui.DEFAULT_BORDER_COLOR})
+        self.assertEqual(enabled.border("┌──┐"), "\033[90m┌──┐\033[0m")
+
+    def test_chrome_palette_respects_explicit_border_config(self):
+        """An explicit "border" entry wins; "none" restores native."""
+        # NO_COLOR is pinned in this suite, so get_chrome_palette() is
+        # the identity transform — assert the resolved SLOT instead,
+        # exactly as Palette.__init__ builds it.
+        self.assertEqual(
+            ui.get_chrome_palette({"border": "white"})._codes["border"],
+            "\033[37m")
+        self.assertIsNone(
+            ui.get_chrome_palette({"border": "none"})._codes["border"])
+        # And with no config at all, the quiet default is applied.
+        self.assertEqual(
+            ui.get_chrome_palette()._codes["border"], "\033[90m")
 
 
 # ---------------------------------------------------------------------------

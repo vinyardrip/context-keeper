@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-VERSION = "0.7.2"
+VERSION = "0.7.3"
 CK_DIR_NAME = ".ck"
 # Traversal-boundary markers. Kept in sync with
 # ``cklib.sandbox.SANDBOX_DIR_NAME`` (".sandbox") and Git's ".git".

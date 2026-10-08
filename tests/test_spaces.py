@@ -389,9 +389,9 @@ class TestSpacesTable(_IsolatedHome):
         out = ContextKeeper(root=Path(tempfile.gettempdir())).dashboard()
 
         # Exactly one header row with the four standard columns.
-        header = [l for l in out.splitlines() if l.startswith("| Space")]
+        header = [l for l in out.splitlines() if l.startswith("│ Space")]
         self.assertEqual(len(header), 1, f"no spaces header in:\n{out}")
-        cells = [c.strip() for c in header[0].strip("|").split("|")]
+        cells = [c.strip() for c in header[0].strip("│").split("│")]
         self.assertEqual(
             cells, ["Space", "Focus Task", "Progress", "Last Active"])
         # Both spaces appear as table rows.
@@ -1822,7 +1822,7 @@ class TestSpacesVerboseDashboard(_IsolatedHome):
     no vertical side rails.
     """
 
-    RULE = "=" * 61
+    RULE = "\u2500" * 61
 
     def _dashboard(self, *, verbose: bool = True) -> str:
         return ContextKeeper(
@@ -1940,7 +1940,7 @@ class TestSpacesVerboseDashboard(_IsolatedHome):
 
         self.assertIn("MY SPACES", out)
         self.assertNotIn("SPACES (GLOBAL CONTEXTS)", out)
-        self.assertNotIn("| Space", out)
+        self.assertNotIn("│ Space", out)
 
     def test_compact_dashboard_keeps_the_table(self):
         spaces.add_space_task("local", "a task")
@@ -2012,7 +2012,7 @@ class TestDynamicSpaceDiscovery(_IsolatedHome):
     show up in ``ck space list`` and in both dashboard views at once.
     """
 
-    BAR = "+" + "=" * 62 + "+"
+    BAR = "\u2500" * 61
 
     def _run(self, argv) -> tuple[int, str]:
         buf = io.StringIO()
@@ -2085,7 +2085,7 @@ class TestDynamicSpaceDiscovery(_IsolatedHome):
 
         self.assertEqual(code, 0, listing)
         rows = [i for i, line in enumerate(listing.splitlines())
-                if line.startswith("| ") and "|" in line[2:]]
+                if line.startswith("│ ") and "│" in line[2:]]
         self.assertLess(rows[0], listing.index("LOCAL"))
 
     def test_dev_mode_space_is_discovered(self):
@@ -2222,14 +2222,19 @@ class TestSpaceManagement(_IsolatedHome):
         self.assertIn("REMOTE", out)
         self.assertIn("0/1 (0.0%)", out)
         # Same four columns as the dashboard spaces table.
-        header = [l for l in out.splitlines() if l.startswith("| Space")]
+        header = [l for l in out.splitlines() if l.startswith("│ Space")]
         self.assertEqual(len(header), 1, out)
-        cells = [c.strip() for c in header[0].strip("|").split("|")]
+        cells = [c.strip() for c in header[0].strip("│").split("│")]
         self.assertEqual(
             cells, ["Space", "Focus Task", "Progress", "Last Active"])
 
     def test_space_list_shows_current_project_marker(self):
-        """The active PROJECT row is explicit and labelled."""
+        """The active PROJECT row is explicit — marked by ACCENT ONLY.
+
+        The row is identified by bold/cyan highlighting of the name
+        itself, never by a literal ``[PROJECT]`` prefix: a text tag
+        widened the Space column and wrapped long project names.
+        """
         project = Path(tempfile.gettempdir()) / "mgmt-proj"
         project.mkdir(exist_ok=True)
         (project / ".ck").mkdir(exist_ok=True)
@@ -2244,14 +2249,39 @@ class TestSpaceManagement(_IsolatedHome):
         code, out = self._run(["space", "list"])
 
         self.assertEqual(code, 0)
-        self.assertIn("[PROJECT] mgmt-proj", out)
+        # NO text tag anywhere in the view.
+        self.assertNotIn("[PROJECT]", out)
         # The project row comes FIRST — it is what un-prefixed
         # commands resolve against.
-        self.assertLess(out.index("[PROJECT] mgmt-proj"),
-                        out.index("LOCAL"))
+        self.assertLess(out.index("mgmt-proj"), out.index("LOCAL"))
         self.assertIn(
             "Un-prefixed commands (`ck st`, `ck list`, …) apply to "
-            "[PROJECT] mgmt-proj", out)
+            "the highlighted project (mgmt-proj)", out)
+
+    def test_project_row_is_accented_not_labelled(self):
+        """With colors on, the project name itself carries the accent."""
+        project = Path(tempfile.gettempdir()) / "accent-proj"
+        project.mkdir(exist_ok=True)
+        (project / ".ck").mkdir(exist_ok=True)
+        (project / ".ck" / "PLAN.md").write_text(
+            "# accent-proj\n## Current Sprint\n- [ ] a task\n",
+            encoding="utf-8")
+        spaces.add_space_task("local", "a local task")
+        cwd = os.getcwd()
+        os.chdir(project)
+        self.addCleanup(os.chdir, cwd)
+
+        with mock.patch.dict(os.environ,
+                             {"NO_COLOR": "", "FORCE_COLOR": "1"}):
+            _, out = self._run(["space", "list"])
+
+        from cklib.ui import strip_ansi
+        row = next(l for l in out.splitlines()
+                   if "accent-proj" in strip_ansi(l) and "│" in strip_ansi(l))
+        # bold + cyan wraps the name only — no tag, and the border paint
+        # never leaks onto the content.
+        self.assertIn("\033[1m\033[36maccent-proj\033[0m", row)
+        self.assertNotIn("[PROJECT]", strip_ansi(row))
 
     def test_space_list_without_project_notes_the_absence(self):
         spaces.add_space_task("local", "a local task")
@@ -2554,8 +2584,10 @@ class TestSpaceManagement(_IsolatedHome):
     def test_delete_requires_existing_space(self):
         code, out = self._run(["space", "delete", "ghost", "-y"])
 
-        self.assertEqual(code, 2)
-        self.assertIn("not found", out)
+        # "Not found" is its own outcome: exit 1, distinct from the
+        # exit 2 used for usage errors.
+        self.assertEqual(code, 1)
+        self.assertIn("ERROR: Space 'ghost' not found", out)
 
     def test_delete_missing_space_errors_before_prompting(self):
         """REGRESSION: existence is checked BEFORE the prompt.
@@ -2568,7 +2600,7 @@ class TestSpaceManagement(_IsolatedHome):
         with self._answer_prompt("y") as prompt:
             code, out = self._run(["space", "delete", "ghost"])
 
-        self.assertEqual(code, 2)
+        self.assertEqual(code, 1)
         # No prompt was ever shown, not even on a real TTY.
         self.assertEqual(prompt.prompts, [])
         self.assertIn("ERROR: Space 'ghost' not found", out)
@@ -2579,7 +2611,7 @@ class TestSpaceManagement(_IsolatedHome):
         with self._answer_prompt("y", interactive=False) as prompt:
             code, out = self._run(["space", "delete", "ghost"])
 
-        self.assertEqual(code, 2)
+        self.assertEqual(code, 1)
         self.assertEqual(prompt.prompts, [])
         self.assertIn("ERROR: Space 'ghost' not found", out)
         self.assertNotIn("non-interactive", out)
@@ -2601,6 +2633,19 @@ class TestSpaceManagement(_IsolatedHome):
         self.assertEqual(code, 2)
         self.assertEqual(prompt.prompts, [])
         self.assertIn("ERROR", out)
+
+    def test_space_not_found_is_a_distinct_error_type(self):
+        """`not found` is its own domain error, still a ValueError."""
+        self.assertTrue(
+            issubclass(spaces.SpaceNotFoundError, ValueError))
+        with self.assertRaises(spaces.SpaceNotFoundError):
+            spaces.validate_deletable_space("ghost")
+        # Every OTHER guard raises a plain ValueError, so callers can
+        # tell "missing" apart from "invalid".
+        with self.assertRaises(ValueError) as ctx:
+            spaces.validate_deletable_space("local")
+        self.assertNotIsInstance(
+            ctx.exception, spaces.SpaceNotFoundError)
 
     def test_validate_deletable_space_is_the_preflight_contract(self):
         """The pre-flight helper is importable and self-contained."""
