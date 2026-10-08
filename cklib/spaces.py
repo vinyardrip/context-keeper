@@ -324,22 +324,64 @@ class SpaceManager:
         self._commit(tl)
         return new_task.id
 
+    def _all_notes(self) -> dict[int, str]:
+        """All task notes in the space's sidecar (valid entries).
+
+        Keys are task IDs (ints); only non-empty string values
+        count. Orphaned notes (task since removed) are harmless:
+        the list renderer only looks up IDs the plan still has.
+        """
+        raw = self._read_state().get("notes")
+        if not isinstance(raw, dict):
+            return {}
+        out: dict[int, str] = {}
+        for key, value in raw.items():
+            if not isinstance(value, str) or not value:
+                continue
+            try:
+                tid = int(key)
+            except (TypeError, ValueError):
+                continue
+            out[tid] = value
+        return out
+
     def list_tasks(self) -> str:
-        """Render the space as a pipe-friendly task listing.
+        """Render the space task list in the PROJECT ``ck list``
+        layout.
+
+        Routes through the SAME rendering engine as the
+        project list (``cklib.core._render_tasks_listing``):
+        tasks grouped under their ``##`` section headers with
+        PLAN.md status markers, and every attached process
+        note rendered as an indented ``* Note: <text>`` line
+        directly beneath its task — matching how ``ck st``
+        surfaces notes. A leading badge line summarizes the
+        space itself.
 
         Format::
 
             [local] 1/3 done
+            ## Current Sprint
             [ ] 1. first open task
             [>] 2. focused task
+                * Note: process note text
+            ## Completed
             [x] 3. done task
         """
         tl = self.load()
         header = f"[{self.space}] {len(tl.done)}/{tl.total} done"
-        lines = [header]
-        for t in tl.tasks:
-            lines.append(f"[{t.status.canonical_marker}] {t.id}. {t.title}")
-        return "\n".join(lines)
+        if not tl.tasks:
+            return (
+                f"{header}\n"
+                f"No tasks. Add one with "
+                f"`ck {self.space} add <text>`."
+            )
+        # Imported lazily: core imports this module at load time.
+        from .core import _render_tasks_listing
+        return (
+            f"{header}\n"
+            f"{_render_tasks_listing(tl, self._all_notes())}"
+        )
 
     def done(self, spec: str) -> list[int]:
         """Mark task(s) as DONE — IDs, ranges and lists (``3``, ``2-4``).

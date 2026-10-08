@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.6.6-blue)]()
+[![version](https://img.shields.io/badge/version-0.6.7-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -103,7 +103,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.6.6
+ck -v    # → ck version 0.6.7
 ```
 
 ---
@@ -153,12 +153,12 @@ ck -v    # → ck version 0.6.6
 | ck unregister [--path PATH \| NAME] | Remove a project from the registry |
 | ck prune | Purge registry entries whose folders no longer exist; reports each purged path and a summary count |
 | ck local add \<text\> | Add a task to the workstation space (`~/.config/ck/spaces/local.md`; directories created lazily) |
-| ck local list | List workstation space tasks (pipe-friendly) |
+| ck local list | List workstation space tasks in the project `ck list` layout (`##` section headers, `[ ]`/`[>]`/`[x]` markers), with attached process notes rendered as `* Note:` lines under their tasks |
 | ck local done \<ID\|range\|list\> | Mark workstation space task(s) done (`- [x]`); bare `ck local done` completes the space's CURRENT FOCUS (usage error without one) |
 | ck local focus \<ID\> | Focus a workstation space task (`- [>]`), demoting any other focus; `ck local focus 0` resets focus |
 | ck local note \<ID> \<text\> | Attach a process note to a workstation space task (stored in `~/.config/ck/spaces/local.json`) |
 | ck remote add \<text\> | Add a task to the infrastructure space (`~/.config/ck/spaces/remote.md`) |
-| ck remote list | List infrastructure space tasks |
+| ck remote list | List infrastructure space tasks in the project `ck list` layout, with attached process notes rendered under their tasks |
 | ck remote done \<ID\|range\|list\> | Mark infrastructure space task(s) done (bare form completes the space's CURRENT FOCUS) |
 | ck remote focus \<ID\> | Focus an infrastructure space task (`0` resets focus) |
 | ck remote note \<ID> \<text\> | Attach a process note to an infrastructure space task (stored in `~/.config/ck/spaces/remote.json`) |

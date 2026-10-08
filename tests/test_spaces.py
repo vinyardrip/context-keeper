@@ -14,6 +14,10 @@ Covered surface:
   custom space file discovered in ``~/.config/ck/spaces/``
   (dynamic space routing through the centralized
   :class:`cklib.spaces.SpaceManager`).
+- ``ck <space> list`` renders through the SAME task-list
+  engine as the project ``ck list`` (``##`` section headers,
+  ``[ ]`` / ``[>]`` / ``[x]`` markers) and displays attached
+  process notes (``* Note: <text>``) under their tasks.
 - The unified ``SPACES (GLOBAL CONTEXTS)`` table renders above the Git
   projects table in ``ck dashboard``, using the SAME grid formatter
   (Space | Focus Task | Progress | Last Active) — no list-style dump.
@@ -1033,6 +1037,164 @@ class TestSpaceManager(_IsolatedHome):
         (spaces_dir / "ghost.md").write_text(
             "# ghost\n## Current Sprint\n\n## Completed\n", encoding="utf-8")
         self.assertTrue(spaces.is_valid_space("ghost"))
+
+
+# --------------------------------------------------------------------------- #
+# 8. Space list view alignment with the project `ck list` engine
+# --------------------------------------------------------------------------- #
+
+
+class TestSpaceListViewAlignment(_IsolatedHome):
+    """`ck <space> list` uses the project list rendering engine.
+
+    The space list body (everything below the ``[<space>]
+    <done>/<total> done`` badge) is produced by the SAME
+    ``cklib.core._render_tasks_listing`` engine as the
+    project ``ck list``: ``##`` section headers, PLAN.md
+    status markers, and — when notes are attached — an
+    indented ``* Note: <text>`` line beneath each task.
+    """
+
+    def _run(self, argv) -> tuple[int, str]:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = main(argv)
+        return code, buf.getvalue()
+
+    def _seed(self, space: str, *titles: str) -> None:
+        for title in titles:
+            code, out = self._run([space, "add", title])
+            self.assertEqual(code, 0, out)
+
+    def test_local_list_matches_project_list_layout(self):
+        """Space list body is the exact project-list layout."""
+        self._seed("local", "open task", "focused task")
+        self._run(["local", "focus", "2"])
+
+        code, out = self._run(["local", "list"])
+
+        self.assertEqual(code, 0)
+        lines = out.splitlines()
+        # Badge line first, then the project-list structure.
+        self.assertEqual(lines[0], "[local] 0/2 done")
+        self.assertEqual(lines[1], "## Current Sprint")
+        self.assertEqual(lines[2], "[ ] 1. open task")
+        self.assertEqual(lines[3], "[>] 2. focused task")
+
+    def test_local_list_renders_notes_under_tasks(self):
+        self._seed("local", "first task", "second task")
+        self._run(["local", "note", "1", "not yet started"])
+        self._run(["local", "note", "2", "halfway through"])
+
+        code, out = self._run(["local", "list"])
+
+        self.assertEqual(code, 0)
+        lines = out.splitlines()
+        self.assertEqual(lines[2], "[ ] 1. first task")
+        self.assertEqual(lines[3], "    * Note: not yet started")
+        self.assertEqual(lines[4], "[ ] 2. second task")
+        self.assertEqual(lines[5], "    * Note: halfway through")
+
+    def test_local_list_note_attached_to_focused_task(self):
+        self._seed("local", "first task", "second task")
+        self._run(["local", "focus", "2"])
+        self._run(["local", "note", "2", "active note"])
+
+        _, out = self._run(["local", "list"])
+
+        lines = out.splitlines()
+        self.assertIn("[>] 2. second task", lines)
+        idx = lines.index("[>] 2. second task")
+        self.assertEqual(lines[idx + 1], "    * Note: active note")
+
+    def test_local_list_groups_completed_section(self):
+        """Tasks under `## Completed` render in that section."""
+        path = spaces.space_path("local")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "# local\n## Current Sprint\n- [ ] pending\n"
+            "\n## Completed\n- [x] finished\n",
+            encoding="utf-8",
+        )
+
+        code, out = self._run(["local", "list"])
+
+        self.assertEqual(code, 0)
+        lines = out.splitlines()
+        self.assertEqual(lines[0], "[local] 1/2 done")
+        self.assertEqual(lines[1], "## Current Sprint")
+        self.assertEqual(lines[2], "[ ] 1. pending")
+        self.assertEqual(lines[3], "## Completed")
+        self.assertEqual(lines[4], "[x] 2. finished")
+
+    def test_local_list_empty_space_shows_hint(self):
+        code, out = self._run(["local", "list"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            out.rstrip("\n"),
+            "[local] 0/0 done\n"
+            "No tasks. Add one with `ck local add <text>`.",
+        )
+
+    def test_remote_list_matches_project_list_layout(self):
+        self._seed("remote", "provision VPS", "open firewall")
+        self._run(["remote", "focus", "1"])
+        self._run(["remote", "note", "1", "waiting for IP"])
+
+        code, out = self._run(["remote", "list"])
+
+        self.assertEqual(code, 0)
+        lines = out.splitlines()
+        self.assertEqual(lines[0], "[remote] 0/2 done")
+        self.assertEqual(lines[1], "## Current Sprint")
+        self.assertEqual(lines[2], "[>] 1. provision VPS")
+        self.assertEqual(lines[3], "    * Note: waiting for IP")
+        self.assertEqual(lines[4], "[ ] 2. open firewall")
+
+    def test_space_list_body_is_engine_output(self):
+        """The list body is byte-identical to the project engine."""
+        self._seed("local", "alpha", "beta")
+        self._run(["local", "focus", "1"])
+        spaces.SpaceManager("local").set_note(2, "engine note")
+
+        code, out = self._run(["local", "list"])
+        self.assertEqual(code, 0)
+
+        # Re-render the same plan through the project engine.
+        from cklib.core import _render_tasks_listing
+        tl = spaces.SpaceManager("local").load()
+        body = _render_tasks_listing(
+            tl, spaces.SpaceManager("local")._all_notes())
+
+        lines = out.splitlines()
+        self.assertEqual(lines[0], "[local] 0/2 done")
+        self.assertEqual("\n".join(lines[1:]), body)
+
+    def test_dynamic_space_list_uses_aligned_layout(self):
+        self._seed("custom", "custom task")
+
+        code, out = self._run(["custom", "list"])
+
+        self.assertEqual(code, 0)
+        lines = out.splitlines()
+        self.assertEqual(lines[0], "[custom] 0/1 done")
+        self.assertEqual(lines[1], "## Current Sprint")
+        self.assertEqual(lines[2], "[ ] 1. custom task")
+
+    def test_done_tasks_keep_note_display(self):
+        """A completed task's note still renders beneath it."""
+        self._seed("local", "first task")
+        self._run(["local", "note", "1", "done note"])
+        self._run(["local", "done", "1"])
+
+        _, out = self._run(["local", "list"])
+
+        lines = out.splitlines()
+        self.assertEqual(lines[0], "[local] 1/1 done")
+        self.assertIn("[x] 1. first task", lines)
+        idx = lines.index("[x] 1. first task")
+        self.assertEqual(lines[idx + 1], "    * Note: done note")
 
 
 if __name__ == "__main__":
