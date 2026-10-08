@@ -1340,14 +1340,14 @@ class TestSpaceStatusEditStart(_IsolatedHome):
         self.assertIn(
             "ERROR: `ck local st` takes no arguments.", out)
 
-    def test_st_rejects_status_view_flags(self):
-        """Space statuses take no view flags (no silent project st)."""
+    def test_st_rejects_unknown_flags(self):
+        """Only the documented view flags are accepted on `st`."""
         self._seed("local", "first task")
 
-        code, out = self._run(["local", "st", "-l"])
+        code, out = self._run(["local", "st", "--all"])
 
         self.assertEqual(code, 2)
-        self.assertIn("Unknown flag", out)
+        self.assertIn("Unknown flag for `ck local st`: --all", out)
 
     def test_remote_and_dynamic_spaces_render_status(self):
         self._seed("remote", "provision VPS")
@@ -1548,8 +1548,9 @@ class TestSpaceStatusEditStart(_IsolatedHome):
 
         self.assertEqual(code, 2)
         for token in ("add <text>", "list", "st", "status",
-                      "done <ID|range>", "focus <ID>", "start <ID>",
-                      "note <ID> <text>", "edit"):
+                      "[-l|-e|-g]", "done <ID|range>", "focus <ID>",
+                      "start <ID>", "note <ID> <text>", "notes",
+                      "edit", "dashboard [-v]"):
             self.assertIn(token, out)
 
     def test_unknown_action_hint_lists_st_edit_start(self):
@@ -1578,6 +1579,350 @@ class TestSpaceStatusEditStart(_IsolatedHome):
         self.assertEqual(
             spaces.SpaceManager("local").status(),
             self._run(["local", "st"])[1].rstrip("\n"))
+
+
+# --------------------------------------------------------------------------- #
+# 9. Command parity: notes, st view flags, dashboard alias
+# --------------------------------------------------------------------------- #
+
+
+class TestSpaceNotesAndFlags(_IsolatedHome):
+    """``ck <space> notes``, the ``st`` view flags and ``dashboard``.
+
+    - ``notes`` renders through the SAME engine as the project
+      ``ck notes`` (``cklib.core._render_notes_listing``);
+    - ``st`` / ``status`` accept the same view flags as ``ck st``:
+      ``-l`` (list), ``-e`` (edit), ``-g`` (global dashboard);
+    - ``dashboard`` is a direct alias of ``ck dashboard``.
+    """
+
+    def _run(self, argv) -> tuple[int, str]:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = main(argv)
+        return code, buf.getvalue()
+
+    def _seed(self, space: str, *titles: str) -> None:
+        for title in titles:
+            code, out = self._run([space, "add", title])
+            self.assertEqual(code, 0, out)
+
+    def _tmpdir(self) -> Path:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        return Path(tmp.name)
+
+    def _fake_editor(self) -> tuple[Path, Path]:
+        """Install a fake editor logging its single argument."""
+        d = self._tmpdir()
+        editor = d / "fake-editor.sh"
+        log = d / "editor.log"
+        editor.write_text(
+            "#!/usr/bin/env bash\n"
+            'printf "%s" "$1" > "$CK_EDIT_LOG"\n',
+            encoding="utf-8",
+        )
+        editor.chmod(0o755)
+        return editor, log
+
+    # ---- notes -------------------------------------------------------- #
+
+    def test_notes_lists_active_and_paused_notes(self):
+        self._seed("local", "first task", "second task", "third task")
+        self._run(["local", "focus", "2"])
+        self._run(["local", "note", "2", "halfway through"])
+        self._run(["local", "note", "3", "waiting on deps"])
+
+        code, out = self._run(["local", "notes"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(out.splitlines(), [
+            "[>] Active Focus:",
+            "   - [2] second task",
+            "     * Note: halfway through",
+            "[!] Unfocused / Paused Context:",
+            "   - [3] third task",
+            "     * Note: waiting on deps",
+        ])
+
+    def test_notes_without_any_notes(self):
+        self._seed("local", "first task")
+        self._run(["local", "focus", "1"])
+
+        code, out = self._run(["local", "notes"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            out.rstrip("\n"), "[i] No active process notes found.")
+
+    def test_notes_on_empty_space(self):
+        code, out = self._run(["remote", "notes"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            out.rstrip("\n"), "[i] No active process notes found.")
+
+    def test_notes_hides_notes_of_completed_tasks(self):
+        """Parity: only OPEN tasks carry live process notes."""
+        self._seed("local", "first task")
+        self._run(["local", "note", "1", "done note"])
+        self._run(["local", "done", "1"])
+
+        code, out = self._run(["local", "notes"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            out.rstrip("\n"), "[i] No active process notes found.")
+
+    def test_notes_body_is_engine_output(self):
+        """The listing is the project notes renderer's own output."""
+        self._seed("local", "first task", "second task")
+        self._run(["local", "focus", "1"])
+        self._run(["local", "note", "1", "active"])
+        self._run(["local", "note", "2", "waiting"])
+
+        from cklib.core import _render_notes_listing
+        mgr = spaces.SpaceManager("local")
+        expected = _render_notes_listing(
+            spaces._SpaceKeeperView(mgr), mgr.load())
+
+        _, out = self._run(["local", "notes"])
+
+        self.assertEqual(out.rstrip("\n"), expected)
+
+    def test_remote_and_dynamic_space_notes(self):
+        self._seed("remote", "provision VPS")
+        self._seed("custom", "custom task")
+        self._run(["remote", "note", "1", "waiting for IP"])
+        self._run(["custom", "note", "1", "custom note"])
+
+        code, out = self._run(["remote", "notes"])
+        self.assertEqual(code, 0)
+        self.assertIn("   - [1] provision VPS", out)
+        self.assertIn("     * Note: waiting for IP", out)
+
+        code, out = self._run(["custom", "notes"])
+        self.assertEqual(code, 0)
+        self.assertIn("   - [1] custom task", out)
+        self.assertIn("     * Note: custom note", out)
+
+    def test_notes_takes_no_arguments(self):
+        self._seed("local", "first task")
+
+        code, out = self._run(["local", "notes", "extra"])
+
+        self.assertEqual(code, 2)
+        self.assertIn(
+            "ERROR: `ck local notes` takes no arguments.", out)
+
+    # ---- st view flags ------------------------------------------------ #
+
+    def test_st_list_flag_equals_list_action(self):
+        self._seed("local", "first task", "second task")
+        self._run(["local", "focus", "1"])
+        self._run(["local", "note", "1", "active note"])
+
+        code_flag, out_flag = self._run(["local", "st", "-l"])
+        code_long, out_long = self._run(["local", "status", "--list"])
+        _, out_list = self._run(["local", "list"])
+
+        self.assertEqual(code_flag, 0)
+        self.assertEqual(out_flag, out_list)
+        self.assertEqual(out_long, out_list)
+        self.assertTrue(out_flag.startswith("[local] 0/2 done"))
+
+    def test_st_edit_flag_opens_the_space_file(self):
+        self._seed("local", "first task")
+        editor, log = self._fake_editor()
+
+        with mock.patch.dict(os.environ, {
+            "VISUAL": str(editor),
+            "EDITOR": str(editor),
+            "CK_EDIT_LOG": str(log),
+        }):
+            code, out = self._run(["local", "st", "-e"])
+            code_long, _ = self._run(["local", "status", "--edit"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "")
+        self.assertEqual(code_long, 0)
+        self.assertEqual(
+            log.read_text(encoding="utf-8"),
+            str(spaces.space_path("local")))
+
+    def test_st_global_flag_prints_global_dashboard(self):
+        self._seed("local", "first task")
+        self._run(["local", "focus", "1"])
+
+        code, out_flag = self._run(["local", "st", "-g"])
+        _, out_long = self._run(["local", "status", "--global"])
+        _, out_project = self._run(["dashboard"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(out_flag, out_long)
+        self.assertEqual(out_flag, out_project)
+        self.assertIn("SPACES (GLOBAL CONTEXTS)", out_flag)
+        self.assertIn("LOCAL", out_flag)
+
+    def test_dashboard_alias_equals_dashboard_command(self):
+        self._seed("local", "first task")
+
+        code, out = self._run(["local", "dashboard"])
+        _, expected = self._run(["dashboard"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(out, expected)
+
+    def test_dashboard_alias_verbose(self):
+        self._seed("local", "first task")
+        self._run(["local", "focus", "1"])
+
+        code, out = self._run(["local", "dashboard", "-v"])
+        _, expected = self._run(["dashboard", "-v"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(out, expected)
+        self.assertIn("MY SPACES (", out)
+
+    def test_dashboard_alias_takes_no_arguments(self):
+        code, out = self._run(["local", "dashboard", "extra"])
+
+        self.assertEqual(code, 2)
+        self.assertIn(
+            "ERROR: `ck local dashboard` takes no arguments.", out)
+
+    def test_flags_are_rejected_on_flagless_actions(self):
+        self._seed("local", "first task")
+        for action in ("add", "list", "done", "focus", "start",
+                       "note", "notes", "edit"):
+            code, out = self._run(["local", action, "-l"])
+            self.assertEqual(code, 2, f"{action}: {out}")
+            self.assertIn(
+                f"Unknown flag for `ck local {action}`: -l", out)
+
+    def test_missing_space_errors_for_notes_and_dashboard(self):
+        for action in ("notes", "dashboard", "st"):
+            code, out = self._run(["ghost", action])
+            self.assertEqual(code, 2, out)
+            self.assertIn("ERROR: Space 'ghost' not found", out)
+
+
+# --------------------------------------------------------------------------- #
+# 10. Dashboard -v: per-space context triads
+# --------------------------------------------------------------------------- #
+
+
+class TestSpacesVerboseDashboard(_IsolatedHome):
+    """``ck dashboard -v`` renders a detailed block per space.
+
+    Spaces get the SAME verbose treatment as registered projects:
+    a progress line and the full PREV / FOCUS / NEXT context triad
+    with process notes, painted by the shared triad renderer.
+    """
+
+    def _dashboard(self, *, verbose: bool = True) -> str:
+        return ContextKeeper(
+            root=Path(tempfile.gettempdir())).dashboard(verbose=verbose)
+
+    def _spaces_section(self, out: str) -> str:
+        return out[:out.index("MY PROJECTS")] if "MY PROJECTS" in out else out
+
+    def test_verbose_renders_triad_block_per_space(self):
+        for title in ("first task", "second task", "third task"):
+            spaces.add_space_task("local", title)
+        spaces.SpaceManager("local").focus(2)
+        spaces.SpaceManager("local").set_note(2, "halfway through")
+        spaces.SpaceManager("local").set_note(3, "waiting on deps")
+        spaces.SpaceManager("local").done("1")
+
+        section = self._spaces_section(self._dashboard())
+
+        # Heading + one isolated block per space (both built-ins).
+        self.assertIn("MY SPACES (2)", section)
+        self.assertIn(" > LOCAL", section)
+        self.assertIn(" > REMOTE", section)
+        self.assertEqual(section.count("=" * 61), 2)
+        # Path line, progress and the triad.
+        self.assertIn(f"    @ {spaces.space_path('local')}", section)
+        self.assertIn("    [%] Progress: 1/3 (33.3%)", section)
+        self.assertIn("    -> Context:", section)
+        self.assertIn("       << [1] first task [x]", section)
+        self.assertIn("       [>] [2] second task", section)
+        self.assertIn("          * Note: halfway through", section)
+        self.assertIn("       >> [3] third task [ ]", section)
+        self.assertIn("       Unfocused / Paused Context:", section)
+        self.assertIn("          - [3] third task", section)
+        self.assertIn("            * Note: waiting on deps", section)
+
+    def test_verbose_triad_vertical_order(self):
+        for title in ("prev task", "focus task", "next task"):
+            spaces.add_space_task("local", title)
+        spaces.SpaceManager("local").done("1")
+        spaces.SpaceManager("local").focus(2)
+
+        section = self._spaces_section(self._dashboard())
+
+        self.assertLess(section.index("<< [1] prev task [x]"),
+                        section.index("[>] [2] focus task"))
+        self.assertLess(section.index("[>] [2] focus task"),
+                        section.index(">> [3] next task [ ]"))
+
+    def test_verbose_all_done_space_collapses_triad(self):
+        spaces.add_space_task("local", "only task")
+        spaces.SpaceManager("local").done("1")
+
+        section = self._spaces_section(self._dashboard())
+
+        self.assertIn("    [%] Progress: 1/1 (100.0%)", section)
+        self.assertIn("    -> Context: (all tasks completed)", section)
+
+    def test_verbose_empty_space_block(self):
+        section = self._spaces_section(self._dashboard())
+
+        self.assertIn("    [%] Progress: 0/0 (0.0%)", section)
+        self.assertIn("       << (none completed)", section)
+        self.assertIn("       [>] (no focus selected)", section)
+        self.assertIn("       >> (no open tasks)", section)
+
+    def test_verbose_dynamic_space_block_included(self):
+        path = spaces.space_path("custom")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "# custom\n## Current Sprint\n- [ ] custom task\n",
+            encoding="utf-8",
+        )
+
+        section = self._spaces_section(self._dashboard())
+
+        self.assertIn("MY SPACES (3)", section)
+        self.assertIn(" > CUSTOM", section)
+
+    def test_compact_dashboard_has_no_space_blocks(self):
+        for title in ("first task", "second task"):
+            spaces.add_space_task("local", title)
+
+        out = self._dashboard(verbose=False)
+
+        self.assertIn("SPACES (GLOBAL CONTEXTS)", out)
+        self.assertNotIn("MY SPACES", out)
+        self.assertNotIn("Unfocused / Paused Context:", out)
+
+    def test_space_block_uses_project_triad_renderer(self):
+        """Space blocks and project blocks share one renderer."""
+        from cklib.core import _render_verbose_triad
+
+        for title in ("prev task", "focus task", "next task"):
+            spaces.add_space_task("local", title)
+        spaces.SpaceManager("local").done("1")
+        spaces.SpaceManager("local").focus(2)
+        spaces.SpaceManager("local").set_note(2, "halfway through")
+        data = spaces.space_context("local")
+
+        section = self._spaces_section(self._dashboard())
+
+        self.assertIn(
+            "\n".join(_render_verbose_triad(
+                data["tl"], data["note"], data["paused"])), section)
 
 
 if __name__ == "__main__":

@@ -375,6 +375,18 @@ class TestDashboardVerbose(_IsolatedRegistry, unittest.TestCase):
             parse_plan_file=_safe_parse, verbose=True,
         )
 
+    @staticmethod
+    def _projects_section(out: str) -> str:
+        """Only the ``MY PROJECTS`` part of the verbose dashboard.
+
+        The dashboard renders the SPACES table plus a verbose block
+        per space ABOVE the projects section, so assertions about
+        project blocks (bar counts, focus markers, …) are scoped
+        here — otherwise a space block could satisfy — or break —
+        them.
+        """
+        return out[out.index("MY PROJECTS"):]
+
     def test_verbose_header_counts_projects(self):
         with tempfile.TemporaryDirectory() as td:
             td_path = Path(td)
@@ -432,11 +444,11 @@ class TestDashboardVerbose(_IsolatedRegistry, unittest.TestCase):
             ck.done("1")
             ck.register(path=target, name="finished")
 
-            out = self._render(ck)
+            projects = self._projects_section(self._render(ck))
             self.assertIn(
-                "-> Context: (all tasks completed)", out
+                "-> Context: (all tasks completed)", projects
             )
-            self.assertNotIn("[>]", out)
+            self.assertNotIn("[>]", projects)
 
     def test_verbose_no_focus_hint(self):
         with tempfile.TemporaryDirectory() as td:
@@ -449,9 +461,9 @@ class TestDashboardVerbose(_IsolatedRegistry, unittest.TestCase):
             # Render from a DIFFERENT root so the marker is [ ]
             # (non-cwd); the cwd variant is covered by the triad test.
             elsewhere = ContextKeeper(root=td_path / "elsewhere")
-            out = self._render(elsewhere)
-            self.assertIn("> nofocus [ ]", out)
-            self.assertIn("[>] (no focus selected)", out)
+            projects = self._projects_section(self._render(elsewhere))
+            self.assertIn("> nofocus [ ]", projects)
+            self.assertIn("[>] (no focus selected)", projects)
 
     def test_verbose_missing_and_corrupt_blocks(self):
         with tempfile.TemporaryDirectory() as td:
@@ -466,12 +478,12 @@ class TestDashboardVerbose(_IsolatedRegistry, unittest.TestCase):
             (corrupt / ".ck" / "PLAN.md").unlink()
             ck.register(path=corrupt, name="corrupt")
 
-            out = self._render(ck)
-            self.assertIn("[!] missing", out)
-            self.assertIn("[!] corrupt", out)
-            self.assertIn("> [MISSING] ghost [ ]", out)
+            projects = self._projects_section(self._render(ck))
+            self.assertIn("[!] missing", projects)
+            self.assertIn("[!] corrupt", projects)
+            self.assertIn("> [MISSING] ghost [ ]", projects)
             # Degraded blocks still render the header + separator.
-            self.assertEqual(out.count("=" * 61), 2)
+            self.assertEqual(projects.count("=" * 61), 2)
 
     def test_verbose_no_truncation_of_titles(self):
         """Unlike the table, the block view never truncates titles."""
