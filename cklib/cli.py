@@ -72,13 +72,22 @@ Global (all registered projects):
 Spaces (out-of-project task lists, ~/.config/ck/spaces/):
   local add <text>          Add a task to the workstation space
   local list                List workstation space tasks
+  local st                  Detailed status view for the
+                             workstation space (same layout
+                             as `ck st`: header, progress,
+                             current focus, notes, context);
+                             `status` is an exact alias
   local done <ID|range>     Mark workstation task(s) done ([x]);
                              bare `ck local done` completes the
                              CURRENT FOCUS of the space
   local focus <ID>          Focus a workstation task ([>]);
                              0 resets focus
+  local start <ID>          Alias for `ck local focus <ID>`
   local note <ID> <text>    Attach a process note to a
                              workstation task
+  local edit                Open the workstation space file
+                             (~/.config/ck/spaces/local.md) in
+                             your editor
   remote ...                Same commands for the infrastructure
                              space (~/.config/ck/spaces/remote.md)
   <space> ...               ANY space file placed in
@@ -344,7 +353,10 @@ _LEGACY_CHOICES = (
 # the space's Markdown file for ANY space — the built-in defaults
 # (local / remote) or any file discovered in
 # ~/.config/ck/spaces/ (dynamic spaces).
-_SPACE_ACTIONS = frozenset({"add", "list", "done", "focus", "note"})
+_SPACE_ACTIONS = frozenset({
+    "add", "list", "done", "focus", "start", "note",
+    "st", "status", "edit",
+})
 
 # Head tokens that are real commands. The built-in space names are
 # EXCLUDED: `ck local …` / `ck remote …` route through the space
@@ -1044,12 +1056,21 @@ def _run_space_command(space: str, rest: List[str]) -> int:
 
     - ``add <text>``          — append a new open task;
     - ``list``                — pipe-friendly task listing;
+    - ``st`` / ``status``     — detailed status view (same
+                                 layout as ``ck st``: header,
+                                 progress, current focus, notes,
+                                 work context);
     - ``done <ID|range>``     — mark task(s) done (bare form
-                                completes the space's CURRENT
-                                FOCUS, mirroring ``ck done``);
+                                 completes the space's CURRENT
+                                 FOCUS, mirroring ``ck done``);
     - ``focus <ID>``          — focus a task, demoting any other
-                                focus (``0`` resets focus);
-    - ``note <ID> <text>``    — attach a process note to a task.
+                                 focus (``0`` resets focus);
+    - ``start <ID>``          — alias for ``focus <ID>``;
+    - ``note <ID> <text>``    — attach a process note to a task;
+    - ``edit``                — open the space's Markdown file in
+                                 the user's editor (resolved with
+                                 the project's standard editor
+                                 resolution logic).
 
     All mutations go through the centralized
     :class:`cklib.spaces.SpaceManager`, which re-uses the core
@@ -1068,8 +1089,8 @@ def _run_space_command(space: str, rest: List[str]) -> int:
 
     usage = (
         f"Usage: ck {space} "
-        "<add <text>|list|done <ID|range>|focus <ID>|"
-        "note <ID> <text>>"
+        "<add <text>|list|st|status|done <ID|range>|"
+        "focus <ID>|start <ID>|note <ID> <text>|edit>"
     )
     if not rest:
         print(usage)
@@ -1101,6 +1122,20 @@ def _run_space_command(space: str, rest: List[str]) -> int:
         print(mgr.list_tasks())
         return 0
 
+    if action in ("st", "status"):
+        if args:
+            _print_error(f"ERROR: `ck {space} st` takes no arguments.")
+            return 2
+        print(mgr.status())
+        return 0
+
+    if action == "edit":
+        if args:
+            _print_error(f"ERROR: `ck {space} edit` takes no arguments.")
+            return 2
+        mgr.edit()
+        return 0
+
     if action == "done":
         spec = args[0] if args else ""
         if not spec:
@@ -1115,9 +1150,11 @@ def _run_space_command(space: str, rest: List[str]) -> int:
         print(f"[ok] Marked done: {', '.join(map(str, ids))}")
         return 0
 
-    if action == "focus":
+    if action in ("focus", "start"):
+        # `start` is an exact alias of `focus` (command parity
+        # with the project-level `ck start <ID>`).
         if not args:
-            print(f"Usage: ck {space} focus <ID>")
+            print(f"Usage: ck {space} {action} <ID>")
             return 2
         try:
             tid = int(args[0])

@@ -32,9 +32,11 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 from cklib import config as ckconfig
 from cklib import registry as ckregistry
+from cklib import sandbox as cksandbox
 from cklib import spaces
 from cklib.cli import main
 from cklib.core import ContextKeeper
@@ -1195,6 +1197,387 @@ class TestSpaceListViewAlignment(_IsolatedHome):
         self.assertIn("[x] 1. first task", lines)
         idx = lines.index("[x] 1. first task")
         self.assertEqual(lines[idx + 1], "    * Note: done note")
+
+
+# --------------------------------------------------------------------------- #
+# 8. Command parity: st / status, edit, start alias
+# --------------------------------------------------------------------------- #
+
+
+class TestSpaceStatusEditStart(_IsolatedHome):
+    """``ck <space> st`` / ``edit`` / ``start`` parity with the project CLI.
+
+    - ``st`` (alias ``status``) renders the space through the SAME
+      engine as the project ``ck st``
+      (``cklib.core._render_local_status``), so a space status has
+      the identical layout: header bar, progress line, CURRENT
+      FOCUS with its process note, and the WORK CONTEXT sections;
+    - ``edit`` resolves the editor with the project's standard
+      resolution logic and opens the space's Markdown file;
+    - ``start`` is an exact alias of ``focus``.
+    """
+
+    def _run(self, argv) -> tuple[int, str]:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = main(argv)
+        return code, buf.getvalue()
+
+    def _seed(self, space: str, *titles: str) -> None:
+        for title in titles:
+            code, out = self._run([space, "add", title])
+            self.assertEqual(code, 0, out)
+
+    def _tmpdir(self) -> Path:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        return Path(tmp.name)
+
+    def _fake_editor(self) -> tuple[Path, Path]:
+        """Install a fake editor logging its single argument.
+
+        Returns ``(editor, log)``. ``$VISUAL`` AND ``$EDITOR`` are
+        both exported by the caller so editor resolution is
+        deterministic regardless of the host environment (the
+        project precedence checks ``$VISUAL`` before ``$EDITOR``).
+        """
+        d = self._tmpdir()
+        editor = d / "fake-editor.sh"
+        log = d / "editor.log"
+        editor.write_text(
+            "#!/usr/bin/env bash\n"
+            'printf "%s" "$1" > "$CK_EDIT_LOG"\n',
+            encoding="utf-8",
+        )
+        editor.chmod(0o755)
+        return editor, log
+
+    # ---- st / status ------------------------------------------------- #
+
+    def test_local_st_layout_matches_project_st(self):
+        self._seed("local", "first task", "second task", "third task")
+        self._run(["local", "focus", "2"])
+        self._run(["local", "note", "2", "halfway through"])
+        self._run(["local", "done", "1"])
+
+        code, out = self._run(["local", "st"])
+
+        self.assertEqual(code, 0)
+        lines = out.splitlines()
+        bar = "=" * 61
+        # 1) header bar + ` > SPACE [v<version>]`
+        self.assertEqual(lines[0], bar)
+        self.assertEqual(lines[1], f" > LOCAL [v{ckconfig.VERSION}]")
+        # 2) progress line
+        self.assertEqual(
+            lines[2], " [%] Progress: 1/3 tasks done (33.3%)")
+        # 3) current focus + its process note
+        self.assertEqual(
+            lines[4], " -> CURRENT FOCUS: [#2] second task")
+        self.assertEqual(lines[5], "    * Note: halfway through")
+        # 4) work context sections
+        self.assertEqual(lines[7], " -> WORK CONTEXT:")
+        self.assertEqual(lines[8], "    << Done:")
+        self.assertEqual(lines[9], "       - [1] first task [x]")
+        self.assertEqual(lines[10], "    [>] Focus:")
+        self.assertEqual(lines[11], "       - [2] second task")
+        self.assertEqual(lines[12], "       * Note: halfway through")
+        self.assertEqual(lines[13], "    >> Upcoming:")
+        self.assertEqual(lines[14], "       - [3] third task [ ]")
+        self.assertEqual(lines[15], "    >> Backlog: 2 tasks remaining")
+        self.assertEqual(lines[16], bar)
+
+    def test_status_is_exact_alias_of_st(self):
+        self._seed("local", "first task", "second task")
+        self._run(["local", "focus", "1"])
+        self._run(["local", "note", "1", "active"])
+
+        code_st, out_st = self._run(["local", "st"])
+        code_status, out_status = self._run(["local", "status"])
+
+        self.assertEqual(code_st, code_status)
+        self.assertEqual(out_st, out_status)
+
+    def test_local_st_without_focus_guides_to_start(self):
+        self._seed("local", "alpha", "beta")
+
+        code, out = self._run(["local", "st"])
+
+        self.assertEqual(code, 0)
+        self.assertIn("[!] No active focus set.", out)
+        # The guidance names the SPACE spelling, not the project's.
+        self.assertIn("Run 'ck local start <ID>'", out)
+        self.assertIn("(e.g., 'ck local start 1') to set focus.", out)
+        self.assertIn("    [>] Next:", out)
+        self.assertIn("       - [1] alpha [ ]", out)
+
+    def test_local_st_surfaces_paused_task_notes(self):
+        """Noted, non-focused open tasks fill the paused ledger."""
+        self._seed("local", "alpha", "beta", "gamma")
+        self._run(["local", "focus", "2"])
+        self._run(["local", "note", "1", "not started"])
+        self._run(["local", "note", "2", "in progress"])
+        self._run(["local", "note", "3", "waiting on deps"])
+
+        code, out = self._run(["local", "st"])
+
+        self.assertEqual(code, 0)
+        self.assertIn("    Unfocused / Paused Context:", out)
+        self.assertIn("       - [1] alpha", out)
+        self.assertIn("         * Note: not started", out)
+        self.assertIn("       - [3] gamma", out)
+        self.assertIn("         * Note: waiting on deps", out)
+        # The focused task's note is shown once, at the top — never
+        # duplicated into the paused ledger.
+        self.assertNotIn("         * Note: in progress", out)
+
+    def test_st_takes_no_arguments(self):
+        self._seed("local", "first task")
+
+        code, out = self._run(["local", "st", "extra"])
+
+        self.assertEqual(code, 2)
+        self.assertIn(
+            "ERROR: `ck local st` takes no arguments.", out)
+
+    def test_st_rejects_status_view_flags(self):
+        """Space statuses take no view flags (no silent project st)."""
+        self._seed("local", "first task")
+
+        code, out = self._run(["local", "st", "-l"])
+
+        self.assertEqual(code, 2)
+        self.assertIn("Unknown flag", out)
+
+    def test_remote_and_dynamic_spaces_render_status(self):
+        self._seed("remote", "provision VPS")
+        self._seed("custom", "custom task")
+        self._run(["custom", "focus", "1"])
+
+        code, out = self._run(["remote", "st"])
+        self.assertEqual(code, 0)
+        self.assertIn(f" > REMOTE [v{ckconfig.VERSION}]", out)
+        self.assertIn("[%] Progress: 0/1 tasks done (0.0%)", out)
+
+        code, out = self._run(["custom", "status"])
+        self.assertEqual(code, 0)
+        self.assertIn(f" > CUSTOM [v{ckconfig.VERSION}]", out)
+        self.assertIn("-> CURRENT FOCUS: [#1] custom task", out)
+
+    # ---- start alias -------------------------------------------------- #
+
+    def test_local_start_focuses_task(self):
+        self._seed("local", "first task", "second task")
+
+        code, out = self._run(["local", "start", "2"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "-> Focused [2]: second task\n")
+        plan = spaces.space_path("local").read_text(encoding="utf-8")
+        self.assertIn("- [>] second task", plan)
+
+    def test_start_output_is_identical_to_focus(self):
+        self._seed("local", "first task", "second task", "third task")
+        _, focus_first = self._run(["local", "focus", "2"])
+        _, focus_switch = self._run(["local", "focus", "3"])
+        _, focus_reset = self._run(["local", "focus", "0"])
+        self._run(["local", "focus", "0"])
+        _, start_first = self._run(["local", "start", "2"])
+        _, start_switch = self._run(["local", "start", "3"])
+        _, start_reset = self._run(["local", "start", "0"])
+
+        self.assertEqual(focus_first, start_first)
+        self.assertEqual(focus_switch, start_switch)
+        self.assertEqual(focus_reset, start_reset)
+        # Both the demotion report and the reset report match too.
+        self.assertEqual(
+            focus_switch,
+            "-> Focused [3]: third task\n"
+            "[i] Task #2 second task lost focus (demoted to open).\n",
+        )
+        self.assertIn("[ok] Focus reset.", start_reset)
+
+    def test_start_is_idempotent(self):
+        self._seed("local", "first task")
+        self._run(["local", "start", "1"])
+        before = spaces.space_path("local").read_text(encoding="utf-8")
+
+        code, out = self._run(["local", "start", "1"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "Task #1 is already focused.\n")
+        after = spaces.space_path("local").read_text(encoding="utf-8")
+        self.assertEqual(before, after)
+
+    def test_start_usage_and_invalid_ids(self):
+        self._seed("local", "first task")
+
+        code, out = self._run(["local", "start"])
+        self.assertEqual(code, 2)
+        self.assertIn("Usage: ck local start <ID>", out)
+
+        code, out = self._run(["local", "start", "abc"])
+        self.assertEqual(code, 2)
+        self.assertIn("ERROR: Invalid task ID: 'abc'", out)
+
+        code, out = self._run(["local", "start", "99"])
+        self.assertEqual(code, 2)
+        self.assertIn("No task with id 99", out)
+
+    def test_start_completes_bare_done_target(self):
+        """`start` moves focus, so bare `done` follows it."""
+        self._seed("local", "first task", "second task")
+        self._run(["local", "start", "2"])
+
+        code, out = self._run(["local", "done"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "[ok] Marked done: 2\n")
+        plan = spaces.space_path("local").read_text(encoding="utf-8")
+        self.assertIn("- [x] second task", plan)
+        self.assertIn("- [ ] first task", plan)
+        # Focus consumed by the completion — nothing left focused.
+        self.assertNotIn("- [>]", plan)
+        self.assertIsNone(
+            spaces.SpaceManager("local").current_focus_id())
+
+    # ---- edit --------------------------------------------------------- #
+
+    def test_edit_opens_space_file_with_resolved_editor(self):
+        self._seed("local", "first task")
+        editor, log = self._fake_editor()
+
+        with mock.patch.dict(os.environ, {
+            "VISUAL": str(editor),
+            "EDITOR": str(editor),
+            "CK_EDIT_LOG": str(log),
+        }):
+            code, out = self._run(["local", "edit"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "")
+        self.assertEqual(
+            log.read_text(encoding="utf-8"),
+            str(spaces.space_path("local")))
+
+    def test_edit_prefers_project_ck_json_editor(self):
+        """Editor resolution uses the project's standard precedence."""
+        self._seed("local", "first task")
+        editor, log = self._fake_editor()
+        project = self._tmpdir()
+        (project / ".ck").mkdir()
+        (project / ".ck.json").write_text(
+            json.dumps({"editor": str(editor)}) + "\n",
+            encoding="utf-8",
+        )
+        cwd = os.getcwd()
+        os.chdir(project)
+        self.addCleanup(os.chdir, cwd)
+
+        with mock.patch.dict(os.environ, {
+            "VISUAL": "", "EDITOR": "", "CK_EDIT_LOG": str(log)}):
+            code, _ = self._run(["local", "edit"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            log.read_text(encoding="utf-8"),
+            str(spaces.space_path("local")))
+
+    def test_edit_dynamic_space_target(self):
+        self._seed("custom", "custom task")
+        editor, log = self._fake_editor()
+
+        with mock.patch.dict(os.environ, {
+            "VISUAL": str(editor),
+            "EDITOR": str(editor),
+            "CK_EDIT_LOG": str(log),
+        }):
+            code, out = self._run(["custom", "edit"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "")
+        self.assertEqual(
+            log.read_text(encoding="utf-8"),
+            str(spaces.space_path("custom")))
+
+    def test_edit_in_dev_mode_targets_sandbox_copy(self):
+        """Dev mode never hands the real space file to the editor."""
+        self._seed("local", "first task")
+        editor, log = self._fake_editor()
+        # Activated AFTER seeding so the real (tmp-HOME) space file
+        # exists and the redirect can be observed end to end.
+        os.environ["CK_SANDBOX"] = "1"
+
+        with mock.patch.dict(os.environ, {
+            "VISUAL": str(editor),
+            "EDITOR": str(editor),
+            "CK_EDIT_LOG": str(log),
+        }):
+            code, out = self._run(["local", "edit"])
+
+        self.assertEqual(code, 0)
+        # Dev-mode warning banner precedes the (silent) editor run.
+        self.assertIn("CK_SANDBOX is active", out)
+        self.assertTrue(log.exists())
+        invoked = Path(log.read_text(encoding="utf-8"))
+        self.assertNotEqual(invoked, spaces.space_path("local"))
+        self.assertTrue(cksandbox.is_within_sandbox(invoked))
+        self.assertEqual(invoked.name, "local.md")
+
+    def test_edit_takes_no_arguments(self):
+        self._seed("local", "first task")
+
+        code, out = self._run(["local", "edit", "extra"])
+
+        self.assertEqual(code, 2)
+        self.assertIn(
+            "ERROR: `ck local edit` takes no arguments.", out)
+
+    def test_missing_space_errors_for_st_and_edit(self):
+        for action in ("st", "status", "edit", "start"):
+            code, out = self._run(["ghost", action])
+            self.assertEqual(code, 2, out)
+            self.assertIn(
+                "ERROR: Space 'ghost' not found", out)
+            self.assertIn("ck ghost add <text>", out)
+
+    # ---- usage / help guidance ---------------------------------------- #
+
+    def test_space_usage_hint_lists_every_action(self):
+        code, out = self._run(["local"])
+
+        self.assertEqual(code, 2)
+        for token in ("add <text>", "list", "st", "status",
+                      "done <ID|range>", "focus <ID>", "start <ID>",
+                      "note <ID> <text>", "edit"):
+            self.assertIn(token, out)
+
+    def test_unknown_action_hint_lists_st_edit_start(self):
+        code, out = self._run(["local", "frobnicate"])
+
+        self.assertEqual(code, 2)
+        self.assertIn("Unknown `ck local` action: 'frobnicate'", out)
+        self.assertIn("st", out)
+        self.assertIn("start <ID>", out)
+        self.assertIn("edit", out)
+
+    def test_help_documents_st_edit_and_start(self):
+        from cklib.cli import HELP_TEXT
+
+        self.assertIn("local st", HELP_TEXT)
+        self.assertIn("status` is an exact alias", HELP_TEXT)
+        self.assertIn("local start <ID>", HELP_TEXT)
+        self.assertIn("local edit", HELP_TEXT)
+
+    def test_status_ignores_error_exits(self):
+        """Sanity: every happy-path command exits 0."""
+        self._seed("local", "first task", "second task")
+        self.assertEqual(self._run(["local", "st"])[0], 0)
+        self.assertEqual(self._run(["local", "status"])[0], 0)
+        self.assertEqual(self._run(["local", "start", "1"])[0], 0)
+        self.assertEqual(
+            spaces.SpaceManager("local").status(),
+            self._run(["local", "st"])[1].rstrip("\n"))
 
 
 if __name__ == "__main__":
