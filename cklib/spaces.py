@@ -37,8 +37,10 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 
 from . import config
@@ -109,8 +111,9 @@ def existing_space_names() -> list[str]:
 
     DYNAMIC DISCOVERY: any space file placed in
     ``~/.config/ck/spaces/`` is automatically a routable space with
-    the full CLI interface (``add`` / ``list`` / ``done`` /
-    ``focus`` / ``note``) — no registration, no allow-list update.
+    the full CLI interface (``add`` / ``list`` / ``st`` / ``done`` /
+    ``focus`` / ``start`` / ``note`` / ``edit``) — no registration,
+    no allow-list update.
     Only structurally safe names are reported.
     """
     try:
@@ -383,6 +386,52 @@ class SpaceManager:
             f"{_render_tasks_listing(tl, self._all_notes())}"
         )
 
+    def status(self) -> str:
+        """Render the detailed status view for the space.
+
+        Uses the SAME renderer as the project ``ck st``
+        (``cklib.core._render_local_status``), so a space
+        status is laid out exactly like a project status:
+        the header bar, the `` > NAME [v<version>]`` line,
+        the ``[%] Progress:`` line, the ``-> CURRENT FOCUS:``
+        block with its process note, and the full
+        ``WORK CONTEXT`` (``<< Done`` / ``[!] Skipped`` /
+        ``[>] Focus`` / ``[>] Next`` / ``>> Upcoming`` /
+        ``Unfocused / Paused Context`` / ``>> Backlog``).
+
+        The only space-specific adaptation is the data
+        source: :class:`_SpaceStatusView` supplies the
+        space's display name, the note bound to the focused
+        task (from the JSON sidecar), and the space's
+        paused ledger (open, noted, non-focused tasks —
+        the analogue of the project's paused registry).
+        """
+        # Imported lazily: core imports this module at load time.
+        from .core import _render_local_status
+        return _render_local_status(
+            _SpaceStatusView(self), self.load())
+
+    def edit(self) -> None:
+        """Open the space's Markdown file in the user's editor.
+
+        Editor resolution follows the project's standard
+        logic (``cklib.config.get_editor``): the ``"editor"``
+        key in the nearest project's ``.ck.json`` (walking up
+        from the cwd), then ``$VISUAL``, ``$EDITOR``, then
+        ``nano`` / ``vi``.
+
+        DEV MODE: the sandboxed copy is opened (the real
+        space file is never handed to the editor as a write
+        target), mirroring ``ck edit`` for projects. The
+        target comes from the same :func:`_write_path`
+        helper every space mutation uses, so editor opens
+        follow the identical dev-mode redirect and lazy
+        directory creation contract.
+        """
+        target = _write_path(self.space)
+        subprocess.run(
+            [config.get_editor(), str(target)], check=False)
+
     def done(self, spec: str) -> list[int]:
         """Mark task(s) as DONE — IDs, ranges and lists (``3``, ``2-4``).
 
@@ -531,6 +580,66 @@ class SpaceManager:
             "pct": tl.completion_pct,
             "last": last_iso,
         }
+
+
+class _SpaceStatusView:
+    """Minimal keeper surface for space status rendering.
+
+    ``cklib.core._render_local_status`` — the engine behind
+    ``ck st`` — reads exactly four things off its keeper:
+    the root name (header), the active-task note, the
+    paused-task ledger and palette overrides. This adapter
+    supplies the space equivalents:
+
+    - ``root.name`` — the space's display name (upper-cased,
+      matching the dashboard's Space column);
+    - ``get_note()`` — the process note bound to the focused
+      task (the sidecar analogue of a project's
+      ``.ck/state.json`` ``active_task`` entry);
+    - ``_paused_tasks()`` — open, noted, non-focused tasks:
+      the space analogue of the project's Unfocused / Paused
+      Context ledger (spaces have no focus-loss registry, so
+      a note on an open task that does not hold focus is the
+      closest equivalent of a paused entry);
+    - ``color_overrides()`` — spaces carry no ``.ck.json``,
+      so every palette slot inherits the terminal's native
+      color;
+    - ``start_command()`` — spaces are driven by
+      ``ck <space> start <ID>``, so the "no active focus"
+      guidance names the spelling that is valid here.
+    """
+
+    def __init__(self, mgr: "SpaceManager") -> None:
+        self._mgr = mgr
+        self.root = SimpleNamespace(name=mgr.space.upper())
+
+    def start_command(self) -> str:
+        return f"ck {self._mgr.space} start"
+
+    def get_note(self) -> Optional[dict]:
+        focus_id = self._mgr.current_focus_id()
+        if focus_id is None:
+            return None
+        note = self._mgr.get_note(focus_id)
+        if not note:
+            return None
+        return {"id": focus_id, "note": note}
+
+    def _paused_tasks(self) -> list[dict]:
+        tl = self._mgr.load()
+        focus_id = self._mgr.current_focus_id()
+        out: list[dict] = []
+        for t in tl.open:
+            if focus_id is not None and t.id == focus_id:
+                continue
+            note = self._mgr.get_note(t.id)
+            if note:
+                out.append(
+                    {"id": t.id, "title": t.title, "note": note})
+        return out
+
+    def color_overrides(self) -> dict:
+        return {}
 
 
 # ---------------------------------------------------------------------- #

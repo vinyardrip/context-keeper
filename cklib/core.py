@@ -1617,6 +1617,17 @@ class ContextKeeper:
                 self._color_overrides = {}
         return self._color_overrides
 
+    def start_command(self) -> str:
+        """The command that sets focus for THIS plan.
+
+        Projects focus through ``ck start <ID>``. Global spaces are
+        driven by the same engine through ``ck <space> start <ID>``,
+        so the status renderer's "no active focus" guidance asks the
+        keeper for the spelling that is actually valid in its own
+        context instead of hardcoding the project form.
+        """
+        return "ck start"
+
     # ------------------------------------------------------------------ #
     # COMMAND: status / dashboard
     # ------------------------------------------------------------------ #
@@ -2827,10 +2838,12 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
     if top_focus is None:
         first_pending = tl.open[0] if tl.open else None
         if first_pending is not None:
+            start_cmd = ck.start_command()
             lines.append("")
             lines.append(p.yellow(
-                " [!] No active focus set. Run 'ck start <ID>' "
-                f"(e.g., 'ck start {first_pending.id}') to set focus."
+                f" [!] No active focus set. Run '{start_cmd} <ID>' "
+                f"(e.g., '{start_cmd} {first_pending.id}') "
+                "to set focus."
             ))
 
     lines.append("")
