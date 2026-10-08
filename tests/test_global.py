@@ -73,6 +73,17 @@ class _IsolatedRegistry:
 # Helpers
 # ---------------------------------------------------------------------------
 
+# One verbose dashboard card's horizontal rail: `+` + the card's rule
+# run + `+`. Every body row between two rails is exactly this wide.
+CARD_BORDER = "+" + "=" * 62 + "+"
+
+
+def _first_card(text: str) -> str:
+    """The first complete card (top rail, body, bottom rail)."""
+    start = text.index(CARD_BORDER)
+    end = text.index(CARD_BORDER, start + 1)
+    return text[start:end + len(CARD_BORDER)]
+
 
 def _project_dir(parent: Path, name: str, *, init: bool = True) -> Path:
     p = parent / name
@@ -364,7 +375,7 @@ class TestDashboardTable(_IsolatedRegistry, unittest.TestCase):
 
 
 class TestDashboardVerbose(_IsolatedRegistry, unittest.TestCase):
-    """``ck dashboard -v`` block view: full triad per project."""
+    """``ck dashboard -v`` card view: full triad per project."""
 
     def setUp(self):
         self._isolate()
@@ -398,8 +409,8 @@ class TestDashboardVerbose(_IsolatedRegistry, unittest.TestCase):
             out = self._render(ck)
             self.assertIn("MY PROJECTS (2)", out)
 
-    def test_verbose_block_layout_and_triad(self):
-        """Spec-exact block: header, path, progress, triad, separator."""
+    def test_verbose_card_layout_and_triad(self):
+        """Spec-exact card: border, header, path, progress, triad."""
         with tempfile.TemporaryDirectory() as td:
             target = _project_dir(Path(td), "alpha")
             ck = ContextKeeper(root=target)
@@ -413,27 +424,42 @@ class TestDashboardVerbose(_IsolatedRegistry, unittest.TestCase):
             ck.register(path=target, name="alpha")
 
             out = self._render(ck)
-            # The unified SPACES table renders above the
-            # projects block view.
+            # The spaces section (cards) renders above the projects one.
             self.assertIn("MY PROJECTS (1)", out)
-            self.assertLess(
-                out.index("SPACES (GLOBAL CONTEXTS)"),
-                out.index("MY PROJECTS (1)")
-            )
-            # cwd marker: the project block carries [*]
+            self.assertLess(out.index("MY SPACES"),
+                            out.index("MY PROJECTS (1)"))
+            # cwd marker: the project card carries [*]
             self.assertIn("> alpha [*]", out)
-            self.assertIn(f"    @ {target.resolve()}", out)
-            self.assertIn("    [%] Progress: 1/3 (33.3%)", out)
-            self.assertIn("    -> Context:", out)
+            self.assertIn(f"@ {target.resolve()}", out)
+            self.assertIn("[%] Progress: 1/3 tasks done (33.3%)", out)
+            self.assertIn("-> Context:", out)
             # Vertical triad order: PREV < FOCUS < NEXT.
-            idx_prev = out.index("<< [1] prev task [x]")
-            idx_focus = out.index("[>] [2] focus task")
-            idx_next = out.index(">> [3] next task [ ]")
-            self.assertLess(idx_prev, idx_focus)
-            self.assertLess(idx_focus, idx_next)
-            # Each block is isolated by a 61-char separator bar.
-            self.assertIn("=" * 61, out)
-            self.assertTrue(out.rstrip().endswith("=" * 61))
+            self.assertLess(out.index("<< PREV"), out.index("[>] FOCUS"))
+            self.assertLess(out.index("[>] FOCUS"), out.index(">> NEXT"))
+            self.assertLess(out.index("[1] prev task [x]"),
+                            out.index("[2] focus task"))
+            self.assertLess(out.index("[2] focus task"),
+                            out.index("[3] next task [ ]"))
+            # Each card is a bordered box (top + bottom rail).
+            self.assertIn(CARD_BORDER, out)
+            self.assertTrue(out.rstrip().endswith(CARD_BORDER))
+
+    def test_verbose_card_body_rows_are_bordered(self):
+        """Every body line sits between the card's rails."""
+        with tempfile.TemporaryDirectory() as td:
+            target = _project_dir(Path(td), "alpha")
+            ck = ContextKeeper(root=target)
+            ck.add_task("only task")
+            ck.register(path=target, name="alpha")
+
+            projects = self._projects_section(self._render(ck))
+            card = _first_card(projects)
+
+            rows = card.splitlines()[1:-1]
+            self.assertTrue(rows)
+            for line in rows:
+                self.assertTrue(line.startswith("|"), line)
+                self.assertTrue(line.endswith("|"), line)
 
     def test_verbose_all_done_project(self):
         """All-done projects collapse the triad to a single line."""
@@ -448,7 +474,7 @@ class TestDashboardVerbose(_IsolatedRegistry, unittest.TestCase):
             self.assertIn(
                 "-> Context: (all tasks completed)", projects
             )
-            self.assertNotIn("[>]", projects)
+            self.assertNotIn("[>] FOCUS", projects)
 
     def test_verbose_no_focus_hint(self):
         with tempfile.TemporaryDirectory() as td:
@@ -458,14 +484,15 @@ class TestDashboardVerbose(_IsolatedRegistry, unittest.TestCase):
             ck.add_task("an open task")
             ck.register(path=target, name="nofocus")
 
-            # Render from a DIFFERENT root so the marker is [ ]
-            # (non-cwd); the cwd variant is covered by the triad test.
+            # Render from a DIFFERENT root so there is no [*] marker
+            # (the cwd variant is covered by the triad test).
             elsewhere = ContextKeeper(root=td_path / "elsewhere")
             projects = self._projects_section(self._render(elsewhere))
-            self.assertIn("> nofocus [ ]", projects)
-            self.assertIn("[>] (no focus selected)", projects)
+            self.assertIn("> nofocus", projects)
+            self.assertNotIn("> nofocus [*]", projects)
+            self.assertIn("(no focus selected)", projects)
 
-    def test_verbose_missing_and_corrupt_blocks(self):
+    def test_verbose_missing_and_corrupt_cards(self):
         with tempfile.TemporaryDirectory() as td:
             td_path = Path(td)
             gone = td_path / "gone"
@@ -474,19 +501,19 @@ class TestDashboardVerbose(_IsolatedRegistry, unittest.TestCase):
             ck.register(path=gone, name="ghost")
             gone.rmdir()
             corrupt = _project_dir(td_path, "corrupt")
-            # Folder exists but PLAN.md is gone -> corrupt block.
+            # Folder exists but PLAN.md is gone -> corrupt card.
             (corrupt / ".ck" / "PLAN.md").unlink()
             ck.register(path=corrupt, name="corrupt")
 
             projects = self._projects_section(self._render(ck))
             self.assertIn("[!] missing", projects)
             self.assertIn("[!] corrupt", projects)
-            self.assertIn("> [MISSING] ghost [ ]", projects)
-            # Degraded blocks still render the header + separator.
-            self.assertEqual(projects.count("=" * 61), 2)
+            self.assertIn("> [MISSING] ghost", projects)
+            # Degraded cards still render their two rails: 2 cards.
+            self.assertEqual(projects.count(CARD_BORDER), 4)
 
     def test_verbose_no_truncation_of_titles(self):
-        """Unlike the table, the block view never truncates titles."""
+        """Unlike the table, the card view never truncates titles."""
         with tempfile.TemporaryDirectory() as td:
             target = _project_dir(Path(td), "longtitle")
             title = "x" * 120
@@ -495,8 +522,10 @@ class TestDashboardVerbose(_IsolatedRegistry, unittest.TestCase):
             ck.start(1)
             ck.register(path=target, name="longtitle")
 
-            out = self._render(ck)
-            self.assertIn(f"[>] [1] {title}", out)
+            out = self._projects_section(self._render(ck))
+            # The whole title survives (it overflows the right rail
+            # rather than losing characters).
+            self.assertIn(f"[1] {title}", out)
 
 
 # A local copy of the safe parse helper that doesn't depend on core's

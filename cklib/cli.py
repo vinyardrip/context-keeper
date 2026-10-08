@@ -69,6 +69,21 @@ Global (all registered projects):
   unregister [--path PATH | NAME]     Remove a project from the registry
   prune                              Drop entries whose folders no longer exist
 
+Space Management (manage global spaces):
+  space list                 List every global space plus the
+                             active [PROJECT] context; [PROJECT]
+                             is where un-prefixed commands
+                             (ck st, ck list) resolve
+  space create <name>        Create a new space from the default
+                             template
+  space rename <old> <new>   Rename a space, carrying its notes
+                             along (alias: mv)
+  space delete <name>        Permanently delete a space and its
+                             process notes; asks for
+                             confirmation, `-y` skips it.
+                             Built-in `local` / `remote` cannot
+                             be deleted
+
 Spaces (out-of-project task lists, ~/.config/ck/spaces/):
   local add <text>          Add a task to the workstation space
   local list                List workstation space tasks
@@ -183,6 +198,9 @@ _LOCAL_ONLY_COMMANDS = frozenset({
     "init", "start", "done", "add", "note", "notes", "save", "edit",
     "log",
 })
+# `ck space …` is GLOBAL (it operates purely on ~/.config/ck/spaces/),
+# so it is deliberately NOT in _LOCAL_ONLY_COMMANDS — the management
+# layer must work from any directory, including a dangling one.
 
 # User-facing message shown when a local command runs from a working
 # directory whose descriptor is gone (rootless keeper).
@@ -288,6 +306,23 @@ def build_parser() -> "argparse.ArgumentParser":
     )
     sub.add_parser("info", help="Show installation diagnostics")
 
+    p_space = sub.add_parser(
+        "space", help="Manage global spaces (list/create/rename/delete)")
+    space_sub = p_space.add_subparsers(dest="space_action")
+    space_sub.add_parser("list", help="List spaces + the active project")
+    p_screate = space_sub.add_parser(
+        "create", help="Create a new space")
+    p_screate.add_argument("name", help="Space name (no spaces/slashes)")
+    p_srename = space_sub.add_parser("rename", help="Rename a space")
+    p_srename.add_argument("old_name", help="Existing space name")
+    p_srename.add_argument("new_name", help="New space name")
+    p_sdelete = space_sub.add_parser(
+        "delete", help="Permanently delete a space and its notes")
+    p_sdelete.add_argument("name", help="Space name")
+    p_sdelete.add_argument(
+        "-y", "--yes", "--force", dest="assume_yes", action="store_true",
+        help="Skip the confirmation prompt (for automation)")
+
     p_reg = sub.add_parser("register", help="Register a project globally")
     p_reg.add_argument("-n", "--name", default=None,
                        help="Display name (default: folder name)")
@@ -358,7 +393,7 @@ _LEGACY_CHOICES = (
     "init", "st", "dashboard", "start", "done", "add", "note", "notes",
     "save", "edit", "log", "install", "uninstall", "update", "help",
     "list", "register", "unregister", "prune", "info",
-    "local", "remote",
+    "local", "remote", "space",
     "dev", "sandbox", "ck-clean",
 )
 
@@ -384,6 +419,13 @@ _SPACE_ACTION_FLAGS: dict[str, frozenset] = {
     "status": frozenset({"-l", "--list", "-e", "--edit",
                          "-g", "--global"}),
     "dashboard": frozenset({"-v", "--verbose"}),
+}
+
+# Flags each SPACE MANAGEMENT action accepts (``ck space …``).
+# Only the irreversible ``delete`` takes a bypass flag; the others
+# reject every flag so a typo can never be swallowed silently.
+_SPACE_MGMT_FLAGS: dict[str, frozenset] = {
+    "delete": frozenset({"-y", "--yes", "--force"}),
 }
 
 # Head tokens that are real commands. The built-in space names are
@@ -738,6 +780,21 @@ def _dispatch(argv: Optional[List[str]] = None) -> int:
             print(ck.tasks())
         elif args.command == "info":
             print(ck.info())
+        elif args.command == "space":
+            # argparse sub-namespace -> the same positional pipeline the
+            # legacy dispatcher uses, so `ck space …` has exactly ONE
+            # implementation path.
+            action = getattr(args, "space_action", None)
+            rest = [action] if action else []
+            if action == "create":
+                rest.append(args.name)
+            elif action == "rename":
+                rest.extend([args.old_name, args.new_name])
+            elif action == "delete":
+                rest.append(args.name)
+                if getattr(args, "assume_yes", False):
+                    rest.append("-y")
+            return _run_space_mgmt(rest)
         elif args.command == "start":
             # IDEMPOTENCY: re-focusing the already-focused task is a
             # clean no-op — no note prompt, no plan mutation.
@@ -869,6 +926,136 @@ def _print_error(message: str) -> None:
     print(ui.get_palette().red(message))
 
 
+def _run_space_mgmt(rest: List[str]) -> int:
+    """Dispatch ``ck space <action> …`` — the space management layer.
+
+    Actions (with their explicit aliases):
+
+    - ``list`` (``ls``)   — every global space plus the ACTIVE
+      PROJECT row (``[PROJECT] <name>``) that un-prefixed commands
+      resolve against;
+    - ``create <name>`` (``new``) — scaffold a new space file;
+    - ``rename <old> <new>`` (``mv``) — rename it, carrying the note
+      sidecar along;
+    - ``delete <name>``   — permanently remove it plus its sidecar.
+      NO short alias on purpose: deletion is irreversible, so the verb
+      is spelled out and requires an interactive ``[y/N]`` confirmation
+      (or an explicit ``-y`` / ``--yes`` / ``--force``).
+
+    Validation lives in :mod:`cklib.spaces` (``validate_new_space_name``
+    and friends); this layer only maps failures to clean ``ERROR:`` lines
+    and exit codes.
+    """
+    from . import spaces
+
+    usage = (
+        "Usage: ck space "
+        "<list|create <name>|rename <old> <new>|delete <name> [-y]>"
+    )
+    if not rest:
+        print(usage)
+        return 2
+
+    action, args = rest[0], rest[1:]
+    validated = _reject_unknown_flags(
+        f"space {action}", rest,
+        allowed=_SPACE_MGMT_FLAGS.get(action, frozenset()))
+    if validated is None:
+        return 2
+    args = validated[1:]
+
+    try:
+        if action in ("list", "ls"):
+            if args:
+                _print_error("ERROR: `ck space list` takes no arguments.")
+                return 2
+            ck = ContextKeeper()
+            print(ck.space_manager_list())
+            return 0
+
+        if action in ("create", "new"):
+            if not args:
+                print("Usage: ck space create <name>")
+                return 2
+            if len(args) > 1:
+                _print_error(
+                    "ERROR: `ck space create` takes exactly one name "
+                    f"(got {len(args)}). Spaces never contain spaces.")
+                return 2
+            path = spaces.create_space(args[0])
+            print(f"[ok] Created space {args[0]!r}: {path}")
+            print(f"     Add a task with `ck {args[0]} add <text>`.")
+            return 0
+
+        if action in ("rename", "mv"):
+            if len(args) != 2:
+                print("Usage: ck space rename <old> <new>")
+                return 2
+            info = spaces.rename_space(args[0], args[1])
+            print(
+                f"[ok] Renamed space {info['from']!r} -> {info['to']!r}: "
+                f"{info['moved']}")
+            if info["notes_moved"]:
+                print("     Process notes (sidecar) carried along.")
+            return 0
+
+        if action == "delete":
+            # Split the confirmation flags off FIRST: `ck space delete
+            # work -y` is one name plus a bypass, not two names.
+            assume_yes = any(
+                tok in ("-y", "--yes", "--force") for tok in args)
+            names = [a for a in args
+                     if a not in ("-y", "--yes", "--force")]
+            if not names:
+                print("Usage: ck space delete <name> [-y]")
+                return 2
+            if len(names) > 1:
+                _print_error(
+                    "ERROR: `ck space delete` takes exactly one name.")
+                return 2
+            name = names[0]
+            # Confirmation gate: `-y` / `--yes` / `--force` bypass the
+            # prompt for automation; otherwise ask interactively and
+            # REFUSE on a non-TTY (never delete on a bare newline,
+            # never delete when stdin is piped).
+            if not assume_yes:
+                if not sys.stdin.isatty() or not sys.stdout.isatty():
+                    _print_error(
+                        "ERROR: Refusing to delete space "
+                        f"{name!r} without confirmation "
+                        "(non-interactive terminal). Pass -y to "
+                        "confirm.")
+                    return 2
+                try:
+                    answer = input(
+                        f"Are you sure you want to permanently delete "
+                        f"space '{name}' and its process notes? [y/N]: ")
+                except (EOFError, KeyboardInterrupt):
+                    print("[i] Aborted.")
+                    return 2
+                if answer.strip().lower() not in ("y", "yes"):
+                    print("[i] Aborted.")
+                    return 2
+            info = spaces.delete_space(name, confirmed=True)
+            print(
+                f"[ok] Deleted space {info['name']!r} ({info['removed']}).")
+            if info["notes"]:
+                print("     Process notes (sidecar) deleted too.")
+            return 0
+
+    except ValueError as e:
+        _print_error(f"ERROR: {e}")
+        return 2
+    except OSError as e:
+        _print_error(f"ERROR: I/O error: {e}")
+        return 4
+
+    _print_error(
+        f"ERROR: Unknown `ck space` action: {action!r}\n   {usage}"
+    )
+    return 2
+
+
 def _print_full_plan(ck: ContextKeeper) -> None:
     print("=" * 45)
     print(" FULL PLAN (PLAN.md)")
@@ -885,10 +1072,16 @@ def _print_full_plan(ck: ContextKeeper) -> None:
 def _legacy_dispatch(raw: List[str]) -> int:
     """Dispatch legacy positional invocations (preserves old UX)."""
     cmd, rest = raw[0], raw[1:]
-    validated = _reject_unknown_flags(cmd, rest)
-    if validated is None:
-        return 2
-    rest = validated
+    # `ck space …` validates its flags per ACTION inside
+    # ``_run_space_mgmt`` (only ``delete`` accepts ``-y``), so the
+    # command-level pre-pass is skipped here — otherwise it would
+    # reject the flag (or accept it for the wrong action) before the
+    # action-aware check ever runs.
+    if cmd != "space":
+        validated = _reject_unknown_flags(cmd, rest)
+        if validated is None:
+            return 2
+        rest = validated
     # Inside a sandbox session, plain `ck` re-exports the active
     # project for every delegated subcommand (nested `ck` calls and
     # subprocesses banner against the same project without touching
@@ -1037,6 +1230,8 @@ def _legacy_dispatch(raw: List[str]) -> int:
                 print("[ok] Nothing to prune.")
         elif cmd in ("local", "remote"):
             return _run_space_command(cmd, rest)
+        elif cmd == "space":
+            return _run_space_mgmt(rest)
         elif cmd == "install":
             _install_user(dev="--dev" in rest or is_dev_entrypoint())
         elif cmd == "uninstall":

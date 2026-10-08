@@ -1813,12 +1813,15 @@ class TestSpaceNotesAndFlags(_IsolatedHome):
 
 
 class TestSpacesVerboseDashboard(_IsolatedHome):
-    """``ck dashboard -v`` renders a detailed block per space.
+    """``ck dashboard -v`` renders a styled CARD per space.
 
     Spaces get the SAME verbose treatment as registered projects:
-    a progress line and the full PREV / FOCUS / NEXT context triad
-    with process notes, painted by the shared triad renderer.
+    a bordered card whose body is the progress line plus the full
+    PREV / FOCUS / NEXT context triad with process notes, painted by
+    the shared triad renderer.
     """
+
+    BAR = "+" + "=" * 62 + "+"
 
     def _dashboard(self, *, verbose: bool = True) -> str:
         return ContextKeeper(
@@ -1827,7 +1830,7 @@ class TestSpacesVerboseDashboard(_IsolatedHome):
     def _spaces_section(self, out: str) -> str:
         return out[:out.index("MY PROJECTS")] if "MY PROJECTS" in out else out
 
-    def test_verbose_renders_triad_block_per_space(self):
+    def test_verbose_renders_card_per_space(self):
         for title in ("first task", "second task", "third task"):
             spaces.add_space_task("local", title)
         spaces.SpaceManager("local").focus(2)
@@ -1837,22 +1840,54 @@ class TestSpacesVerboseDashboard(_IsolatedHome):
 
         section = self._spaces_section(self._dashboard())
 
-        # Heading + one isolated block per space (both built-ins).
+        # Heading + one bordered CARD per space (both built-ins).
         self.assertIn("MY SPACES (2)", section)
         self.assertIn(" > LOCAL", section)
         self.assertIn(" > REMOTE", section)
-        self.assertEqual(section.count("=" * 61), 2)
-        # Path line, progress and the triad.
-        self.assertIn(f"    @ {spaces.space_path('local')}", section)
-        self.assertIn("    [%] Progress: 1/3 (33.3%)", section)
-        self.assertIn("    -> Context:", section)
-        self.assertIn("       << [1] first task [x]", section)
-        self.assertIn("       [>] [2] second task", section)
-        self.assertIn("          * Note: halfway through", section)
-        self.assertIn("       >> [3] third task [ ]", section)
-        self.assertIn("       Unfocused / Paused Context:", section)
-        self.assertIn("          - [3] third task", section)
-        self.assertIn("            * Note: waiting on deps", section)
+        self.assertEqual(section.count(self.BAR), 4)  # 2 cards x top+bottom
+        # Path line, progress and the triad, inside the card.
+        self.assertIn(f"@ {spaces.space_path('local')}", section)
+        self.assertIn("[%] Progress: 1/3 tasks done (33.3%)", section)
+        self.assertIn("-> Context:", section)
+        self.assertIn("<< PREV", section)
+        self.assertIn("[1] first task [x]", section)
+        self.assertIn("[>] FOCUS", section)
+        self.assertIn("[2] second task", section)
+        self.assertIn("* Note: halfway through", section)
+        self.assertIn(">> NEXT", section)
+        self.assertIn("[3] third task [ ]", section)
+        self.assertIn("[!] Unfocused / Paused Context:", section)
+        self.assertIn("- [3] third task", section)
+        self.assertIn("* Note: waiting on deps", section)
+
+    def test_verbose_card_rows_share_one_width(self):
+        for title in ("first task", "second task"):
+            spaces.add_space_task("local", title)
+        spaces.SpaceManager("local").focus(2)
+
+        section = self._spaces_section(self._dashboard())
+
+        # Every card row shares ONE width: | + space + 61 + space + |
+        # (identical to the horizontal border between them).
+        border_width = len(self.BAR)
+        widths = {len(line) for line in section.splitlines()
+                  if line.startswith("|")}
+        self.assertEqual(widths, {border_width})
+
+    def test_verbose_card_body_is_inside_the_border(self):
+        spaces.add_space_task("local", "a task")
+
+        section = self._spaces_section(self._dashboard())
+        start = section.index(self.BAR)
+        end = section.index(self.BAR, start + 1)
+        card = section[start:end + len(self.BAR)]
+
+        # Every non-border body line is wrapped in the card's rails.
+        rows = card.splitlines()[1:-1]
+        self.assertTrue(rows)
+        for line in rows:
+            self.assertTrue(line.startswith("|"), line)
+            self.assertTrue(line.endswith("|"), line)
 
     def test_verbose_triad_vertical_order(self):
         for title in ("prev task", "focus task", "next task"):
@@ -1862,10 +1897,14 @@ class TestSpacesVerboseDashboard(_IsolatedHome):
 
         section = self._spaces_section(self._dashboard())
 
-        self.assertLess(section.index("<< [1] prev task [x]"),
-                        section.index("[>] [2] focus task"))
-        self.assertLess(section.index("[>] [2] focus task"),
-                        section.index(">> [3] next task [ ]"))
+        self.assertLess(section.index("<< PREV"),
+                        section.index("[>] FOCUS"))
+        self.assertLess(section.index("[>] FOCUS"),
+                        section.index(">> NEXT"))
+        self.assertLess(section.index("[1] prev task [x]"),
+                        section.index("[2] focus task"))
+        self.assertLess(section.index("[2] focus task"),
+                        section.index("[3] next task [ ]"))
 
     def test_verbose_all_done_space_collapses_triad(self):
         spaces.add_space_task("local", "only task")
@@ -1873,16 +1912,35 @@ class TestSpacesVerboseDashboard(_IsolatedHome):
 
         section = self._spaces_section(self._dashboard())
 
-        self.assertIn("    [%] Progress: 1/1 (100.0%)", section)
-        self.assertIn("    -> Context: (all tasks completed)", section)
+        self.assertIn("[%] Progress: 1/1 tasks done (100.0%)", section)
+        self.assertIn("-> Context: (all tasks completed)", section)
 
-    def test_verbose_empty_space_block(self):
+    def test_verbose_empty_space_card(self):
         section = self._spaces_section(self._dashboard())
 
-        self.assertIn("    [%] Progress: 0/0 (0.0%)", section)
-        self.assertIn("       << (none completed)", section)
-        self.assertIn("       [>] (no focus selected)", section)
-        self.assertIn("       >> (no open tasks)", section)
+        self.assertIn("[%] Progress: 0/0 tasks done (0.0%)", section)
+        self.assertIn("(none completed)", section)
+        self.assertIn("[>] FOCUS", section)
+        self.assertIn("(no focus selected)", section)
+        self.assertIn("(no open tasks)", section)
+
+    def test_verbose_has_no_duplicate_summary_table(self):
+        """`-v` shows CARDS only — the compact table is not repeated."""
+        spaces.add_space_task("local", "a task")
+
+        out = self._dashboard(verbose=True)
+
+        self.assertIn("MY SPACES", out)
+        self.assertNotIn("SPACES (GLOBAL CONTEXTS)", out)
+        self.assertNotIn("| Space", out)
+
+    def test_compact_dashboard_keeps_the_table(self):
+        spaces.add_space_task("local", "a task")
+
+        out = self._dashboard(verbose=False)
+
+        self.assertIn("SPACES (GLOBAL CONTEXTS)", out)
+        self.assertNotIn("MY SPACES", out)
 
     def test_verbose_dynamic_space_block_included(self):
         path = spaces.space_path("custom")
@@ -1907,9 +1965,9 @@ class TestSpacesVerboseDashboard(_IsolatedHome):
         self.assertNotIn("MY SPACES", out)
         self.assertNotIn("Unfocused / Paused Context:", out)
 
-    def test_space_block_uses_project_triad_renderer(self):
-        """Space blocks and project blocks share one renderer."""
-        from cklib.core import _render_verbose_triad
+    def test_space_card_uses_project_triad_renderer(self):
+        """Space cards and project cards share one renderer."""
+        from cklib.core import _render_card, _render_verbose_triad
 
         for title in ("prev task", "focus task", "next task"):
             spaces.add_space_task("local", title)
@@ -1920,9 +1978,536 @@ class TestSpacesVerboseDashboard(_IsolatedHome):
 
         section = self._spaces_section(self._dashboard())
 
+        # The space's card is the shared renderer fed with the
+        # space's own plan + note ledger.
+        expected = _render_card(
+            data["name"], data["path"], data["tl"], data["note"],
+            data["paused"])
+        self.assertIn(expected, section)
+        # And its body is exactly the shared triad output.
+        body = _render_verbose_triad(data["tl"], data["note"], data["paused"])
+        for line in body:
+            self.assertIn(line, expected)
+
+
+# --------------------------------------------------------------------------- #
+# 11. Space management: ck space list / create / rename / delete
+# --------------------------------------------------------------------------- #
+
+
+class _TtyBuffer(io.StringIO):
+    """Capture buffer that reports itself as an interactive TTY.
+
+    ``ck space delete`` only prompts when stdout is a terminal, so the
+    captured output has to look like one. ``interactive`` is flipped
+    to False to exercise the non-interactive refusal path.
+    """
+
+    interactive = True
+
+    def isatty(self) -> bool:
+        return self.interactive
+
+
+class _TtyPrompt:
+    """Context manager: an interactive stdin answering prompts.
+
+    Records every prompt for assertion and returns ``answer``
+    (``None`` simulates EOF / Ctrl+D). With ``interactive=False`` the
+    terminal check fails, so the CLI must refuse without prompting.
+    """
+
+    def __init__(self, answer, *, interactive: bool = True) -> None:
+        self.answer = answer
+        self.interactive = interactive
+        self.prompts: list[str] = []
+
+    def __enter__(self) -> "_TtyPrompt":
+        def fake_input(prompt: str = "") -> str:
+            self.prompts.append(prompt)
+            if self.answer is None:
+                raise EOFError
+            return self.answer
+
+        self._patches = [
+            mock.patch("sys.stdin.isatty",
+                       return_value=self.interactive),
+            mock.patch("builtins.input", side_effect=fake_input),
+        ]
+        for p in self._patches:
+            p.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        for p in reversed(self._patches):
+            p.stop()
+
+
+class TestSpaceManagement(_IsolatedHome):
+    """``ck space <list|create|rename|delete>`` — the management layer."""
+
+    def _run(self, argv) -> tuple[int, str]:
+        self._buf = _TtyBuffer()
+        with redirect_stdout(self._buf):
+            code = main(argv)
+        return code, self._buf.getvalue()
+
+    def _tmpdir(self) -> Path:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        return Path(tmp.name)
+
+    # ---- list --------------------------------------------------------- #
+
+    def test_space_list_shows_all_spaces(self):
+        spaces.add_space_task("local", "a local task")
+        spaces.add_space_task("remote", "an infra task")
+
+        code, out = self._run(["space", "list"])
+
+        self.assertEqual(code, 0)
+        self.assertIn("SPACES (GLOBAL CONTEXTS)", out)
+        self.assertIn("LOCAL", out)
+        self.assertIn("REMOTE", out)
+        self.assertIn("0/1 (0.0%)", out)
+        # Same four columns as the dashboard spaces table.
+        header = [l for l in out.splitlines() if l.startswith("| Space")]
+        self.assertEqual(len(header), 1, out)
+        cells = [c.strip() for c in header[0].strip("|").split("|")]
+        self.assertEqual(
+            cells, ["Space", "Focus Task", "Progress", "Last Active"])
+
+    def test_space_list_shows_current_project_marker(self):
+        """The active PROJECT row is explicit and labelled."""
+        project = Path(tempfile.gettempdir()) / "mgmt-proj"
+        project.mkdir(exist_ok=True)
+        (project / ".ck").mkdir(exist_ok=True)
+        (project / ".ck" / "PLAN.md").write_text(
+            "# mgmt-proj\n## Current Sprint\n- [>] focused task\n",
+            encoding="utf-8")
+        spaces.add_space_task("local", "a local task")
+        cwd = os.getcwd()
+        os.chdir(project)
+        self.addCleanup(os.chdir, cwd)
+
+        code, out = self._run(["space", "list"])
+
+        self.assertEqual(code, 0)
+        self.assertIn("[PROJECT] mgmt-proj", out)
+        # The project row comes FIRST — it is what un-prefixed
+        # commands resolve against.
+        self.assertLess(out.index("[PROJECT] mgmt-proj"),
+                        out.index("LOCAL"))
         self.assertIn(
-            "\n".join(_render_verbose_triad(
-                data["tl"], data["note"], data["paused"])), section)
+            "Un-prefixed commands (`ck st`, `ck list`, …) apply to "
+            "[PROJECT] mgmt-proj", out)
+
+    def test_space_list_without_project_notes_the_absence(self):
+        spaces.add_space_task("local", "a local task")
+
+        # A rootless keeper with no resolvable project context.
+        from cklib.core import _render_space_manager_list
+        out = _render_space_manager_list(None, None)
+
+        self.assertNotIn("[PROJECT]", out)
+        self.assertIn("No project in this directory", out)
+        self.assertIn("LOCAL", out)
+
+    def test_space_list_hides_project_row_when_unresolvable(self):
+        """An uninitialized directory is NOT shown as a project."""
+        empty = self._tmpdir()
+        cwd = os.getcwd()
+        os.chdir(empty)
+        self.addCleanup(os.chdir, cwd)
+        spaces.add_space_task("local", "a local task")
+
+        code, out = self._run(["space", "list"])
+
+        self.assertEqual(code, 0)
+        self.assertNotIn("[PROJECT]", out)
+        self.assertIn("No project in this directory", out)
+        self.assertIn("LOCAL", out)
+
+    def test_space_list_alias_ls(self):
+        code_list, out_list = self._run(["space", "list"])
+        code_ls, out_ls = self._run(["space", "ls"])
+
+        self.assertEqual(code_ls, code_list)
+        self.assertEqual(out_ls, out_list)
+
+    def test_space_list_rejects_arguments(self):
+        code, out = self._run(["space", "list", "extra"])
+
+        self.assertEqual(code, 2)
+        self.assertIn("ERROR: `ck space list` takes no arguments.", out)
+
+    # ---- create -------------------------------------------------------- #
+
+    def test_create_scaffolds_default_template(self):
+        code, out = self._run(["space", "create", "work"])
+
+        self.assertEqual(code, 0)
+        path = spaces.space_path("work")
+        self.assertTrue(path.is_file())
+        self.assertEqual(
+            path.read_text(encoding="utf-8"),
+            "# work\n\n## Current Sprint\n\n## Completed\n")
+        self.assertIn("Created space 'work'", out)
+        # The new space is immediately routable.
+        self.assertIn("WORK", self._run(["space", "list"])[1])
+        self.assertEqual(self._run(["work", "add", "first task"])[0], 0)
+
+    def test_create_alias_new(self):
+        code, _ = self._run(["space", "new", "aliased"])
+        self.assertEqual(code, 0)
+        self.assertTrue(spaces.space_path("aliased").is_file())
+
+    def test_create_rejects_invalid_names(self):
+        for name in ("with space", "sub/dir", "..", "..hidden",
+                     "star*", "semi;colon", ""):
+            with self.subTest(name=name):
+                code, out = self._run(["space", "create", name])
+                self.assertEqual(code, 2, out)
+                self.assertIn("ERROR", out)
+        self.assertFalse(spaces.spaces_dir().exists()
+                         and any(spaces.spaces_dir().iterdir()))
+
+    def test_create_rejects_reserved_names(self):
+        for name in sorted(spaces.RESERVED_SPACE_NAMES):
+            with self.subTest(name=name):
+                code, out = self._run(["space", "create", name])
+                self.assertEqual(code, 2, out)
+                self.assertIn("Reserved names", out)
+        # None of them materialised a file.
+        for name in spaces.RESERVED_SPACE_NAMES:
+            if name in ("local", "remote"):
+                continue
+            self.assertFalse(spaces.space_path(name).exists())
+
+    def test_create_rejects_redundant_md_suffix(self):
+        code, out = self._run(["space", "create", "work.md"])
+
+        self.assertEqual(code, 2)
+        self.assertIn("added automatically", out)
+        self.assertFalse(spaces.space_path("work.md").exists())
+
+    def test_create_rejects_duplicate(self):
+        self._run(["space", "create", "work"])
+
+        code, out = self._run(["space", "create", "work"])
+
+        self.assertEqual(code, 2)
+        self.assertIn("already exists", out)
+
+    def test_create_requires_a_name(self):
+        code, out = self._run(["space", "create"])
+
+        self.assertEqual(code, 2)
+        self.assertIn("Usage: ck space create <name>", out)
+
+    def test_create_rejects_multiple_names(self):
+        code, out = self._run(["space", "create", "one", "two"])
+
+        self.assertEqual(code, 2)
+        self.assertIn("exactly one name", out)
+        self.assertFalse(spaces.space_path("one").exists())
+
+    # ---- rename -------------------------------------------------------- #
+
+    def test_rename_moves_the_space_file(self):
+        self._run(["space", "create", "work"])
+        self._run(["work", "add", "a task"])
+
+        code, out = self._run(["space", "rename", "work", "office"])
+
+        self.assertEqual(code, 0)
+        self.assertFalse(spaces.space_path("work").exists())
+        self.assertTrue(spaces.space_path("office").is_file())
+        # Task content survives the rename.
+        self.assertIn("a task",
+                      spaces.space_path("office").read_text(encoding="utf-8"))
+        self.assertIn("Renamed space 'work' -> 'office'", out)
+        # The new name is routable, the old one is not.
+        self.assertEqual(self._run(["office", "list"])[0], 0)
+        code, out = self._run(["work", "list"])
+        self.assertEqual(code, 2)
+        self.assertIn("not found", out)
+
+    def test_rename_carries_the_sidecar(self):
+        self._run(["space", "create", "work"])
+        self._run(["work", "add", "a task"])
+        self._run(["work", "note", "1", "process note"])
+        self.assertTrue(spaces.state_path("work").is_file())
+
+        code, out = self._run(["space", "rename", "work", "office"])
+
+        self.assertEqual(code, 0)
+        self.assertFalse(spaces.state_path("work").exists())
+        self.assertTrue(spaces.state_path("office").is_file())
+        # The note is still bound to the task after the rename.
+        self.assertEqual(
+            spaces.SpaceManager("office").get_note(1), "process note")
+        self.assertIn("Process notes (sidecar) carried along.", out)
+
+    def test_rename_works_without_a_sidecar(self):
+        self._run(["space", "create", "work"])
+
+        code, out = self._run(["space", "rename", "work", "office"])
+
+        self.assertEqual(code, 0)
+        self.assertNotIn("carried along", out)
+        self.assertFalse(spaces.state_path("office").exists())
+
+    def test_rename_alias_mv(self):
+        self._run(["space", "create", "work"])
+
+        code, _ = self._run(["space", "mv", "work", "office"])
+
+        self.assertEqual(code, 0)
+        self.assertTrue(spaces.space_path("office").is_file())
+
+    def test_rename_requires_existing_source(self):
+        code, out = self._run(["space", "rename", "ghost", "office"])
+
+        self.assertEqual(code, 2)
+        self.assertIn("not found", out)
+        self.assertIn("ck space create ghost", out)
+        self.assertFalse(spaces.space_path("office").exists())
+
+    def test_rename_rejects_taken_or_invalid_target(self):
+        self._run(["space", "create", "work"])
+        self._run(["space", "create", "other"])
+
+        code, out = self._run(["space", "rename", "work", "other"])
+        self.assertEqual(code, 2)
+        self.assertIn("already exists", out)
+
+        code, out = self._run(["space", "rename", "work", "bad name"])
+        self.assertEqual(code, 2)
+        self.assertIn("Invalid space name", out)
+
+        # The source is untouched by either failed rename.
+        self.assertTrue(spaces.space_path("work").is_file())
+
+    def test_rename_rejects_reserved_target(self):
+        self._run(["space", "create", "work"])
+
+        code, out = self._run(["space", "rename", "work", "list"])
+
+        self.assertEqual(code, 2)
+        self.assertIn("Reserved names", out)
+
+    def test_rename_requires_two_arguments(self):
+        code, out = self._run(["space", "rename", "only"])
+
+        self.assertEqual(code, 2)
+        self.assertIn("Usage: ck space rename <old> <new>", out)
+
+    # ---- delete -------------------------------------------------------- #
+
+    def _answer_prompt(self, answer, *, interactive: bool = True):
+        """Present an interactive terminal answering with ``answer``."""
+        return _TtyPrompt(answer, interactive=interactive)
+
+    def test_delete_prompts_and_cancels_on_no(self):
+        self._run(["space", "create", "work"])
+
+        with self._answer_prompt("n") as prompt:
+            code, out = self._run(["space", "delete", "work"])
+
+        self.assertEqual(code, 2)
+        self.assertEqual(
+            prompt.prompts,
+            ["Are you sure you want to permanently delete space "
+             "'work' and its process notes? [y/N]: "])
+        self.assertIn("[i] Aborted.", out)
+        self.assertTrue(spaces.space_path("work").is_file())
+
+    def test_delete_proceeds_on_yes(self):
+        self._run(["space", "create", "work"])
+
+        with self._answer_prompt("y"):
+            code, out = self._run(["space", "delete", "work"])
+
+        self.assertEqual(code, 0)
+        self.assertFalse(spaces.space_path("work").exists())
+        self.assertIn("Deleted space 'work'", out)
+
+    def test_delete_prompt_aborts_on_eof(self):
+        self._run(["space", "create", "work"])
+
+        with self._answer_prompt(None):
+            code, out = self._run(["space", "delete", "work"])
+
+        self.assertEqual(code, 2)
+        self.assertIn("[i] Aborted.", out)
+        self.assertTrue(spaces.space_path("work").is_file())
+
+    def test_delete_refuses_non_interactive_without_yes(self):
+        """Piped / non-TTY stdin must NEVER delete silently."""
+        self._run(["space", "create", "work"])
+        self._buf.interactive = False
+
+        with self._answer_prompt("y", interactive=False) as prompt:
+            code, out = self._run(["space", "delete", "work"])
+
+        self.assertEqual(code, 2)
+        # No prompt was even shown — the CLI refused up front.
+        self.assertEqual(prompt.prompts, [])
+        self.assertIn("non-interactive terminal", out)
+        self.assertIn("Pass -y", out)
+        self.assertTrue(spaces.space_path("work").is_file())
+
+    def test_delete_reports_sidecar_removal(self):
+        self._run(["space", "create", "work"])
+        self._run(["work", "add", "a task"])
+        self._run(["work", "note", "1", "process note"])
+        self.assertTrue(spaces.state_path("work").is_file())
+
+        code, out = self._run(["space", "delete", "work", "-y"])
+
+        self.assertEqual(code, 0)
+        self.assertFalse(spaces.space_path("work").exists())
+        self.assertFalse(spaces.state_path("work").exists())
+        self.assertIn("Process notes (sidecar) deleted too.", out)
+
+    def test_delete_yes_flag_bypasses_the_prompt(self):
+        self._run(["space", "create", "work"])
+
+        for flag in ("-y", "--yes", "--force"):
+            with self.subTest(flag=flag):
+                self._run(["space", "create", "work"])
+                with mock.patch("builtins.input") as inp:
+                    code, out = self._run(
+                        ["space", "delete", "work", flag])
+                self.assertEqual(code, 0, out)
+                inp.assert_not_called()
+                self.assertFalse(spaces.space_path("work").exists())
+
+    def test_delete_refuses_builtin_spaces(self):
+        for name in ("local", "remote"):
+            with self.subTest(name=name):
+                code, out = self._run(["space", "delete", name, "-y"])
+                self.assertEqual(code, 2)
+                self.assertIn("built-in space", out)
+
+    def test_delete_refuses_unconfirmed_api_call(self):
+        """The library refuses to delete without explicit confirmation."""
+        self._run(["space", "create", "work"])
+
+        with self.assertRaises(ValueError):
+            spaces.delete_space("work")
+
+        self.assertTrue(spaces.space_path("work").is_file())
+
+    def test_delete_requires_existing_space(self):
+        code, out = self._run(["space", "delete", "ghost", "-y"])
+
+        self.assertEqual(code, 2)
+        self.assertIn("not found", out)
+
+    def test_delete_rejects_invalid_name(self):
+        code, out = self._run(["space", "delete", "bad name", "-y"])
+
+        self.assertEqual(code, 2)
+        self.assertIn("ERROR", out)
+
+    def test_delete_requires_a_name(self):
+        code, out = self._run(["space", "delete"])
+
+        self.assertEqual(code, 2)
+        self.assertIn("Usage: ck space delete <name> [-y]", out)
+
+    def test_delete_has_no_short_alias(self):
+        """Deliberately no `rm`/`del` alias — the verb is spelled out."""
+        self._run(["space", "create", "work"])
+
+        for action in ("rm", "del", "remove", "destroy"):
+            with self.subTest(action=action):
+                code, out = self._run(["space", action, "work"])
+                self.assertEqual(code, 2, out)
+                self.assertIn("Unknown `ck space` action", out)
+                code, out = self._run(["space", action, "work", "-y"])
+                self.assertEqual(code, 2, out)
+                self.assertIn("Unknown flag for `ck space "
+                              f"{action}`: -y", out)
+        # The space survived every rejected alias.
+        self.assertTrue(spaces.space_path("work").is_file())
+
+    # ---- shared -------------------------------------------------------- #
+
+    def test_bare_space_shows_usage(self):
+        code, out = self._run(["space"])
+
+        self.assertEqual(code, 2)
+        for token in ("list", "create <name>", "rename <old> <new>",
+                      "delete <name>"):
+            self.assertIn(token, out)
+
+    def test_unknown_space_action_reports_error(self):
+        code, out = self._run(["space", "frobnicate"])
+
+        self.assertEqual(code, 2)
+        self.assertIn("Unknown `ck space` action: 'frobnicate'", out)
+        self.assertIn("Usage: ck space <", out)
+
+    def test_only_delete_accepts_flags(self):
+        self._run(["space", "create", "work"])
+
+        for action in (["list"], ["create", "other"], ["rename"]):
+            with self.subTest(action=action):
+                code, out = self._run(["space", *action, "-y"])
+                self.assertEqual(code, 2, out)
+                self.assertIn("Unknown flag for `ck space", out)
+
+    def test_help_documents_space_management(self):
+        from cklib.cli import HELP_TEXT
+
+        self.assertIn("Space Management", HELP_TEXT)
+        self.assertIn("space list", HELP_TEXT)
+        self.assertIn("space create <name>", HELP_TEXT)
+        self.assertIn("space rename <old> <new>", HELP_TEXT)
+        self.assertIn("space delete <name>", HELP_TEXT)
+
+    def test_management_works_from_any_directory(self):
+        """`ck space …` is global — no project root required."""
+        elsewhere = self._tmpdir()
+        cwd = os.getcwd()
+        os.chdir(elsewhere)
+        self.addCleanup(os.chdir, cwd)
+
+        code, out = self._run(["space", "create", "global-ops"])
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self._run(["space", "list"])[0], 0)
+
+    def test_dev_mode_management_never_touches_production(self):
+        """In a sandbox session the whole lifecycle stays in .sandbox/."""
+        self._run(["space", "create", "work"])
+        production = spaces.space_path("work")
+        os.environ["CK_SANDBOX"] = "1"
+        self.addCleanup(os.environ.pop, "CK_SANDBOX", None)
+
+        code, _ = self._run(["space", "create", "sandboxed"])
+        self.assertEqual(code, 0)
+        sandboxed = spaces.space_path("sandboxed")
+        self.assertFalse(sandboxed.exists())       # production untouched
+        self.assertTrue(cksandbox.is_within_sandbox(
+            spaces._write_path("sandboxed")))
+
+        # A sandboxed space is NOT free: create must not overwrite it.
+        code, out = self._run(["space", "create", "sandboxed"])
+        self.assertEqual(code, 2)
+        self.assertIn("already exists", out)
+
+        # Rename + delete both stay inside the sandbox too.
+        code, _ = self._run(["space", "rename", "sandboxed", "moved"])
+        self.assertEqual(code, 0)
+        self.assertFalse(spaces.space_path("moved").exists())
+        code, _ = self._run(["space", "delete", "moved", "-y"])
+        self.assertEqual(code, 0)
+        # The production space is untouched throughout.
+        self.assertTrue(production.is_file())
+        self.assertIn("a", self._run(["work", "list"])[1])
 
 
 if __name__ == "__main__":
