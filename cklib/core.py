@@ -2987,7 +2987,8 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
     return "\n".join(lines)
 
 
-def _render_tasks_listing(tl: TaskList) -> str:
+def _render_tasks_listing(tl: TaskList,
+                          notes: Optional[dict[int, str]] = None) -> str:
     """Render the local task list for ``ck list`` (STDOUT output).
 
     Format (grep/cut-friendly, no editor involved):
@@ -3004,10 +3005,18 @@ def _render_tasks_listing(tl: TaskList) -> str:
 
     Status markers mirror PLAN.md syntax: ``[ ]`` open, ``[>]``
     focused, ``[x]`` done. Empty plans render a single hint line.
+
+    ``notes`` (optional) maps task ID -> process note. Space
+    lists (``ck <space> list``) pass their sidecar notes so every
+    note renders as an indented ``* Note: <text>`` line directly
+    beneath its task — the same note styling ``ck st`` uses. The
+    project ``ck list`` path passes no mapping, so its output is
+    byte-for-byte unchanged.
     """
     if not tl.tasks:
         return "No tasks. Add one with `ck add <text>`."
 
+    p = ui.get_palette() if notes else None
     lines: list[str] = []
     current_section = object()  # sentinel: "no section yet"
     for t in tl.tasks:
@@ -3016,6 +3025,10 @@ def _render_tasks_listing(tl: TaskList) -> str:
             current_section = t.section
         marker = t.status.canonical_marker
         lines.append(f"[{marker}] {t.id}. {t.title}")
+        if p is not None:
+            note = notes.get(t.id)
+            if note:
+                lines.append(p.bold_cyan(f"    * Note: {note}"))
     return "\n".join(lines)
 
 
