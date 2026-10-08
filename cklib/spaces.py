@@ -154,6 +154,60 @@ def routable_space_name(name: str) -> Optional[str]:
     return name
 
 
+# Names that must NEVER become a space, even though they are
+# structurally safe filenames:
+#
+# - ``local`` / ``remote`` — the built-in defaults are permanent
+#   contexts (always listed by the dashboard); a same-named file
+#   would shadow the default;
+# - ``project`` — the sentinel the management list uses for the
+#   active project row;
+# - ``list`` / ``create`` / ``rename`` / ``delete`` — the
+#   ``ck space …`` management verbs, and ``list`` additionally a
+#   top-level command. A space named after one of them makes
+#   ``ck <name> <verb>`` ambiguous for the reader.
+RESERVED_SPACE_NAMES = frozenset({
+    "local", "remote", "project", "list", "create", "rename", "delete",
+})
+
+
+def validate_new_space_name(name: str) -> str:
+    """Validate ``name`` as a space that does not exist yet.
+
+    Returns the validated name; raises :class:`ValueError` with a
+    user-facing message otherwise. Guards, in order:
+
+    1. non-empty and structurally safe (see :func:`_is_safe_space_name`:
+       ASCII letters/digits/``.``/``_``/``-`` only, so spaces, path
+       separators and every other special character are rejected);
+    2. not a reserved word (:data:`RESERVED_SPACE_NAMES`);
+    3. not spelled with a redundant ``.md`` suffix (the extension is
+       added automatically);
+    4. not already taken by an existing space file.
+    """
+    if not name:
+        raise ValueError("Space name is empty.")
+    if not _is_safe_space_name(name):
+        raise ValueError(
+            f"Invalid space name: {name!r}. Use letters, digits, "
+            "'.', '_' and '-' only (no spaces, no path separators)."
+        )
+    if name in RESERVED_SPACE_NAMES:
+        raise ValueError(
+            f"Invalid space name: {name!r}. Reserved names: "
+            f"{', '.join(sorted(RESERVED_SPACE_NAMES))}."
+        )
+    if name.lower().endswith(".md"):
+        raise ValueError(
+            f"Invalid space name: {name!r}. The '.md' extension is "
+            f"added automatically — use {name[:-3]!r} instead."
+        )
+    if _space_exists_anywhere(name):
+        raise ValueError(
+            f"Space '{name}' already exists: {space_path(name)}")
+    return name
+
+
 def _read_path(space: str) -> Path:
     """Read-side path, preferring a sandbox copy in dev mode.
 
@@ -218,6 +272,135 @@ def _state_write_path(space: str) -> Path:
         pass
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
+
+
+# ---------------------------------------------------------------------- #
+# Space management: create / rename / delete
+# ---------------------------------------------------------------------- #
+
+def _space_exists_anywhere(name: str) -> bool:
+    """True when ``<name>.md`` exists in production OR in the sandbox.
+
+    Existence checks must respect the dev-mode write target: a space
+    created inside a sandbox session lives in ``.sandbox/``, so a
+    production-only probe would wrongly report "free" and let a second
+    ``create`` silently overwrite the first.
+    """
+    if space_path(name).exists():
+        return True
+    try:
+        return _write_path(name).exists()
+    except OSError:
+        return False
+
+
+def create_space(name: str) -> Path:
+    """Create a new space file from the default template.
+
+    Writes ``<name>.md`` with the standard space scaffold (``#
+    <name>``, ``## Current Sprint``, ``## Completed``) — identical to
+    what the lazy ``add`` path would produce, so a freshly created
+    space and a space created by its first task are the same file.
+
+    Raises :class:`ValueError` for an unsafe, reserved, suffixed or
+    already-taken name (see :func:`validate_new_space_name`).
+    Returns the created path.
+    """
+    validate_new_space_name(name)
+    path = _write_path(name)
+    text = _EMPTY_SPACE.format(space=name)
+    with file_lock(path):
+        _atomic_write_text(path, text)
+    return path
+
+
+def rename_space(old_name: str, new_name: str) -> dict:
+    """Rename a space, carrying its note sidecar along.
+
+    Moves ``<old>.md`` -> ``<new>.md`` and, when it exists, the
+    sibling ``<old>.json`` -> ``<new>.json`` so no process notes are
+    lost. Both moves are dev-mode aware (they operate on the same
+    sandboxed paths every other space write uses).
+
+    Raises :class:`ValueError` when the source is not an existing
+    space file, or the target name is unsafe, reserved or already
+    taken. Returns ``{"from", "to", "moved", "notes_moved"}``.
+    """
+    if not _is_safe_space_name(old_name):
+        raise ValueError(
+            f"Invalid space name: {old_name!r}. Use letters, digits, "
+            "'.', '_' and '-' only.")
+    src = _write_path(old_name)
+    if not src.is_file():
+        raise ValueError(
+            f"Space {old_name!r} not found: {space_path(old_name)} "
+            f"does not exist. Create it with `ck space create "
+            f"{old_name}`."
+        )
+    if old_name == new_name:
+        raise ValueError(
+            f"Space is already named {old_name!r}.")
+    validate_new_space_name(new_name)
+
+    dst = _write_path(new_name)
+    # Both moves are serialised on the SOURCE lock (fail-closed), the
+    # same contract every space write follows.
+    with file_lock(src):
+        src.replace(dst)
+        # Carry the note sidecar along so no process notes are orphaned.
+        notes_moved = False
+        src_state = _state_write_path(old_name)
+        if src_state.is_file():
+            src_state.replace(_state_write_path(new_name))
+            notes_moved = True
+    return {
+        "from": old_name,
+        "to": new_name,
+        "moved": str(dst),
+        "notes_moved": notes_moved,
+    }
+
+
+def delete_space(name: str, *, confirmed: bool = False) -> dict:
+    """Permanently delete a space file and its note sidecar.
+
+    STRICTLY CONFIRMED: the caller MUST pass ``confirmed=True`` (the
+    ``ck space delete`` prompt / ``-y`` flag). Without it nothing is
+    removed and the function refuses — an accidental call can never
+    destroy a space.
+
+    Built-in default spaces (``local`` / ``remote``) are PROTECTED and
+    can never be deleted. Returns ``{"name", "removed", "notes"}``.
+    """
+    if not confirmed:
+        raise ValueError(
+            f"Refusing to delete space {name!r} without confirmation. "
+            "Re-run with confirmation (the CLI prompts, or pass -y).")
+    if is_builtin_space(name):
+        raise ValueError(
+            f"Cannot delete the built-in space {name!r}: it is a "
+            "default context. Create a custom space instead.")
+    if not _is_safe_space_name(name):
+        raise ValueError(
+            f"Invalid space name: {name!r}. Use letters, digits, "
+            "'.', '_' and '-' only.")
+    path = _write_path(name)
+    if not path.is_file():
+        raise ValueError(
+            f"Space {name!r} not found: {space_path(name)} "
+            f"does not exist."
+        )
+    # Serialised on the space's own lock (fail-closed), so a delete can
+    # never interleave with a concurrent write.
+    with file_lock(path):
+        removed = path.name
+        path.unlink()
+        notes_removed = False
+        sidecar = _state_write_path(name)
+        if sidecar.is_file():
+            sidecar.unlink()
+            notes_removed = True
+    return {"name": name, "removed": removed, "notes": notes_removed}
 
 
 # ---------------------------------------------------------------------- #
@@ -725,6 +908,11 @@ __all__ = [
     "existing_space_names",
     "is_valid_space",
     "routable_space_name",
+    "RESERVED_SPACE_NAMES",
+    "validate_new_space_name",
+    "create_space",
+    "rename_space",
+    "delete_space",
     "SpaceManager",
     "load_space",
     "add_space_task",

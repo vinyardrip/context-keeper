@@ -1709,6 +1709,31 @@ class ContextKeeper:
         except OSError:
             return None
 
+    def space_manager_list(self) -> str:
+        """Render the ``ck space list`` management view.
+
+        Every global space plus the ACTIVE PROJECT row tagged
+        ``[PROJECT]`` — the context un-prefixed commands resolve
+        against. The row is resolved through the FULL hierarchy
+        (:meth:`resolve_context`: local → ancestors → global
+        registry), so it always names exactly where ``ck st`` /
+        ``ck list`` really operate; with no context at all the row is
+        simply absent and the footer says so. ROOT-INDEPENDENT: a
+        dangling cwd degrades to the registry tier, never a crash.
+        """
+        name = path = None
+        try:
+            ctx = self.resolve_context()
+        except Exception:
+            ctx = None
+        if ctx is not None and ctx.root is not None:
+            try:
+                path = str(Path(ctx.root).resolve())
+                name = Path(ctx.root).name
+            except (OSError, ValueError):
+                name = path = None
+        return _render_space_manager_list(name, path)
+
     def dashboard(self, *, verbose: bool = False) -> str:
         """Return the cross-project dashboard as a string.
 
@@ -3242,6 +3267,8 @@ def _render_dashboard(ck: Optional[ContextKeeper], *, list_projects,
                       parse_plan_file, verbose: bool = False) -> str:
     """Render the global dashboard.
 
+    Two modes, sharing one data collection pass:
+
     Default (compact table) — columns strictly by priority, rendered
     as a two-line grid with an explicit horizontal divider between
     every project row (multi-line rows never visually merge):
@@ -3270,13 +3297,20 @@ def _render_dashboard(ck: Optional[ContextKeeper], *, list_projects,
     render ``corrupt`` — neither ever crashes the whole table.
     """
     entries = list_projects()
-    # FIXED TOP SECTION: the out-of-project `local` / `remote` spaces
-    # render as a UNIFIED table (same grid pipeline as the projects
-    # table) above the Git projects table — and even when no project
-    # is registered — so the dashboard layout is stable. Verbose mode
-    # also gives every space the same PREV/FOCUS/NEXT detail blocks
-    # the registered projects get below.
-    ops_block = _render_spaces_table(verbose=verbose)
+    # FIXED TOP SECTION: the out-of-project spaces always lead the
+    # dashboard — and render even when no project is registered, so
+    # the layout stays stable.
+    #
+    # COMPACT: a unified summary TABLE (same grid pipeline as the
+    # projects table).
+    # VERBOSE: styled CONTEXT CARDS only. The summary table is NOT
+    # repeated above the cards — it carries strictly less information
+    # (focus id, counts, mtime) than the cards already show, so
+    # printing both would be pure duplication.
+    ops_block = (
+        _render_spaces_verbose(_space_order()) if verbose
+        else _render_spaces_table()
+    )
     if not entries:
         return (
             ops_block + "\n\n"
@@ -3677,6 +3711,71 @@ def _render_grid(title: str, headers: tuple, keys: tuple, rows: list, *,
     return "\n".join(out)
 
 
+def _render_space_manager_list(project_name: Optional[str],
+                              project_path: Optional[str]) -> str:
+    """``ck space list`` — spaces plus the active PROJECT context row.
+
+    The PROJECT row is rendered FIRST and tagged ``[PROJECT]`` so the
+    resolution order is explicit: un-prefixed commands (``ck st``,
+    ``ck list``, …) always apply to that project, while every global
+    space is reached by prefixing its name (``ck local st``). When no
+    project resolves, a note says so explicitly instead of faking a
+    row.
+
+    Reuses the SAME grid pipeline and cell shape as the dashboard's
+    ``SPACES (GLOBAL CONTEXTS)`` table, so the two views can never
+    disagree about a space's focus, progress or last-active stamp.
+    """
+    p = ui.get_palette()
+    rows: list[dict] = []
+    if project_name is not None and project_path is not None:
+        rows.append({
+            "space": (p.bold_cyan(f"[PROJECT] {project_name}"),
+                      p.muted(_smart_path(project_path, _PROJECT_CAP))),
+            "focus": (p.muted("n/a"), ""),
+            "progress": (p.muted("n/a"),),
+            "last": (p.muted("n/a"),),
+        })
+    for space in _space_order():
+        snap = spaces.space_snapshot(space)
+        rows.append({
+            "space": (_truncate_ellipsis(snap["name"], _PROJECT_CAP),
+                      _smart_path(snap["path"], _PROJECT_CAP)),
+            "focus": (
+                (f"[{snap['focus_id']}] [>]",
+                 _truncate_right(snap["focus_title"] or "",
+                                 _FOCUS_TEXT_CAP))
+                if snap["focus_id"] is not None else ("n/a", "")),
+            "progress": (_truncate_right(
+                f"{snap['done']}/{snap['total']} ({snap['pct']}%)",
+                _PROGRESS_CAP),),
+            "last": (_relative_time(snap["last"])
+                     if snap["last"] else "n/a",),
+        })
+    out = _render_grid(
+        "SPACES (GLOBAL CONTEXTS)",
+        _SPACES_HEADERS,
+        _SPACES_KEYS,
+        rows,
+        caps={"space": _PROJECT_CAP, "progress": _PROGRESS_CAP,
+              "last": _LAST_WIDTH_CAP},
+        fluid_key="focus",
+    )
+    if project_name is None or project_path is None:
+        out += (
+            "\n[i] No project in this directory: un-prefixed commands "
+            "have no local context. Use `ck <space> <cmd>` for a "
+            "space."
+        )
+    else:
+        out += (
+            f"\n[i] Un-prefixed commands (`ck st`, `ck list`, …) apply "
+            f"to [PROJECT] {project_name}. Use `ck <space> <cmd>` for "
+            "a space."
+        )
+    return out
+
+
 def _space_order() -> list[str]:
     """Dashboard space ordering: built-ins first, then discovered.
 
@@ -3691,7 +3790,7 @@ def _space_order() -> list[str]:
     ]
 
 
-def _render_spaces_table(*, verbose: bool = False) -> str:
+def _render_spaces_table() -> str:
     """Unified spaces table (dashboard top): built-ins + discovered.
 
     Replaces the old list-style ``[SYSTEM / OPS]`` task dump: every
@@ -3706,10 +3805,9 @@ def _render_spaces_table(*, verbose: bool = False) -> str:
     ``~/.config/ck/spaces/`` (dynamic spaces) follows with the same
     rendering — no registration step, no allow-list update.
 
-    ``verbose=True`` keeps the table and appends the per-space
-    PREV/FOCUS/NEXT blocks (``MY SPACES``) that registered
-    projects already get under ``ck dashboard -v`` — spaces get the
-    SAME detailed treatment, never a lesser view.
+    The compact form only: ``ck dashboard -v`` renders styled context
+    CARDS (:func:`_render_spaces_verbose`) instead, never this table
+    followed by the cards.
     """
     space_order = _space_order()
     rows: list[dict] = []
@@ -3736,7 +3834,7 @@ def _render_spaces_table(*, verbose: bool = False) -> str:
             "progress": progress,
             "last": last,
         })
-    grid = _render_grid(
+    return _render_grid(
         "SPACES (GLOBAL CONTEXTS)",
         _SPACES_HEADERS,
         _SPACES_KEYS,
@@ -3745,48 +3843,35 @@ def _render_spaces_table(*, verbose: bool = False) -> str:
               "last": _LAST_WIDTH_CAP},
         fluid_key="focus",
     )
-    if verbose:
-        return grid + "\n\n" + _render_spaces_verbose(space_order)
-    return grid
 
 
 def _render_spaces_verbose(space_order: list) -> str:
-    """One isolated block per space with the full triad context.
+    """One styled CARD per space with the full triad context.
 
-    Mirrors :func:`_render_dashboard_verbose` for spaces — same
-    heading shape, same ``@`` path line, and the SAME progress +
-    PREV/FOCUS/NEXT triad renderer registered projects use::
+    Spaces get exactly the SAME treatment as registered projects —
+    same :func:`_render_card` box, same shared triad renderer — so a
+    space is never a second-class citizen in the verbose view::
 
         MY SPACES (<count>)
 
-         > LOCAL
-            @ ~/.config/ck/spaces/local.md
-            [%] Progress: 1/3 (33.3%)
-            -> Context:
-               << [1] first task [x]
-               [>] [2] second task
-                  * Note: halfway through
-               >> [3] third task [ ]
-               Unfocused / Paused Context:
-                  - [3] third task
-                    * Note: waiting on deps
-
-        =============================================================
+        +=============================================================+
+        |  > LOCAL                                                     |
+        |    @ ~/.config/ck/spaces/local.md                            |
+        |    ...                                                       |
+        +=============================================================+
 
     No ``[*]`` cwd marker: a space is global and never
     directory-scoped. Notes come from the space's JSON sidecar
     (surfaced by :meth:`cklib.spaces.SpaceManager.context_data`).
     """
-    bar = "=" * 61
+    p = ui.get_palette()
     out: list[str] = [f"MY SPACES ({len(space_order)})", ""]
     for space in space_order:
         data = spaces.space_context(space)
-        out.append(f" > {data['name']}")
-        out.append(f"    @ {data['path']}")
-        out.extend(_render_verbose_triad(
-            data["tl"], data["note"], data["paused"]))
+        out.append(_render_card(
+            data["name"], data["path"], data["tl"], data["note"],
+            data["paused"], p))
         out.append("")
-        out.append(bar)
     return "\n".join(out)
 
 
@@ -3796,35 +3881,42 @@ def _render_spaces_verbose(space_order: list) -> str:
 
 
 def _render_verbose_triad(tl: TaskList, note_data: Optional[dict],
-                          paused_entries: list) -> list[str]:
-    """Progress + PREV / FOCUS / NEXT lines for ONE verbose block.
+                          paused_entries: list,
+                          palette: Optional[ui.Palette] = None
+                          ) -> list[str]:
+    """Progress + PREV / FOCUS / NEXT lines for ONE verbose card.
 
-    Shared by the registered-project blocks and the global-space
-    blocks so the two views can never drift apart: both resolve the
-    same :func:`_status_triad` from the same parsed plan and paint
-    the same ledger:
+    Shared by the registered-project cards and the global-space cards
+    so the two views can never drift apart: both resolve the same
+    :func:`_status_triad` from the same parsed plan and paint the same
+    ledger:
 
     - ``note_data`` — ``{"id", "note"}`` for the plan's active note
       (a project's ``.ck/state.json`` ``active_task`` / a space's
       JSON sidecar), or None;
     - ``paused_entries`` — ``{"id", "title", "note"}`` records of
-      the unfocused/paused ledger, already resolved for this plan
-      by the caller.
+      the unfocused/paused ledger, already resolved for this plan by
+      the caller;
+    - ``palette`` — the resolved palette; a disabled one is the
+      identity transform, so the plain-text fallback is unchanged.
 
-    The anchor (``focus``, else ``next``) renders its own note
-    INLINE, never duplicated into the ledger below it.
+    The anchor (``focus``, else ``next``) renders its own note INLINE,
+    never duplicated into the ledger below it.
     """
+    p = palette if palette is not None else ui.get_palette()
     out: list[str] = []
     done_count = len(tl.done)
+    pct_str = f"({tl.completion_pct}%)"
     out.append(
-        f"    [%] Progress: {done_count}/{tl.total} "
-        f"({tl.completion_pct}%)"
+        "    " + p.bold("[%] Progress: ")
+        + p.bold(f"{done_count}/{tl.total}") + " tasks done "
+        + (p.green(pct_str) if done_count else p.muted(pct_str))
     )
     if tl.total > 0 and done_count == tl.total:
-        out.append("    -> Context: (all tasks completed)")
+        out.append(p.green("    -> Context: (all tasks completed)"))
         return out
 
-    out.append("    -> Context:")
+    out.append(p.bold("    -> Context:"))
     prev, focus, nxt, note_id, note_text = _status_triad(tl, note_data)
     # Paused ledger: every open task that lost focus (or, for
     # spaces, every open task carrying a note), with its bound note.
@@ -3860,78 +3952,152 @@ def _render_verbose_triad(tl: TaskList, note_data: Optional[dict],
                 if (p_entry["id"] == anchor.id and p_entry["note"]):
                     inline_note = p_entry["note"]
                     break
+    # --- PREV: the last completion before the focus (muted, past) ---
+    out.append("       " + p.muted("<< PREV"))
     if prev is not None:
-        out.append(f"       << [{prev.id}] {prev.title} [x]")
+        out.append(p.green(f"          [{prev.id}] {prev.title} [x]"))
     else:
-        out.append("       << (none completed)")
+        out.append(p.muted("          (none completed)"))
+    # --- FOCUS: the anchor of the whole card (bold yellow, loudest) ---
+    out.append("       " + p.bold_yellow("[>] FOCUS"))
     if focus is not None:
-        out.append(f"       [>] [{focus.id}] {focus.title}")
+        out.append(p.bold_yellow(f"          [{focus.id}] {focus.title}"))
         if inline_note:
-            out.append(f"          * Note: {inline_note}")
+            out.append(p.bold_cyan(f"            * Note: {inline_note}"))
     else:
-        out.append("       [>] (no focus selected)")
+        out.append(p.muted("          (no focus selected)"))
+        if inline_note:
+            out.append(p.bold_cyan(f"          * Note: {inline_note}"))
+    # --- NEXT: what follows the anchor (accent, upcoming) ---
+    out.append("       " + p.accent(">> NEXT"))
     if nxt is not None:
-        out.append(f"       >> [{nxt.id}] {nxt.title} [ ]")
-        if focus is None and inline_note:
-            out.append(f"          * Note: {inline_note}")
+        out.append(f"          [{nxt.id}] {nxt.title} [ ]")
     else:
-        out.append("       >> (no open tasks)")
+        out.append(p.muted("          (no open tasks)"))
+    # --- Paused ledger: notes parked on non-anchor open tasks ---
     if paused_map:
-        out.append("       Unfocused / Paused Context:")
+        out.append("       " + p.bold("[!] Unfocused / Paused Context:"))
         for pid, (ptitle, pnote) in paused_map.items():
             out.append(f"          - [{pid}] {ptitle}")
             if pnote:
-                out.append(f"            * Note: {pnote}")
+                out.append(p.bold_cyan(f"            * Note: {pnote}"))
     return out
 
 
-def _render_dashboard_verbose(states: list) -> str:
-    """One isolated block per project with the full triad context.
+# Matches ANSI SGR escape sequences so card padding measures VISIBLE
+# width only (a styled line must never push the right border out of
+# alignment).
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
-    Structure (spec-exact, pure ASCII)::
+_CARD_WIDTH = 61
+
+
+def _render_card(title: str, path: str, tl: Optional[TaskList],
+                 note_data: Optional[dict], paused_entries: list,
+                 palette: Optional[ui.Palette] = None, *,
+                 marker: str = "", condition: str = "ok") -> str:
+    """One verbose dashboard card: bordered box with a styled body.
+
+    Layout (pure ASCII, the project's invariant)::
+
+        +=============================================================+
+        |  > LOCAL                                          local     |
+        |    @ ~/.config/ck/spaces/local.md                         |
+        |                                                             |
+        |    [%] Progress: 1/3 tasks done (33.3%)                    |
+        |    -> Context:                                              |
+        |       << PREV                                               |
+        |          [1] first task [x]                                 |
+        |       [>] FOCUS                                             |
+        |          [2] second task                                    |
+        |            * Note: halfway through                         |
+        |       >> NEXT                                               |
+        |          [3] third task [ ]                                 |
+        |    [!] Unfocused / Paused Context:                         |
+        |          - [3] third task                                   |
+        |            * Note: waiting on deps                          |
+        +=============================================================+
+
+    ``title`` is painted bold/cyan (the loudest element), the ``@``
+    path muted (metadata never competes with content), and the body
+    comes from the shared :func:`_render_verbose_triad` renderer so
+    cards stay byte-identical to the project blocks.
+
+    Content is padded to the border but NEVER truncated: a long title
+    simply overflows the right edge instead of losing characters.
+    """
+    p = palette if palette is not None else ui.get_palette()
+    inner = _CARD_WIDTH
+    # Geometry: every row is ``|`` + space + text + pad + ``|`` where
+    # the pad fills to ``inner`` VISIBLE columns, so a row is
+    # ``inner + 3`` wide. The horizontal bar is one character wider
+    # (inner + 1 rules) so both rails line up exactly.
+    bar = p.border("+" + "=" * (inner + 1) + "+")
+
+    def row(text: str) -> str:
+        # Pad by VISIBLE length so ANSI codes never skew the border.
+        visible = len(_ANSI_RE.sub("", text))
+        pad = max(inner - visible, 0)
+        return p.border("|") + " " + text + " " * pad + p.border("|")
+
+    lines = [bar, row(f" > {p.bold_cyan(title)}{marker}")]
+    if path:
+        lines.append(row(p.muted(f"  @ {path}")))
+    lines.append(row(""))
+    if condition != "ok" or tl is None:
+        lines.append(row(p.red(
+            f"    [!] {condition if condition != 'ok' else 'corrupt'}")))
+    else:
+        lines.extend(row(line) for line in _render_verbose_triad(
+            tl, note_data, paused_entries, palette))
+    lines.append(bar)
+    return "\n".join(lines)
+
+
+def _render_dashboard_verbose(states: list) -> str:
+    """One CARD per project with the full triad context.
+
+    Structure (spec-exact, pure ASCII — see :func:`_render_card` for
+    the boxed layout and the styling rules)::
 
         MY PROJECTS (<count>)
 
-         > <project_name> [<active_marker>]     ([*] cwd, [ ] other)
-            @ <path>
-            [%] Progress: <done>/<total> (<pct>%)
-            -> Context:
-               << [<id>] <prev_text> [x]
-               [>] [<id>] <focus_text>
-               >> [<id>] <next_text> [ ]
+        +=============================================================+
+        |  > alpha [*]                                                |
+        |    @ /home/you/work/alpha                                   |
+        |                                                             |
+        |    [%] Progress: 1/3 tasks done (33.3%)                    |
+        |    -> Context:                                              |
+        |       << PREV                                               |
+        |          [1] prev task [x]                                  |
+        |       [>] FOCUS                                             |
+        |          [2] focus task                                     |
+        |       >> NEXT                                               |
+        |          [3] next task [ ]                                  |
+        +=============================================================+
 
-        =============================================================
-
-    When every task in a project is done, the triad collapses to a
-    single line: ``-> Context: (all tasks completed)``. Missing
-    folders and unparseable plans render a ``[!]`` label instead of
-    the progress/triad lines.
+    The cwd project carries the ``[*]`` marker. When every task is
+    done, the triad collapses to ``-> Context: (all tasks completed)``.
+    Missing folders and unparseable plans render a red ``[!]`` label
+    inside the card instead of the progress/triad lines.
     """
-    bar = "=" * 61
+    p = ui.get_palette()
     out: list[str] = [f"MY PROJECTS ({len(states)})", ""]
 
     for s in states:
         entry = s["entry"]
         tl_local = s["tl"]
-        marker = "*" if s["is_cwd"] else " "
         name = entry.name
         if s["condition"] == "missing":
             name = f"[MISSING] {name}"
-        out.append(f" > {name} [{marker}]")
-        out.append(f"    @ {entry.path}")
-
-        if s["condition"] != "ok":
-            label = "missing" if s["condition"] == "missing" else "corrupt"
-            out.append(f"    [!] {label}")
-        else:
-            out.extend(_render_verbose_triad(
-                tl_local, read_active_task_note(entry.path),
-                read_paused_tasks(entry.path)))
-
-        # Each project is an isolated block: trailing blank line +
-        # separator bar close it off before the next block.
+        out.append(_render_card(
+            name, str(entry.path), tl_local,
+            read_active_task_note(entry.path),
+            read_paused_tasks(entry.path), p,
+            marker=" [*]" if s["is_cwd"] else "",
+            condition=s["condition"]))
+        # Blank line isolates one card from the next.
         out.append("")
-        out.append(bar)
 
     return "\n".join(out)
 
