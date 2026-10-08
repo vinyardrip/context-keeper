@@ -3849,30 +3849,31 @@ def _render_spaces_verbose(space_order: list) -> str:
     """One styled CARD per space with the full triad context.
 
     Spaces get exactly the SAME treatment as registered projects —
-    same :func:`_render_card` box, same shared triad renderer — so a
-    space is never a second-class citizen in the verbose view::
+    same :func:`_render_card_body`, same :func:`_render_card_section`
+    framing, same shared triad renderer — so a space is never a
+    second-class citizen in the verbose view::
 
         MY SPACES (<count>)
 
-        +=============================================================+
-        |  > LOCAL                                                     |
-        |    @ ~/.config/ck/spaces/local.md                            |
-        |    ...                                                       |
-        +=============================================================+
+        =============================================================
+         > LOCAL
+           @ ~/.config/ck/spaces/local.md
+           ...
+        =============================================================
 
     No ``[*]`` cwd marker: a space is global and never
     directory-scoped. Notes come from the space's JSON sidecar
     (surfaced by :meth:`cklib.spaces.SpaceManager.context_data`).
     """
     p = ui.get_palette()
-    out: list[str] = [f"MY SPACES ({len(space_order)})", ""]
-    for space in space_order:
-        data = spaces.space_context(space)
-        out.append(_render_card(
+    return _render_card_section(
+        f"MY SPACES ({len(space_order)})",
+        [_render_card_body(
             data["name"], data["path"], data["tl"], data["note"],
-            data["paused"], p))
-        out.append("")
-    return "\n".join(out)
+            data["paused"], p)
+         for data in (spaces.space_context(space)
+                      for space in space_order)],
+        p)
 
 
 # ---------------------------------------------------------------------- #
@@ -3984,97 +3985,130 @@ def _render_verbose_triad(tl: TaskList, note_data: Optional[dict],
     return out
 
 
-# Matches ANSI SGR escape sequences so card padding measures VISIBLE
-# width only (a styled line must never push the right border out of
-# alignment).
-_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
-
+# Width of the horizontal rule that frames every verbose card.
 _CARD_WIDTH = 61
+
+
+def _card_rule(palette: Optional[ui.Palette] = None) -> str:
+    """The horizontal separator that frames verbose cards.
+
+    Cards are delimited by TOP and BOTTOM rules only — no vertical side
+    rails. A ``|`` at the end of every body line doubled the noise
+    (one extra glyph per line, plus the trailing-whitespace problem
+    that right-padding forced) while adding no structure the rule
+    doesn't already provide.
+    """
+    p = palette if palette is not None else ui.get_palette()
+    return p.border("=" * _CARD_WIDTH)
+
+
+def _render_card_body(title: str, path: str, tl: Optional[TaskList],
+                      note_data: Optional[dict], paused_entries: list,
+                      palette: Optional[ui.Palette] = None, *,
+                      marker: str = "", condition: str = "ok") -> list[str]:
+    """One verbose dashboard card's BODY lines (no framing rules).
+
+    Layout (pure ASCII, the project's invariant)::
+
+        > LOCAL
+          @ ~/.config/ck/spaces/local.md
+
+          [%] Progress: 1/3 tasks done (33.3%)
+          -> Context:
+             << PREV
+                [1] first task [x]
+             [>] FOCUS
+                [2] second task
+                  * Note: halfway through
+             >> NEXT
+                [3] third task [ ]
+          [!] Unfocused / Paused Context:
+                - [3] third task
+                  * Note: waiting on deps
+
+    ``title`` is painted bold/cyan (the loudest element), the ``@``
+    path muted (metadata never competes with content), and the body
+    comes from the shared :func:`_render_verbose_triad` renderer so
+    cards stay byte-identical between spaces and projects.
+
+    Lines are NEVER truncated and carry no trailing padding, so a long
+    title simply runs long instead of losing characters — and the output
+    stays copy/paste- and diff-clean.
+    """
+    p = palette if palette is not None else ui.get_palette()
+    lines = [f" > {p.bold_cyan(title)}{marker}"]
+    if path:
+        lines.append(p.muted(f"   @ {path}"))
+    lines.append("")
+    if condition != "ok" or tl is None:
+        lines.append(p.red(
+            f"    [!] {condition if condition != 'ok' else 'corrupt'}"))
+    else:
+        lines.extend(_render_verbose_triad(
+            tl, note_data, paused_entries, palette))
+    return lines
 
 
 def _render_card(title: str, path: str, tl: Optional[TaskList],
                  note_data: Optional[dict], paused_entries: list,
                  palette: Optional[ui.Palette] = None, *,
                  marker: str = "", condition: str = "ok") -> str:
-    """One verbose dashboard card: bordered box with a styled body.
+    """One verbose dashboard card: rule + styled body + rule.
 
-    Layout (pure ASCII, the project's invariant)::
-
-        +=============================================================+
-        |  > LOCAL                                          local     |
-        |    @ ~/.config/ck/spaces/local.md                         |
-        |                                                             |
-        |    [%] Progress: 1/3 tasks done (33.3%)                    |
-        |    -> Context:                                              |
-        |       << PREV                                               |
-        |          [1] first task [x]                                 |
-        |       [>] FOCUS                                             |
-        |          [2] second task                                    |
-        |            * Note: halfway through                         |
-        |       >> NEXT                                               |
-        |          [3] third task [ ]                                 |
-        |    [!] Unfocused / Paused Context:                         |
-        |          - [3] third task                                   |
-        |            * Note: waiting on deps                          |
-        +=============================================================+
-
-    ``title`` is painted bold/cyan (the loudest element), the ``@``
-    path muted (metadata never competes with content), and the body
-    comes from the shared :func:`_render_verbose_triad` renderer so
-    cards stay byte-identical to the project blocks.
-
-    Content is padded to the border but NEVER truncated: a long title
-    simply overflows the right edge instead of losing characters.
+    See :func:`_render_card_body` for the body layout. Consecutive
+    cards share nothing but the rule between them, so a run of cards
+    never shows a doubled separator.
     """
     p = palette if palette is not None else ui.get_palette()
-    inner = _CARD_WIDTH
-    # Geometry: every row is ``|`` + space + text + pad + ``|`` where
-    # the pad fills to ``inner`` VISIBLE columns, so a row is
-    # ``inner + 3`` wide. The horizontal bar is one character wider
-    # (inner + 1 rules) so both rails line up exactly.
-    bar = p.border("+" + "=" * (inner + 1) + "+")
+    rule = _card_rule(p)
+    return "\n".join(
+        [rule]
+        + _render_card_body(title, path, tl, note_data, paused_entries,
+                            p, marker=marker, condition=condition)
+        + [rule]
+    )
 
-    def row(text: str) -> str:
-        # Pad by VISIBLE length so ANSI codes never skew the border.
-        visible = len(_ANSI_RE.sub("", text))
-        pad = max(inner - visible, 0)
-        return p.border("|") + " " + text + " " * pad + p.border("|")
 
-    lines = [bar, row(f" > {p.bold_cyan(title)}{marker}")]
-    if path:
-        lines.append(row(p.muted(f"  @ {path}")))
-    lines.append(row(""))
-    if condition != "ok" or tl is None:
-        lines.append(row(p.red(
-            f"    [!] {condition if condition != 'ok' else 'corrupt'}")))
-    else:
-        lines.extend(row(line) for line in _render_verbose_triad(
-            tl, note_data, paused_entries, palette))
-    lines.append(bar)
-    return "\n".join(lines)
+def _render_card_section(heading: str, bodies: list,
+                         palette: Optional[ui.Palette] = None) -> str:
+    """``<heading>`` followed by every card framed by shared rules.
+
+    The ONE framing routine for both verbose sections (``MY SPACES``
+    and ``MY PROJECTS``): a rule opens each card and a final rule
+    closes the run, so consecutive cards are separated by exactly ONE
+    rule and a run of cards never shows a doubled separator.
+    """
+    p = palette if palette is not None else ui.get_palette()
+    rule = _card_rule(p)
+    out: list[str] = [heading, ""]
+    for body in bodies:
+        out.append(rule)
+        out.extend(body)
+    out.append(rule)
+    return "\n".join(out)
 
 
 def _render_dashboard_verbose(states: list) -> str:
     """One CARD per project with the full triad context.
 
-    Structure (spec-exact, pure ASCII — see :func:`_render_card` for
-    the boxed layout and the styling rules)::
+    Structure (pure ASCII — see :func:`_render_card_body` for the body
+    and :func:`_render_card_section` for the framing)::
 
         MY PROJECTS (<count>)
 
-        +=============================================================+
-        |  > alpha [*]                                                |
-        |    @ /home/you/work/alpha                                   |
-        |                                                             |
-        |    [%] Progress: 1/3 tasks done (33.3%)                    |
-        |    -> Context:                                              |
-        |       << PREV                                               |
-        |          [1] prev task [x]                                  |
-        |       [>] FOCUS                                             |
-        |          [2] focus task                                     |
-        |       >> NEXT                                               |
-        |          [3] next task [ ]                                  |
-        +=============================================================+
+        =============================================================
+         > alpha [*]
+           @ /home/you/work/alpha
+
+           [%] Progress: 1/3 tasks done (33.3%)
+           -> Context:
+              << PREV
+                 [1] prev task [x]
+              [>] FOCUS
+                 [2] focus task
+              >> NEXT
+                 [3] next task [ ]
+        =============================================================
 
     The cwd project carries the ``[*]`` marker. When every task is
     done, the triad collapses to ``-> Context: (all tasks completed)``.
@@ -4082,24 +4116,20 @@ def _render_dashboard_verbose(states: list) -> str:
     inside the card instead of the progress/triad lines.
     """
     p = ui.get_palette()
-    out: list[str] = [f"MY PROJECTS ({len(states)})", ""]
-
+    bodies = []
     for s in states:
         entry = s["entry"]
-        tl_local = s["tl"]
         name = entry.name
         if s["condition"] == "missing":
             name = f"[MISSING] {name}"
-        out.append(_render_card(
-            name, str(entry.path), tl_local,
+        bodies.append(_render_card_body(
+            name, str(entry.path), s["tl"],
             read_active_task_note(entry.path),
             read_paused_tasks(entry.path), p,
             marker=" [*]" if s["is_cwd"] else "",
             condition=s["condition"]))
-        # Blank line isolates one card from the next.
-        out.append("")
-
-    return "\n".join(out)
+    return _render_card_section(
+        f"MY PROJECTS ({len(states)})", bodies, p)
 
 
 # ---------------------------------------------------------------------- #
