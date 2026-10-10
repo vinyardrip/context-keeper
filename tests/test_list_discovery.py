@@ -193,15 +193,39 @@ class TestListOutsideProject(_ListHarness):
         self.assertIn("## Completed\n", out)
         self.assertEqual(out.count("(lonely)"), 1, out)
 
-    def test_unregistered_nested_project_is_not_offered(self):
-        """Only REGISTERED projects are discoverable: an unregistered
-        folder has no global identity to address it by."""
+    def test_unregistered_nested_project_is_discovered_by_scan(self):
+        """An unregistered folder that physically carries a PLAN.md is
+        still OFFERED: the filesystem scan is the fallback that makes
+        `ck list` useful in an empty-registry context."""
         self.make_project("alpha", ["alpha task"], register=False)
         code, out = self.run_cli(["list"], self.root)
 
         self.assertEqual(code, 0, out)
-        self.assertNotIn("alpha", out.split("Available nested")[1])
-        self.assertIn("(none registered here)", out)
+        # Exactly one nested project -> listed directly with its name.
+        self.assertIn("## Current Sprint (alpha)", out)
+        self.assertIn("[ ] 1. alpha task", out)
+
+    def test_unregistered_name_is_targetable(self):
+        """Every name the scan offers must be addressable."""
+        self.make_project("alpha", ["alpha task"], register=False)
+        code, out = self.run_cli(["list", "alpha"], self.root)
+
+        self.assertEqual(code, 0, out)
+        self.assertIn("[ ] 1. alpha task", out)
+
+    def test_name_outside_the_scan_tree_is_still_not_found(self):
+        """The scan fallback does NOT widen matching to the whole disk:
+        an unregistered project is addressable only when it actually
+        nests under the invocation directory."""
+        self.make_project("far_away", ["far task"], register=False)
+        # A sibling directory that does NOT contain far_away.
+        elsewhere = self.root / "elsewhere"
+        elsewhere.mkdir()
+
+        code, out = self.run_cli(["list", "far_away"], elsewhere)
+
+        self.assertEqual(code, 1)
+        self.assertIn("ERROR: Project 'far_away' not found.", out)
 
 
 class TestListExplicitProject(_ListHarness):
@@ -272,14 +296,14 @@ class TestListExplicitProject(_ListHarness):
         self.assertIn("ERROR: Project 'nope' not found.", out)
         self.assertNotIn("alpha task", out)
 
-    def test_unregistered_project_is_not_found(self):
-        """A folder that exists but was never registered has no
-        global identity — it is not addressable by name."""
-        self.make_project("alpha", ["alpha task"], register=False)
-        code, out = self.run_cli(["list", "alpha"], self.root)
+    def test_unknown_name_not_present_anywhere_is_not_found(self):
+        """A name matching neither the registry nor the scanned tree is
+        genuinely unknown."""
+        self.make_project("alpha", ["alpha task"])
+        code, out = self.run_cli(["list", "ghost"], self.root)
 
         self.assertEqual(code, 1)
-        self.assertIn("ERROR: Project 'alpha' not found.", out)
+        self.assertIn("ERROR: Project 'ghost' not found.", out)
 
 
 class TestListCoreHelpers(_ListHarness):

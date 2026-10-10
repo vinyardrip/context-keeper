@@ -498,7 +498,7 @@ class TestInteractiveNotePrompt(_NoteHarness):
         self.assertIn("-> Focused [3]: write docs", out)
         self.assertIn(
             "[!] Task #2 lost focus without a note. "
-            "Attach one via `ck note <text>`.", out)
+            "Attach one via `ck note <text>`.", ckui.strip_ansi(out))
         self.assertEqual(prompts, [prompts[0]])  # no Note text prompt
         # Still recorded in the ledger (noteless pause).
         self.assertEqual(ck._paused_tasks()[0]["id"], 2)
@@ -712,7 +712,7 @@ class TestStartIdempotency(_NoteHarness):
         `ck start 0` keeps its reset semantics."""
         ck = self._ck()
         out, _ = self._run(["start", "0"], ck.root)
-        self.assertIn("[ok] Focus reset.", out)
+        self.assertIn("[ok] Focus reset.", ckui.strip_ansi(out))
 
 
 class TestCurrentFocusLine(_NoteHarness):
