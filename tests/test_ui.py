@@ -742,15 +742,83 @@ class TestCliErrorColoring(unittest.TestCase):
             _print_error("ERROR: something failed")
         self.assertEqual(buf.getvalue(), "ERROR: something failed\n")
 
-    def test_error_red_when_forced(self):
+    def test_error_bold_red_when_forced(self):
+        """Errors use the COMBINED bold-red SGR (``1;31``), not a
+        split bold+red run, and reset immediately at the line end."""
         from cklib.cli import _print_error
         buf = io.StringIO()
         with _env(FORCE_COLOR="1"), mock.patch("sys.stdout", buf):
             _print_error("ERROR: something failed")
         self.assertEqual(
             buf.getvalue(),
-            f"{ui.RED}ERROR: something failed{ui.RESET}\n",
+            f"{ui.BOLD_RED}ERROR: something failed{ui.RESET}\n",
         )
+        self.assertEqual(ui.BOLD_RED, "\033[1;31m")
+
+
+class TestStatusBadges(unittest.TestCase):
+    """The four status badges and their exact ANSI contract."""
+
+    def test_each_badge_has_its_specified_style(self):
+        expected = {
+            "[!]":   "\033[1;33m",   # bold yellow
+            "[i]":   "\033[36m",     # cyan
+            "[ok]":  "\033[1;32m",   # bold green
+            "[err]": "\033[1;31m",   # bold red
+        }
+        for token, code in expected.items():
+            with self.subTest(token=token):
+                self.assertEqual(ui.badge(token, ui.Palette(True)),
+                                 f"{code}{token}{ui.RESET}")
+
+    def test_reset_lands_immediately_after_the_badge(self):
+        """The trailing message must NOT inherit the badge styling."""
+        for token in ("[!]", "[i]", "[ok]", "[err]"):
+            with self.subTest(token=token):
+                line = ui.notice(token, "trailing text",
+                                 ui.Palette(True))
+                self.assertTrue(line.startswith("\033["), line)
+                self.assertIn(f"{token}\033[0m trailing text", line)
+
+    def test_badges_are_combined_single_sgr_runs(self):
+        """Bold+colour badges are ONE SGR run, not a split pair."""
+        self.assertEqual(ui.BOLD_YELLOW, "\033[1;33m")
+        self.assertEqual(ui.BOLD_GREEN, "\033[1;32m")
+        self.assertEqual(ui.BOLD_RED, "\033[1;31m")
+        self.assertEqual(
+            ui.badge("[!]", ui.Palette(True)), "\033[1;33m[!]\033[0m")
+        # Exactly two escape sequences total: the style and the reset.
+        self.assertEqual(ui.badge("[!]", ui.Palette(True)).count("\033["), 2)
+
+    def test_badge_aliases_match_the_token_text(self):
+        self.assertEqual(ui.WARN, "[!]")
+        self.assertEqual(ui.INFO, "[i]")
+        self.assertEqual(ui.OK, "[ok]")
+        self.assertEqual(ui.ERR, "[err]")
+
+    def test_disabled_palette_returns_plain_token(self):
+        p = ui.Palette(False)
+        for token in ("[!]", "[i]", "[ok]", "[err]"):
+            self.assertEqual(ui.badge(token, p), token)
+        self.assertEqual(ui.notice("[ok]", "msg", p), "[ok] msg")
+
+    def test_unknown_token_is_left_untouched(self):
+        self.assertEqual(ui.badge("[?]", ui.Palette(True)), "[?]")
+
+    def test_notice_without_message_emits_only_the_badge(self):
+        self.assertEqual(ui.notice("[i]", "", ui.Palette(True)),
+                         "\033[36m[i]\033[0m")
+
+    def test_notice_output_is_ansi_free_after_stripping(self):
+        p = ui.Palette(True)
+        for token in ("[!]", "[i]", "[ok]", "[err]"):
+            line = ui.notice(token, "message", p)
+            self.assertEqual(ui.strip_ansi(line), f"{token} message")
+
+    def test_badge_display_width_ignores_the_styling(self):
+        """ANSI codes must not count as columns (grid alignment)."""
+        styled = ui.notice("[ok]", "ok", ui.Palette(True))
+        self.assertEqual(ui.display_width(styled), len("[ok] ok"))
 
 
 if __name__ == "__main__":

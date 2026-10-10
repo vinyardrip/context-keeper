@@ -65,6 +65,17 @@ YELLOW = "\033[33m"
 CYAN = "\033[36m"
 RED = "\033[31m"
 
+# COMBINED bold+color sequences for status badges. Unlike
+# ``bold_yellow`` & co. (which emit BOLD and the color as two separate
+# SGR runs), a badge emits ONE combined parameter set so the whole
+# badge is a single atomic styled token — important because the
+# reset is written immediately after the badge itself and a split
+# run would leave a window where the trailing text could inherit
+# bold-but-uncolored state on terminals that re-scope per run.
+BOLD_YELLOW = "\033[1;33m"
+BOLD_GREEN = "\033[1;32m"
+BOLD_RED = "\033[1;31m"
+
 # Orange/amber banner: inverted, high-contrast background highlight
 # (bold + amber background 43 + black foreground 30). Used for the
 # bottom ``>> Backlog`` banner line of ``ck st``'s WORK CONTEXT so
@@ -336,6 +347,75 @@ def strip_ansi(text: str) -> str:
     that colored output is content-identical to plain output.
     """
     return _ANSI_SGR_RE.sub("", text)
+
+
+# ---------------------------------------------------------------------------
+# Status badges ([!] / [i] / [ok] / [err])
+# ---------------------------------------------------------------------------
+
+# Badge token text -> the combined SGR sequence that paints it.
+#
+# Every CLI notice opens with exactly one of these four badges, so a
+# user can scan a wall of output by COLOR ALONE without reading the
+# bracket text:
+#
+#   [!]   bold yellow — warnings / notices that need attention
+#   [i]   cyan        — information, hints, guidance
+#   [ok]  bold green  — success confirmations
+#   [err] bold red    — errors / failed operations
+#
+# NONE of these are configurable: a badge's color is part of its
+# identity, so ``[err]`` is never rendered in the user's "muted"
+# slot color and can never be mistaken for a hint.
+BADGE_STYLES: dict[str, str] = {
+    "[!]": BOLD_YELLOW,
+    "[i]": CYAN,
+    "[ok]": BOLD_GREEN,
+    "[err]": BOLD_RED,
+}
+
+# Convenience aliases for the four badge kinds.
+WARN = "[!]"
+INFO = "[i]"
+OK = "[ok]"
+ERR = "[err]"
+
+
+def badge(token: str, palette: Optional[Palette] = None) -> str:
+    """Render a single status badge token, styled.
+
+    ``token`` is one of ``"[!]"`` / ``"[i]"`` / ``"[ok]"`` / ``"[err]"``
+    (the :data:`WARN` / :data:`INFO` / :data:`OK` / :data:`ERR`
+    aliases). The RESET is emitted IMMEDIATELY after the badge and
+    BEFORE any message text, so the trailing sentence is rendered in
+    the terminal's standard formatting — never bold, never colored.
+
+    A disabled palette (or an unknown token) returns the plain token,
+    so piped / ``NO_COLOR`` output stays byte-identical to the
+    unstyled text.
+    """
+    style = BADGE_STYLES.get(token)
+    p = palette if palette is not None else get_palette()
+    if style is None or not p.enabled:
+        return token
+    return f"{style}{token}{RESET}"
+
+
+def notice(token: str, message: str = "",
+           palette: Optional[Palette] = None) -> str:
+    """A complete ``badge`` + message line, ready for ``print``.
+
+    The message is deliberately left UNSTYLED (see :func:`badge`) so
+    only the badge carries color::
+
+        [i] Run 'ck init' in a project directory or ...   (cyan [i])
+        [ok] Added task (id=4): ship the release          (green [ok])
+
+    ``message`` may be empty, in which case only the badge is
+    emitted. Newlines inside ``message`` are preserved verbatim.
+    """
+    head = badge(token, palette)
+    return f"{head} {message}" if message else head
 
 
 # ---------------------------------------------------------------------------

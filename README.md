@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.7.5-blue)]()
+[![version](https://img.shields.io/badge/version-0.8.0-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -103,7 +103,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.7.5
+ck -v    # → ck version 0.8.0
 ```
 
 ---
@@ -130,6 +130,10 @@ ck -v    # → ck version 0.7.5
 | ck init | Initialize the project locally (.ck/ structure and gitignore rules); does not touch the global registry |
 | ck init --register | Initialize locally and register the project in `~/.config/ck/projects.json` |
 | ck add \<text\> | Add a new open task (inserted before `## Completed`). On a freshly initialized plan holding only the untouched `ck init` seed task (`Describe the first task` / `Описать первую задачу`), the seed is replaced in place instead of appending a second entry |
+| ck move \<ID\> \<pos\|top\|bottom\> | Move a PENDING/ACTIVE task (`[ ]` / `[>]`) to a 1-based position among the active tasks, or to the first/last slot. The other active tasks shift to close the gap; titles, status markers and the focus are left untouched |
+| ck swap \<ID1\> \<ID2\> | Exchange the positions of two active tasks |
+| ck reorder \<ID1\> \<ID2\> ... | Set the relative order of the active tasks. Listed IDs move ahead of the unlisted ones, which keep their relative order — so `ck reorder 3 1` simply means "3 before 1" |
+| _(reordering a completed task)_ | **Refused.** A completed (`[x]`) task is history and is never reordered: the entire operation aborts with exit code 1 and `[err] Cannot move completed task #<id>. Only pending/active tasks can be reordered.` |
 | ck start \<ID\> | Focus a task (`- [>]`); `ck start 0` resets focus. A noted task that loses focus moves to Unfocused / Paused Context (note preserved until `ck done` archives it); a noteless one gets a soft attach-a-note hint |
 | ck done \<ID\|range\|list\> | Mark task(s) done (`- [x]`), e.g. `3`, `2-4`, `1,3,5`. Bare `ck done` completes the CURRENT FOCUS (usage error without one); the completed task's process note is archived into HISTORY.md and cleared |
 | ck note \<text\> | Attach/update a process note on the active task (shown in `ck st`; archived to HISTORY.md by `ck done`) |
@@ -271,6 +275,84 @@ listing:
 $ ck list nope
 ERROR: Project 'nope' not found.
 ```
+
+When the registry knows about nothing nested under the current directory, `ck list`
+also **scans the filesystem** (child and grandchild directories, depth ≤ 2) for
+folders that physically carry a `PLAN.md`. Unregistered projects found that way are
+listed *and* addressable by name, so the notice is always actionable — an empty
+sandbox or a never-registered folder of projects still shows you what is there.
+Hidden directories, dependency trees (`node_modules`, `venv`, …) and symlinked
+directories are skipped.
+
+---
+
+## Task Reordering
+
+Reordering reshuffles **pending work** — the `[ ]` and `[>]` tasks — and nothing
+else. Titles, status markers, headers, prose and the `## Completed` block are all
+preserved; the focus marker travels with its task.
+
+```text
+$ ck list
+## Current Sprint
+[ ] 1. write the migration
+[ ] 2. review the PR
+[>] 3. ship the release
+```
+
+```text
+$ ck move 3 1
+[ok] Moved task #3 -> position 1
+
+$ ck list
+## Current Sprint
+[>] 1. ship the release
+[ ] 2. write the migration
+[ ] 3. review the PR
+```
+
+Task IDs are **positional** (assigned 1..N in document order), so the number beside
+a task changes when it moves — `#3` above became `#1`. The confirmation line always
+echoes the ID you typed and the position it landed in.
+
+`top` and `bottom` are accepted as aliases for the first and last active slot:
+
+```text
+$ ck move 1 bottom
+[ok] Moved task #1 -> position 3
+```
+
+Swap two tasks' positions:
+
+```text
+$ ck swap 1 2
+[ok] Swapped task #1 <-> task #2
+```
+
+Or set a whole relative order at once. Listed IDs move ahead of the unlisted ones,
+which keep their relative order — so you never have to retype the entire list:
+
+```text
+$ ck reorder 2 1
+[ok] Reordered active tasks.
+```
+
+### Completed tasks are never reordered
+
+A completed (`[x]`) task records history, and its position is part of that record.
+Targeting one aborts the **entire** operation — the file is left byte-identical,
+so a command can never half-apply:
+
+```text
+$ ck move 4 1
+[err] Cannot move completed task #4. Only pending/active tasks can be reordered.
+
+$ echo $?
+1
+```
+
+Exit codes: `0` success · `1` attempted to reorder a completed task · `2` usage
+error (unknown task ID, out-of-range position, non-numeric ID, missing argument).
 
 ---
 
@@ -846,6 +928,54 @@ $ ck list
 $ ck list nope
 ERROR: Project 'nope' not found.
 ```
+
+Если в реестре нет ни одной записи, вложенной в текущий каталог, `ck list`
+дополнительно **сканирует файловую систему** (дочерние и вложенные каталоги,
+глубина ≤ 2) и находит папки, где физически лежит `PLAN.md`. Найденные
+незарегистрированные проекты показываются в списке **и** доступны по имени, так
+что подсказка всегда остаётся рабочей. Скрытые каталоги, деревья зависимостей
+(`node_modules`, `venv`, …) и симлинки пропускаются.
+
+---
+
+## Перестановка задач
+
+Команды перестановки меняют порядок **только незавершённых** задач — `[ ]` и
+`[>]`. Заголовки, проза, секция `## Completed`, статусы и заголовки задач не
+изменяются; маркер фокуса перемещается вместе со своей задачей.
+
+```text
+$ ck move 3 1
+[ok] Moved task #3 -> position 1
+
+$ ck swap 1 2
+[ok] Swapped task #1 <-> task #2
+
+$ ck reorder 2 1
+[ok] Reordered active tasks.
+```
+
+Идентификаторы задач **позиционные** (нумеруются 1..N в порядке документа), поэтому
+после перестановки номер рядом с задачей меняется. Команда `ck move 1 bottom`
+переносит задачу на последнюю активную позицию.
+
+### Завершённые задачи переставлять нельзя
+
+Задача `[x]` — это история, и её позиция является частью этой истории. Попытка
+трогать такую задачу прерывает **всю** операцию: файл остаётся побайтово
+неизменным, команда не может примениться наполовину.
+
+```text
+$ ck move 4 1
+[err] Cannot move completed task #4. Only pending/active tasks can be reordered.
+
+$ echo $?
+1
+```
+
+Коды выхода: `0` успех · `1` попытка переставить завершённую задачу · `2` ошибка
+использования (неизвестный ID, позиция вне диапазона, нечисловой ID, недостаточно
+аргументов).
 
 ---
 

@@ -17,6 +17,7 @@ from .config import (
     find_project_root,
 )
 from .core import ContextKeeper, UpdateResult
+from .models import CompletedTaskError
 from .registry import RegistryCorruptError
 from .sandbox import (
     SANDBOX_ACTIVE_ENV,
@@ -56,6 +57,14 @@ Local (current project):
   done <ID|Range>            Mark task(s) as done ([x]). Bare `ck done`
                              completes the CURRENT FOCUS; without a
                              focus it prints the usage line instead
+  move <ID> <pos|top|bottom> Move a PENDING/ACTIVE task ([ ] or [>])
+                             to position N among the active tasks, or
+                             to the first/last slot. Completed ([x])
+                             tasks are never reordered (exit 1)
+  swap <ID1> <ID2>           Exchange the positions of two active tasks
+  reorder <ID1> <ID2> ...    Set the relative order of active tasks;
+                             listed IDs move ahead of unlisted ones,
+                             which keep their relative order
   add <text>                 Insert a new open task before ## Completed
   note <text>                Attach/update a process note on the active task
                              (shown in `ck st`, cleared by `ck done`)
@@ -297,6 +306,16 @@ def build_parser() -> "argparse.ArgumentParser":
     p_add = sub.add_parser("add", help="Add a new task")
     p_add.add_argument("text", nargs="+", help="Task text")
 
+    sub.add_parser(
+        "move",
+        help="Move a pending/active task to a position (or top/bottom)")
+    sub.add_parser(
+        "swap",
+        help="Exchange the positions of two pending/active tasks")
+    sub.add_parser(
+        "reorder",
+        help="Set the relative order of pending/active tasks")
+
     p_note = sub.add_parser(
         "note", help="Attach a process note to the active task")
     p_note.add_argument("text", nargs="+", help="Note text")
@@ -405,6 +424,7 @@ _LEGACY_CHOICES = (
     "init", "st", "dashboard", "start", "done", "add", "note", "notes",
     "save", "edit", "log", "install", "uninstall", "update", "help",
     "list", "register", "unregister", "prune", "info",
+    "move", "swap", "reorder",
     "local", "remote", "space",
     "dev", "sandbox", "ck-clean",
 )
@@ -466,6 +486,9 @@ _LEGACY_FLAGS: dict[str, frozenset] = {
     "start": frozenset({"--no-input", "-y", "--yes"}),
     "done": frozenset(),
     "add": frozenset(),
+    "move": frozenset(),
+    "swap": frozenset(),
+    "reorder": frozenset(),
     "note": frozenset(),
     "notes": frozenset(),
     "save": frozenset(),
@@ -649,15 +672,17 @@ def _print_focus_result(result) -> None:
     if result.task_id > 0:
         print(f"-> Focused [{result.task_id}]: {result.title}")
     else:
-        print("[ok] Focus reset.")
+        _notice(ui.OK, "Focus reset.")
     if result.demoted_id is not None:
         if result.had_note:
-            print(f"[i] Task [{result.demoted_id}] {result.demoted_title} "
-                  "lost focus — moved to Unfocused / Paused Context "
-                  "(note preserved; archived by `ck done`).")
+            _notice(ui.INFO,
+                    f"Task [{result.demoted_id}] {result.demoted_title} "
+                    "lost focus — moved to Unfocused / Paused Context "
+                    "(note preserved; archived by `ck done`).")
         else:
-            print(f"[!] Task #{result.demoted_id} lost focus without a "
-                  "note. Attach one via `ck note <text>`.")
+            _notice(ui.WARN,
+                    f"Task #{result.demoted_id} lost focus without a "
+                    "note. Attach one via `ck note <text>`.")
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -836,12 +861,12 @@ def _dispatch(argv: Optional[List[str]] = None) -> int:
                     return 2
                 spec = str(focus_id)
             ids = ck.done(spec)
-            print(f"[ok] Marked done: {', '.join(map(str, ids))}")
+            _notice(ui.OK, f"Marked done: {', '.join(map(str, ids))}")
             _maybe_notify(ck)
         elif args.command == "add":
             text = " ".join(args.text)
             new_id = ck.add_task(text)
-            print(f"[ok] Added task (id={new_id}): {text}")
+            _notice(ui.OK, f"Added task (id={new_id}): {text}")
         elif args.command == "note":
             text = " ".join(args.text)
             info = ck.set_note(text)
@@ -861,14 +886,14 @@ def _dispatch(argv: Optional[List[str]] = None) -> int:
         elif args.command == "register":
             path = Path(args.path).resolve() if args.path else None
             entry = ck.register(path=path, name=args.name)
-            print(f"[ok] Registered: {entry.name} -> {entry.path}")
+            _notice(ui.OK, f"Registered: {entry.name} -> {entry.path}")
         elif args.command == "unregister":
             path = Path(args.path).resolve() if args.path else None
             removed = ck.unregister(path=path, name=args.name)
             if removed:
-                print("[ok] Unregistered.")
+                _notice(ui.OK, "Unregistered.")
             else:
-                print("[i] Not in registry.")
+                _notice(ui.INFO, "Not in registry.")
         elif args.command == "prune":
             pruned = ck.prune()
             if pruned:
@@ -880,7 +905,7 @@ def _dispatch(argv: Optional[List[str]] = None) -> int:
                     "from the global registry."
                 )
             else:
-                print("[ok] Nothing to prune.")
+                _notice(ui.OK, "Nothing to prune.")
         elif args.command == "install":
             _install_user(
                 dev=getattr(args, "dev", False) or is_dev_entrypoint())
@@ -933,13 +958,96 @@ def _maybe_notify(ck: ContextKeeper) -> None:
 
 
 def _print_error(message: str) -> None:
-    """Print an ERROR line, in standard red when colors are enabled.
+    """Print an ERROR line in bold red when colors are enabled.
 
-    Contrast policy: errors use the high-visibility ANSI RED
-    badge, never DIM/dark-gray. With colors off (NO_COLOR, pipes)
-    the output is byte-identical to a plain ``print``.
+    The whole line is painted ``\\033[1;31m`` … ``\\033[0m`` (the
+    :data:`ui.ERR` style) so failures are unmistakable. Contrast
+    policy: errors use the high-visibility bold red treatment, never
+    DIM/dark-gray. With colors off (NO_COLOR, pipes) the output is
+    byte-identical to a plain ``print``.
     """
-    print(ui.get_palette().red(message))
+    p = ui.get_palette()
+    if not p.enabled:
+        print(message)
+        return
+    print(f"{ui.BOLD_RED}{message}{ui.RESET}")
+
+
+def _notice(token: str, message: str = "") -> None:
+    """Print a styled status line: badge first, plain text after.
+
+    The single funnel for every ``[!]`` / ``[i]`` / ``[ok]`` notice
+    the CLI emits, so badge styling can never drift between commands.
+    See :func:`cklib.ui.notice` for the reset-immediately-after-the-
+    badge contract.
+    """
+    print(ui.notice(token, message))
+
+
+# Usage strings for the three reordering commands, keyed by action.
+# Shared by the arity check and the "not a number" message so the two
+# can never disagree.
+_REORDER_USAGE = {
+    "move": "ck move <ID> <position|top|bottom>",
+    "swap": "ck swap <ID1> <ID2>",
+    "reorder": "ck reorder <ID1> <ID2> [<ID3> ...]",
+}
+
+
+def _run_reorder(ck, action: str, tokens: List[str]) -> int:
+    """Run ``move`` / ``swap`` / ``reorder`` and translate domain errors.
+
+    All three share one contract, enforced here rather than in three
+    near-identical dispatch branches:
+
+    - a non-numeric id → exit 2 (usage error);
+    - an UNKNOWN id    → exit 2 with the plain "No task with id N";
+    - a COMPLETED id   → exit 1 with the explicit
+      ``Cannot move completed task #N. Only pending/active tasks can
+      be reordered.`` refusal;
+    - success          → exit 0 and a styled ``[ok]`` confirmation.
+
+    Returns the exit code (0 = success).
+    """
+    usage = _REORDER_USAGE[action]
+    # 1. Parse the id tokens FIRST so a typo can never be reported as
+    #    a domain error (and vice versa).
+    id_count = 2 if action == "swap" else len(tokens)
+    if action == "move":
+        id_count = 1
+    ids: List[int] = []
+    for tok in tokens[:id_count]:
+        try:
+            ids.append(int(tok))
+        except ValueError:
+            _print_error(f"ERROR: Task ID must be a number: {tok!r}\n"
+                         f"   Usage: {usage}")
+            return 2
+
+    # 2. Execute against the domain.
+    try:
+        if action == "move":
+            message = ck.move_task(ids[0], tokens[1])
+        elif action == "swap":
+            message = ck.swap_tasks(ids[0], ids[1])
+        else:
+            message = ck.reorder_tasks(ids)
+    except CompletedTaskError as e:
+        # The STRICT rule: completed work is never reordered.
+        _notice(ui.ERR,
+                f"Cannot move completed task #{e.task_id}. "
+                "Only pending/active tasks can be reordered.")
+        return 1
+    except KeyError as e:
+        _print_error(f"ERROR: {e.args[0] if e.args else e}\n"
+                     f"   Usage: {usage}")
+        return 2
+    except ValueError as e:
+        # Domain range errors ("Position 9 is out of range (1..3)").
+        _print_error(f"ERROR: {e}\n   Usage: {usage}")
+        return 2
+    _notice(ui.OK, message)
+    return 0
 
 
 def _run_space_mgmt(rest: List[str]) -> int:
@@ -999,7 +1107,7 @@ def _run_space_mgmt(rest: List[str]) -> int:
                     f"(got {len(args)}). Spaces never contain spaces.")
                 return 2
             path = spaces.create_space(args[0])
-            print(f"[ok] Created space {args[0]!r}: {path}")
+            _notice(ui.OK, f"Created space {args[0]!r}: {path}")
             print(f"     Add a task with `ck {args[0]} add <text>`.")
             return 0
 
@@ -1054,10 +1162,10 @@ def _run_space_mgmt(rest: List[str]) -> int:
                         f"Are you sure you want to permanently delete "
                         f"space '{name}' and its process notes? [y/N]: ")
                 except (EOFError, KeyboardInterrupt):
-                    print("[i] Aborted.")
+                    _notice(ui.INFO, "Aborted.")
                     return 2
                 if answer.strip().lower() not in ("y", "yes"):
-                    print("[i] Aborted.")
+                    _notice(ui.INFO, "Aborted.")
                     return 2
             info = spaces.delete_space(name, confirmed=True)
             print(
@@ -1094,7 +1202,7 @@ def _print_full_plan(ck: ContextKeeper) -> None:
     # local → ancestors (up to the Git repo root) → global registry.
     text = ck.full_plan_text()
     if text is None:
-        print("[!] PLAN.md not found.\n")
+        _notice(ui.WARN, "PLAN.md not found.\n")
     else:
         print(text)
 
@@ -1195,7 +1303,7 @@ def _legacy_dispatch(raw: List[str]) -> int:
                     return 2
                 spec = str(focus_id)
             ids = ck.done(spec)
-            print(f"[ok] Marked done: {', '.join(map(str, ids))}")
+            _notice(ui.OK, f"Marked done: {', '.join(map(str, ids))}")
             if notifiable:
                 _maybe_notify(ck)
         elif cmd == "add":
@@ -1204,7 +1312,28 @@ def _legacy_dispatch(raw: List[str]) -> int:
                 return 2
             text = " ".join(rest)
             new_id = ck.add_task(text)
-            print(f"[ok] Added task (id={new_id}): {text}")
+            _notice(ui.OK, f"Added task (id={new_id}): {text}")
+        elif cmd == "move":
+            if len(rest) < 2:
+                print("Usage: ck move <ID> <position|top|bottom>")
+                return 2
+            rc = _run_reorder(ck, "move", rest)
+            if rc:
+                return rc
+        elif cmd == "swap":
+            if len(rest) < 2:
+                print("Usage: ck swap <ID1> <ID2>")
+                return 2
+            rc = _run_reorder(ck, "swap", rest[:2])
+            if rc:
+                return rc
+        elif cmd == "reorder":
+            if not rest:
+                print("Usage: ck reorder <ID1> <ID2> [<ID3> ...]")
+                return 2
+            rc = _run_reorder(ck, "reorder", rest)
+            if rc:
+                return rc
         elif cmd == "note":
             if not rest:
                 print("Usage: ck note <text>")
@@ -1241,7 +1370,7 @@ def _legacy_dispatch(raw: List[str]) -> int:
                     i += 1
             target = Path(path).resolve() if path else None
             entry = ck.register(path=target, name=name)
-            print(f"[ok] Registered: {entry.name} -> {entry.path}")
+            _notice(ui.OK, f"Registered: {entry.name} -> {entry.path}")
         elif cmd == "unregister":
             path = None
             name = None
@@ -1253,9 +1382,9 @@ def _legacy_dispatch(raw: List[str]) -> int:
             target = Path(path).resolve() if path else None
             removed = ck.unregister(path=target, name=name)
             if removed:
-                print("[ok] Unregistered.")
+                _notice(ui.OK, "Unregistered.")
             else:
-                print("[i] Not in registry.")
+                _notice(ui.INFO, "Not in registry.")
         elif cmd == "prune":
             pruned = ck.prune()
             if pruned:
@@ -1267,7 +1396,7 @@ def _legacy_dispatch(raw: List[str]) -> int:
                     "from the global registry."
                 )
             else:
-                print("[ok] Nothing to prune.")
+                _notice(ui.OK, "Nothing to prune.")
         elif cmd in ("local", "remote"):
             return _run_space_command(cmd, rest)
         elif cmd == "space":
@@ -1403,7 +1532,7 @@ def _run_space_command(space: str, rest: List[str]) -> int:
             return 2
         text = " ".join(args)
         new_id = mgr.add_task(text)
-        print(f"[ok] Added task to {space} space (id={new_id}): {text}")
+        _notice(ui.OK, f"Added task to {space} space (id={new_id}): {text}")
         return 0
 
     if action == "list":
@@ -1470,7 +1599,7 @@ def _run_space_command(space: str, rest: List[str]) -> int:
                 return 2
             spec = str(focus_id)
         ids = mgr.done(spec)
-        print(f"[ok] Marked done: {', '.join(map(str, ids))}")
+        _notice(ui.OK, f"Marked done: {', '.join(map(str, ids))}")
         return 0
 
     if action in ("focus", "start"):
@@ -1493,7 +1622,7 @@ def _run_space_command(space: str, rest: List[str]) -> int:
         if result["task_id"] > 0:
             print(f"-> Focused [{result['task_id']}]: {result['title']}")
         else:
-            print("[ok] Focus reset.")
+            _notice(ui.OK, "Focus reset.")
         if result.get("demoted_id") is not None:
             print(
                 f"[i] Task #{result['demoted_id']} "
@@ -1569,7 +1698,7 @@ def _run_emulate_command() -> int:
     from .sandbox import is_dev_mode, sandbox_root
 
     if not is_dev_mode() and not sandbox_root().is_dir():
-        print("[i] Not in sandbox mode — emulator aborted.")
+        _notice(ui.INFO, "Not in sandbox mode — emulator aborted.")
         return 1
     return run_emulation()
 
@@ -1620,7 +1749,7 @@ def _do_update(ck: ContextKeeper) -> int:
     """Run ``ck update`` end-to-end and translate the result to exit code."""
     result = ck.update()
     if result.ok:
-        print(f"[ok] {result.message}")
+        _notice(ui.OK, f"{result.message}")
         _refresh_installed_copy()
         return 0
     # Non-ok: the message is the user-facing diagnostic.
@@ -1646,7 +1775,7 @@ def _refresh_installed_copy() -> None:
             "found; run `ck install` from the checkout to refresh it."
         )
         return
-    print("[i] Refreshing installed production copy ...")
+    _notice(ui.INFO, "Refreshing installed production copy ...")
     _install_physical_copy(source, target)
 
 
@@ -1822,8 +1951,8 @@ def _install_physical_copy(source: Path, target: Path) -> None:
             pass
         return
 
-    print(f"[ok] Installed (physical copy): {target}")
-    print(f"[ok] Package snapshot: {snapshot / 'cklib'}")
+    _notice(ui.OK, f"Installed (physical copy): {target}")
+    _notice(ui.OK, f"Package snapshot: {snapshot / 'cklib'}")
     print(
         "Production is a static snapshot: re-run `ck install` (or "
         "`ck update`) after changing the checkout."
@@ -1858,14 +1987,14 @@ def _uninstall_user() -> None:
     targets = (bin_dir / "ck", bin_dir / _DEV_SCRIPT_NAME)
     for target in targets:
         if not target.exists() and not target.is_symlink():
-            print(f"[i] Not installed at {target}.")
+            _notice(ui.INFO, f"Not installed at {target}.")
             continue
         if target.is_dir() and not target.is_symlink():
-            print(f"[!] {target} is a directory. Refusing to delete.")
+            _notice(ui.WARN, f"{target} is a directory. Refusing to delete.")
             continue
         try:
             target.unlink()
-            print(f"[ok] Removed: {target}")
+            _notice(ui.OK, f"Removed: {target}")
         except OSError as e:
             _print_error(f"ERROR: Could not remove {target}: {e}")
     _remove_package_snapshot()
@@ -1878,7 +2007,7 @@ def _remove_package_snapshot() -> None:
         return
     try:
         shutil.rmtree(snapshot)
-        print(f"[ok] Removed package snapshot: {snapshot}")
+        _notice(ui.OK, f"Removed package snapshot: {snapshot}")
     except OSError as e:
         _print_error(f"ERROR: Could not remove {snapshot}: {e}")
 

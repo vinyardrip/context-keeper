@@ -67,7 +67,8 @@ from .config import (
     read_color_config,
     warn_if_sensitive_root,
 )
-from .models import Notes, Task, TaskList, TaskStatus
+from .models import (CompletedTaskError, Notes, Task, TaskList,
+                     TaskStatus)
 from .history import (
     archive_name,
     concat_archives,
@@ -469,6 +470,89 @@ def _resolved_or_abs(path: Path) -> Path:
         return Path(path).resolve()
     except (OSError, RuntimeError):
         return Path(os.path.abspath(str(path)))
+
+
+# Directory names never worth descending into when hunting for project
+# folders: VCS metadata, dependency trees, build output, caches, and
+# ck's own state. Skipping them keeps the scan bounded and stops a
+# stray ``node_modules`` from turning ``ck list`` into a filesystem
+# crawl.
+_SCAN_SKIP_DIRS = frozenset({
+    ".git", ".hg", ".svn", ".ck", ".sandbox", ".venv", "venv", "env",
+    "node_modules", "__pycache__", ".cache", ".tox", ".mypy_cache",
+    ".pytest_cache", "dist", "build", "site-packages", ".idea",
+    ".vscode", "target", "vendor",
+})
+
+# How deep below the invocation directory the filesystem scan looks.
+# Depth 1 = direct children, depth 2 = grandchildren. Two levels
+# covers the common "parent dir of a few sibling projects" layout
+# without walking an entire monorepo.
+_SCAN_MAX_DEPTH = 2
+
+
+def scan_nested_project_folders(directory: Path,
+                                max_depth: int = _SCAN_MAX_DEPTH
+                                ) -> list:
+    """Project folders found by scanning the FILESYSTEM under ``directory``.
+
+    The registry-independent fallback for ``ck list``: when the global
+    registry (production or sandbox) knows about nothing nested under
+    the current directory, the user still wants to know which project
+    folders are physically present — the common case being a folder of
+    projects that were never registered, or one explored from inside a
+    sandbox whose registry is empty.
+
+    A child qualifies when it carries a resolvable PLAN.md (``.ck/``
+    or the project-root ``PLAN.md``, real or sandboxed) — the same
+    predicate context resolution uses, so a discovered folder is
+    always a real, listable project.
+
+    Returns ``(name, path)`` pairs sorted by name, nearest level
+    first. Hidden and dependency directories are skipped, symlinked
+    directories are NOT followed (cycle safety), and unreadable
+    directories are ignored rather than raising.
+    """
+    try:
+        base = _resolved_or_abs(directory)
+    except Exception:
+        return []
+    if not base.is_dir():
+        return []
+    found: list[tuple[int, str, Path]] = []
+    seen: set[Path] = set()
+    # Breadth-first: level 0 is the direct children of ``base``.
+    frontier = [base]
+    for level in range(1, max_depth + 1):
+        nxt: list[Path] = []
+        for parent_dir in frontier:
+            try:
+                children = sorted(parent_dir.iterdir())
+            except (OSError, PermissionError):
+                continue
+            for child in children:
+                try:
+                    if not child.is_dir():
+                        continue
+                    # ``is_symlink`` first: following links risks
+                    # cycles and duplicate entries.
+                    if child.is_symlink() or child.name in _SCAN_SKIP_DIRS:
+                        continue
+                    real = _resolved_or_abs(child)
+                except (OSError, RuntimeError, PermissionError):
+                    continue
+                if real in seen:
+                    continue
+                if _has_resolvable_plan(child):
+                    seen.add(real)
+                    found.append((level, child.name, child))
+                nxt.append(child)
+        frontier = nxt
+        if not frontier:
+            break
+    # Nearest level first, then alphabetical within a level.
+    found.sort(key=lambda item: (item[0], item[1]))
+    return [(name, path) for _level, name, path in found]
 
 
 def registered_entries_under(directory: Path) -> list:
@@ -1231,6 +1315,93 @@ class ContextKeeper:
             self._purge_note_if_completed(completed)
         return transitioned
 
+    # ------------------------------------------------------------------ #
+    # COMMAND: move / swap / reorder (active tasks only)
+    # ------------------------------------------------------------------ #
+
+    def _materialized_plan(self) -> TaskList:
+        """The plan with EVERY task anchored to a real source line.
+
+        A task added by ``ck add`` in the same session carries an
+        ``insert_line`` hint and a past-EOF ``line_number``: it exists
+        only in the render pass. Reordering permutes those line
+        numbers, so such a task has no slot of its own yet. Committing
+        once (and reloading) materializes it into the source, making
+        every subsequent reorder a clean permutation of real lines.
+        """
+        tl = self._load_plan()
+        if any(t.insert_line is not None or t.line_number > len(
+                (tl.source_text or "").splitlines())
+                for t in tl.tasks):
+            self._commit_plan(tl)
+            tl = self._load_plan()
+        return tl
+
+    def _reorder_guard(self, tl: TaskList, task_ids: list[int]) -> None:
+        """Refuse the whole operation if ANY target is completed.
+
+        Checked up front, over every supplied id, so a list that mixes
+        pending and completed work aborts before a single line moves —
+        the command can never half-apply.
+        """
+        for tid in task_ids:
+            task = tl.by_id(tid)
+            if task is None:
+                raise KeyError(f"No task with id {tid}")
+            if task.status == TaskStatus.DONE:
+                raise CompletedTaskError(tid)
+
+    def move_task(self, task_id: int, target: str) -> str:
+        """Move an ACTIVE task to ``target``; returns the message.
+
+        ``target`` is a 1-based position among the active tasks, or
+        the literal ``"top"`` / ``"bottom"`` (aliases ``first`` /
+        ``last``).
+
+        Only ``[ ]`` / ``[>]`` tasks may be moved — a completed task
+        is history and raises ``PermissionError`` (the CLI renders the
+        refusal and exits 1).
+        """
+        tl = self._materialized_plan()
+        self._reorder_guard(tl, [task_id])
+        active = tl.reorderable_tasks()
+        if not active:
+            raise ValueError("No pending tasks to reorder")
+        key = target.strip().lower()
+        if key in ("top", "first"):
+            position = tl.move_task_to_edge(task_id, top=True)
+        elif key in ("bottom", "last"):
+            position = tl.move_task_to_edge(task_id, top=False)
+        else:
+            try:
+                wanted = int(key)
+            except ValueError:
+                raise ValueError(
+                    f"Invalid target position: {target!r}. "
+                    "Use a number, 'top', or 'bottom'.") from None
+            position = tl.move_task(task_id, wanted)
+        self._commit_plan(tl)
+        self._sync_active_task(tl)
+        return f"Moved task #{task_id} -> position {position}"
+
+    def swap_tasks(self, id_a: int, id_b: int) -> str:
+        """Exchange the positions of two ACTIVE tasks."""
+        tl = self._materialized_plan()
+        self._reorder_guard(tl, [id_a, id_b])
+        tl.swap_tasks(id_a, id_b)
+        self._commit_plan(tl)
+        self._sync_active_task(tl)
+        return f"Swapped task #{id_a} <-> task #{id_b}"
+
+    def reorder_tasks(self, ordered_ids: list[int]) -> str:
+        """Apply ``ordered_ids`` as the new relative task order."""
+        tl = self._materialized_plan()
+        self._reorder_guard(tl, ordered_ids)
+        tl.reorder_tasks(ordered_ids)
+        self._commit_plan(tl)
+        self._sync_active_task(tl)
+        return "Reordered active tasks."
+
     def _sync_active_task(self, tl: TaskList) -> None:
         """Reconcile the registry's active-task pointer with the AST.
 
@@ -1623,8 +1794,11 @@ class ContextKeeper:
 
         if register:
             entry = registry.register_project(self.root, name=self.root.name)
-            print(f"[ok] Registered: {entry.name} -> {entry.path}")
-        print(f"[ok] Context Keeper v{VERSION} initialized at {self.root}")
+            print(ui.notice(ui.OK,
+                            f"Registered: {entry.name} -> {entry.path}"))
+        print(ui.notice(
+            ui.OK,
+            f"Context Keeper v{VERSION} initialized at {self.root}"))
 
     # ------------------------------------------------------------------ #
     # Project context resolution (read operations)
@@ -1762,20 +1936,51 @@ class ContextKeeper:
     # COMMAND: list (explicit targeting + nested-project discovery)
     # ------------------------------------------------------------------ #
 
-    def nested_projects(self) -> list:
-        """Registered projects located AT or BELOW the invocation dir.
+    def nested_projects(self, *, include_unregistered: bool = True) -> list:
+        """Projects located AT or BELOW the invocation directory.
 
-        Returns a list of ``(name, root)`` tuples, name-sorted. Empty
-        when the directory is inside a project (nothing nested below
-        it) or when no registry exists — callers decide how to render
-        that, never a silent "first match wins".
+        Two tiers, in order:
+
+        1. REGISTERED projects nested under the directory — the
+           authoritative set, carrying their registry names;
+        2. when tier 1 is EMPTY, a FILESYSTEM scan (depth 2) for
+           project folders that exist on disk but were never
+           registered (:func:`scan_nested_project_folders`). This is
+           what makes ``ck list`` useful in an empty-sandbox or
+           never-registered context instead of just saying "nothing
+           here".
+
+        Tier 2 only runs when tier 1 found nothing, so a registered
+        project is never shadowed by an unregistered folder of the
+        same name. Returns ``(name, root)`` pairs; callers decide how
+        to render them, never a silent "first match wins".
         """
         directory = self._invocation_dir()
         if directory is None:
             return []
-        return [(getattr(e, "name", "") or Path(getattr(e, "path", "")).name,
-                 Path(e.path))
-                for e in registered_entries_under(directory)]
+        registered = [
+            (getattr(e, "name", "") or Path(getattr(e, "path", "")).name,
+             Path(e.path))
+            for e in registered_entries_under(directory)
+        ]
+        if registered or not include_unregistered:
+            return registered
+        return scan_nested_project_folders(directory)
+
+    def _discovered_project_by_name(self, name: str) -> Optional[Path]:
+        """Resolve ``name`` against the folders a FILESYSTEM scan sees.
+
+        Mirrors exactly what :meth:`nested_projects` would print, so
+        ``ck list <name>`` succeeds for every name the discovery
+        notice lists and nothing more — a genuinely unknown name still
+        reports "not found".
+        """
+        if not name:
+            return None
+        for found_name, path in self.nested_projects():
+            if found_name == name:
+                return path
+        return None
 
     def _invocation_dir(self) -> Optional[Path]:
         """The directory READ commands anchor on (see resolve_context).
@@ -1828,9 +2033,13 @@ class ContextKeeper:
 
         Three explicit branches, never a silent arbitrary pick:
 
-        1. ``project_name`` given — resolve that REGISTERED project
+        1. ``project_name`` given — resolve that project
            (``ck list alpha`` works from anywhere) and render its
-           tasks. An unknown name is an error, not an empty listing.
+           tasks. The registry is consulted first; a project that is
+           only physically present under the invocation directory
+           (unregistered) is accepted too, so every name the
+           discovery notice prints is actually actionable. An unknown
+           name is an error, not an empty listing.
         2. Inside a project (local / parent context) — the normal
            listing, byte-for-byte unchanged.
         3. OUTSIDE any project — never fall back to one arbitrary
@@ -1844,6 +2053,10 @@ class ContextKeeper:
         """
         if project_name:
             root = registered_project_by_name(project_name)
+            if root is None:
+                # Unregistered-but-present fallback: the name must be
+                # one this very command would have listed.
+                root = self._discovered_project_by_name(project_name)
             if root is None:
                 return (f"ERROR: Project '{project_name}' not found.", 1)
             keeper = self._keeper_for(root)

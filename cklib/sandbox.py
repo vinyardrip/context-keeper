@@ -651,9 +651,10 @@ def print_nesting_guard(file=None) -> None:
     just the warning and the current cross-project view.
     """
     out = file or sys.stdout
-    print("[!] Already in sandbox mode", file=out)
-    print("[i] No nested session started. Type 'exit' to return to "
-          "production.", file=out)
+    from . import ui
+    print(ui.notice(ui.WARN, "Already in sandbox mode"), file=out)
+    print(ui.notice(ui.INFO, "No nested session started. Type 'exit' to "
+                            "return to production."), file=out)
     print(file=out)
     try:
         from .core import ContextKeeper
@@ -842,8 +843,10 @@ def spawn_sandbox_shell(project: Path, *, shell: Optional[str] = None) -> int:
 
     shell_cmd = shell or os.environ.get("SHELL", "").strip() or "/bin/bash"
     child_env = sandbox_shell_env(project)
-    print(f"[i] Starting sandbox subshell ({Path(shell_cmd).name}). "
-          "Type 'exit' to return to production.")
+    from . import ui
+    print(ui.notice(ui.INFO,
+                    f"Starting sandbox subshell ({Path(shell_cmd).name}). "
+                    "Type 'exit' to return to production."))
     try:
         # No explicit cwd: the child inherits this process's exact
         # working directory (preserved, per spec).
@@ -1099,9 +1102,14 @@ def exit_sandbox() -> int:
         # SINGLE clean status line (legacy 'Back to production' line
         # removed — one confirmation, no duplicates).
         global_ck = resolved_global_binary_path()
-        print(f"[ok] Exited sandbox mode. Active binary is now: {global_ck}")
+        from . import ui
+        print(ui.notice(
+            ui.OK,
+            f"Exited sandbox mode. Active binary is now: {global_ck}"))
     else:
-        print("[i] Not in sandbox mode — nothing to exit.")
+        from . import ui
+        print(ui.notice(ui.INFO,
+                        "Not in sandbox mode — nothing to exit."))
     return 0
 
 

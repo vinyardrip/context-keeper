@@ -64,6 +64,20 @@ class TaskStatus(str, Enum):
 # ---------------------------------------------------------------------------
 
 
+class CompletedTaskError(PermissionError):
+    """A reordering command targeted a COMPLETED (``[x]``) task.
+
+    Reordering is restricted to pending/active work (``[ ]`` /
+    ``[>]``); a completed task records history and its position is
+    part of that record. Carries ``task_id`` so callers can report the
+    exact offender without re-parsing the message.
+    """
+
+    def __init__(self, task_id: int) -> None:
+        super().__init__(f"Task #{task_id} is completed")
+        self.task_id = task_id
+
+
 @dataclass
 class Task:
     """A single AST task node.
@@ -282,6 +296,134 @@ class TaskList:
                 return self.tasks.pop(i)
         return None
 
+    # ---- reordering (active / pending tasks only) ----
+
+    def reorderable_tasks(self) -> list[Task]:
+        """The tasks a reorder may touch, in DOCUMENT order.
+
+        ONLY non-DONE tasks qualify — ``[ ]`` (open) and ``[>]``
+        (focused). Completed tasks are history: their position is the
+        record of what happened, so the reordering commands refuse to
+        move them at all.
+
+        Sorted by ``line_number`` (the rendered position), NOT by
+        ``self.tasks`` order: the AST list keeps its original parse
+        order, so after one reorder the two diverge. "Position 1" must
+        always mean the task the user SEES first, which is only true
+        for the document order. A task still pending insertion
+        (past-EOF ``line_number``) sorts last, matching where the
+        renderer will place it.
+        """
+        return sorted((t for t in self.tasks if t.status != TaskStatus.DONE),
+                      key=lambda t: t.line_number)
+
+    def _slots(self) -> list[int]:
+        """The source line numbers owned by the reorderable tasks."""
+        return [t.line_number for t in self.reorderable_tasks()]
+
+    def _assign(self, ordered: list[Task], slots: list[int]) -> None:
+        """Hand each task in ``ordered`` the slot at its own index."""
+        for task, slot in zip(ordered, slots):
+            task.line_number = slot
+
+    def _require_reorderable(self, task_id: int) -> Task:
+        """Resolve ``task_id`` or raise the domain errors.
+
+        ``KeyError`` for an unknown id; ``PermissionError`` for a
+        completed task — reordering completed work is forbidden, not
+        merely unsupported.
+        """
+        task = self.by_id(task_id)
+        if task is None:
+            raise KeyError(f"No task with id {task_id}")
+        if task.status == TaskStatus.DONE:
+            raise CompletedTaskError(task_id)
+        return task
+
+    def move_task(self, task_id: int, position: int) -> int:
+        """Move ``task_id`` to ``position`` (1-based) among the
+        reorderable tasks. Returns the resulting 1-based position.
+
+        Every other reorderable task keeps its relative order and
+        shifts by one to close the gap, so the operation is a stable
+        extraction-and-reinsertion — never a wholesale reshuffle.
+
+        Raises ``KeyError`` (unknown id), ``PermissionError``
+        (completed task) and ``ValueError`` (position outside
+        ``1..len(active)``).
+        """
+        task = self._require_reorderable(task_id)
+        active = self.reorderable_tasks()
+        if not active:
+            raise ValueError("No pending tasks to reorder")
+        if position < 1 or position > len(active):
+            raise ValueError(
+                f"Position {position} is out of range (1..{len(active)})")
+        if position == active.index(task) + 1:
+            return position  # already there: a no-op, not an error
+        others = [t for t in active if t.id != task_id]
+        others.insert(position - 1, task)
+        self._assign(others, self._slots())
+        return position
+
+    def move_task_to_edge(self, task_id: int, *, top: bool) -> int:
+        """Move ``task_id`` to the FIRST (``top``) or LAST reorderable
+        slot. Returns the resulting 1-based position."""
+        task = self._require_reorderable(task_id)
+        active = self.reorderable_tasks()
+        if not active:
+            raise ValueError("No pending tasks to reorder")
+        return self.move_task(task_id, 1 if top else len(active))
+
+    def swap_tasks(self, id_a: int, id_b: int) -> tuple[int, int]:
+        """Exchange the positions of two reorderable tasks.
+
+        Returns the (position_a, position_b) pair BEFORE the swap.
+        Swapping a task with itself is a no-op.
+        """
+        task_a = self._require_reorderable(id_a)
+        task_b = self._require_reorderable(id_b)
+        active = self.reorderable_tasks()
+        idx_a = active.index(task_a)
+        idx_b = active.index(task_b)
+        if idx_a == idx_b:
+            return (idx_a + 1, idx_b + 1)
+        active[idx_a], active[idx_b] = active[idx_b], active[idx_a]
+        self._assign(active, self._slots())
+        return (idx_a + 1, idx_b + 1)
+
+    def reorder_tasks(self, ordered_ids: list[int]) -> list[int]:
+        """Apply ``ordered_ids`` as the new relative order of the
+        reorderable tasks. Returns the IDs in their resulting order.
+
+        STABLE PARTIAL semantics: every listed ID is moved ahead of
+        the unlisted ones, preserving the caller's sequence; tasks
+        that were not mentioned keep their relative order after them.
+        That makes ``ck reorder 3 1`` mean "3 before 1" without
+        forcing the user to retype the whole list.
+
+        Raises ``KeyError`` for an unknown id and ``PermissionError``
+        when ANY listed task is completed.
+        """
+        if not ordered_ids:
+            raise ValueError("No task IDs given")
+        # Validate EVERY id before mutating anything, so a bad list
+        # can never leave the AST half-reordered.
+        for tid in ordered_ids:
+            self._require_reorderable(tid)
+        seen: set[int] = set()
+        for tid in ordered_ids:
+            if tid in seen:
+                raise ValueError(f"Duplicate task ID in reorder list: {tid}")
+            seen.add(tid)
+
+        active = self.reorderable_tasks()
+        by_id = {t.id: t for t in active}
+        listed = [by_id[tid] for tid in ordered_ids]
+        rest = [t for t in active if t.id not in seen]
+        self._assign(listed + rest, self._slots())
+        return [t.id for t in listed + rest]
+
 
 # ---------------------------------------------------------------------------
 # Notes (history entries)
@@ -323,4 +465,5 @@ __all__ = [
     "TaskStatus",
     "Section",
     "Notes",
+    "CompletedTaskError",
 ]
