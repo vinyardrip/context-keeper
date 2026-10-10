@@ -181,11 +181,31 @@ class TestBareDirectoryStatus(_IsolatedHome):
         self.assertIn("No active project found", out)
         self.assertNotIn("0/0", out)
 
-    def test_tasks_in_bare_dir_keeps_empty_hint(self):
+    def test_tasks_in_bare_dir_lists_nested_projects_not_a_guess(self):
+        """A bare directory with nothing registered below it must NOT
+        fall back to an arbitrary registry entry. `ck list` reports
+        that the directory is not a project and shows the (empty)
+        set of choices plus the explicit-targeting hint.
+        """
         bare = Path(self._tmp.name) / "bare"
         bare.mkdir()
         with _clean_env():
             code, out = self.run_cli(["list"], bare)
+        self.assertEqual(code, 0)
+        self.assertIn("not a context-keeper project", out)
+        self.assertIn("Available nested projects", out)
+        self.assertIn("ck list <project_name>", out)
+
+    def test_tasks_inside_empty_project_keeps_empty_hint(self):
+        """The "No tasks" hint is still reachable — it belongs to a
+        project that EXISTS but has an empty plan, not to the
+        out-of-project discovery path.
+        """
+        project = Path(self._tmp.name) / "empty_proj"
+        (project / ".ck").mkdir(parents=True)
+        (project / ".ck" / "PLAN.md").write_text("", encoding="utf-8")
+        with _clean_env():
+            code, out = self.run_cli(["list"], project)
         self.assertEqual(code, 0)
         self.assertIn("No tasks", out)
         self.assertIn("ck add", out)

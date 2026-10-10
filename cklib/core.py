@@ -463,6 +463,95 @@ def _global_context() -> Optional[ProjectContext]:
     return None
 
 
+def _resolved_or_abs(path: Path) -> Path:
+    """``path.resolve()`` that never raises (dangling symlinks, etc.)."""
+    try:
+        return Path(path).resolve()
+    except (OSError, RuntimeError):
+        return Path(os.path.abspath(str(path)))
+
+
+def registered_entries_under(directory: Path) -> list:
+    """Registered projects located AT or BELOW ``directory``.
+
+    Powers ``ck list``'s out-of-project discovery: a user standing in
+    a parent folder (``~/work``) gets every project registered inside
+    it, so the command can LIST them instead of silently falling back
+    to one arbitrary registry entry.
+
+    Only entries whose folder still exists AND carries a resolvable
+    PLAN.md (real or sandboxed) are returned — a ``[MISSING]`` row
+    would be a dead end for a read command. Never raises: a missing,
+    locked or corrupt registry degrades to an empty list.
+    """
+    try:
+        if not registry.has_registry():
+            return []
+        entries = registry.list_projects()
+    except Exception:
+        return []
+    base = _resolved_or_abs(directory)
+    out = []
+    for entry in entries:
+        raw = getattr(entry, "path", "")
+        if not raw:
+            continue
+        try:
+            root = Path(raw)
+        except (TypeError, ValueError):
+            continue
+        resolved = _resolved_or_abs(root)
+        # The project directory itself, or anything nested beneath it.
+        if resolved != base and base not in resolved.parents:
+            continue
+        if _has_resolvable_plan(root):
+            out.append(entry)
+    # Name-sorted so the listing is stable across invocations (the
+    # registry's own order is by last_seen, which changes constantly).
+    return sorted(out, key=lambda e: (getattr(e, "name", "") or "",
+                                      getattr(e, "path", "") or ""))
+
+
+def registered_project_by_name(name: str) -> Optional[Path]:
+    """Resolve a REGISTERED project root from a user-supplied name.
+
+    Exact registry ``name`` matches win; a project whose FOLDER name
+    equals ``name`` is accepted as a fallback (``register_project``
+    defaults the registry name to the directory basename, but an
+    explicit ``--name`` may differ, and users type the folder name).
+    Entries without a resolvable PLAN.md are skipped so the caller can
+    report a clean "not found" instead of rendering an empty plan.
+
+    Returns None when nothing matches or no registry exists.
+    """
+    if not name:
+        return None
+    try:
+        if not registry.has_registry():
+            return None
+        entries = registry.list_projects()
+    except Exception:
+        return None
+    by_name: list = []
+    by_folder: list = []
+    for entry in entries:
+        raw = getattr(entry, "path", "")
+        if not raw:
+            continue
+        try:
+            root = Path(raw)
+        except (TypeError, ValueError):
+            continue
+        if getattr(entry, "name", "") == name:
+            by_name.append(root)
+        elif root.name == name:
+            by_folder.append(root)
+    for root in by_name + by_folder:
+        if _has_resolvable_plan(root):
+            return root
+    return None
+
+
 class ContextKeeper:
     """High-level orchestrator. One instance per CLI invocation."""
 
@@ -1668,6 +1757,114 @@ class ContextKeeper:
         keeper = self._keeper_for(ctx.root)
         tl = load_repaired_plan(keeper._plan_display_path())[0]
         return _render_tasks_listing(tl)
+
+    # ------------------------------------------------------------------ #
+    # COMMAND: list (explicit targeting + nested-project discovery)
+    # ------------------------------------------------------------------ #
+
+    def nested_projects(self) -> list:
+        """Registered projects located AT or BELOW the invocation dir.
+
+        Returns a list of ``(name, root)`` tuples, name-sorted. Empty
+        when the directory is inside a project (nothing nested below
+        it) or when no registry exists — callers decide how to render
+        that, never a silent "first match wins".
+        """
+        directory = self._invocation_dir()
+        if directory is None:
+            return []
+        return [(getattr(e, "name", "") or Path(getattr(e, "path", "")).name,
+                 Path(e.path))
+                for e in registered_entries_under(directory)]
+
+    def _invocation_dir(self) -> Optional[Path]:
+        """The directory READ commands anchor on (see resolve_context).
+
+        The explicitly bound root when one was supplied, else the
+        process cwd — never ``find_project_root()``'s upward walk, so
+        a parent's project can never mask the directory the user
+        actually invoked from.
+        """
+        if self._start is not None:
+            return self._start
+        try:
+            return Path.cwd()
+        except (OSError, RuntimeError):
+            return None
+
+    @staticmethod
+    def render_nested_projects_notice(names: list) -> str:
+        """The "not a project here" notice for ``ck list``.
+
+        ASCII-only bullet (``-``), matching the rest of the CLI's
+        plain-text output::
+
+            [!] Current directory is not a context-keeper project.
+
+            Available nested projects:
+              - alpha
+              - test_isolation_sub
+
+            To view tasks, navigate to a project directory or run: ck list <project_name>
+        """
+        lines = [
+            "[!] Current directory is not a context-keeper project.",
+            "",
+            "Available nested projects:",
+        ]
+        if names:
+            lines.extend(f"  - {n}" for n in names)
+        else:
+            lines.append("  (none registered here)")
+        lines.extend([
+            "",
+            "To view tasks, navigate to a project directory or run: "
+            "ck list <project_name>",
+        ])
+        return "\n".join(lines)
+
+    def list_tasks(self, project_name: Optional[str] = None) -> tuple:
+        """``ck list`` orchestration — returns ``(output, exit_code)``.
+
+        Three explicit branches, never a silent arbitrary pick:
+
+        1. ``project_name`` given — resolve that REGISTERED project
+           (``ck list alpha`` works from anywhere) and render its
+           tasks. An unknown name is an error, not an empty listing.
+        2. Inside a project (local / parent context) — the normal
+           listing, byte-for-byte unchanged.
+        3. OUTSIDE any project — never fall back to one arbitrary
+           registry entry. With exactly ONE nested project the tasks
+           render with the project named in the section header; with
+           zero or several the user gets the listing of choices.
+
+        Returns exit code ``1`` only for the unknown-project case;
+        every other branch succeeds (``0``) or reports the empty
+        plan state in-band.
+        """
+        if project_name:
+            root = registered_project_by_name(project_name)
+            if root is None:
+                return (f"ERROR: Project '{project_name}' not found.", 1)
+            keeper = self._keeper_for(root)
+            tl = load_repaired_plan(keeper._plan_display_path())[0]
+            return (_render_tasks_listing(tl), 0)
+
+        ctx = self.resolve_context()
+        # A LOCAL or PARENT context means the user really is inside a
+        # project — the historical behaviour stands.
+        if ctx is not None and ctx.source in ("local", "parent"):
+            return (self.tasks(), 0)
+
+        # No local project: the GLOBAL tier must not silently decide.
+        nested = self.nested_projects()
+        if len(nested) == 1:
+            name, root = nested[0]
+            keeper = self._keeper_for(root)
+            tl = load_repaired_plan(keeper._plan_display_path())[0]
+            return (_render_tasks_listing(tl, project_label=name), 0)
+        return (self.render_nested_projects_notice([n for n, _ in nested]),
+                0)
 
     def notes(self) -> str:
         """Return all active process notes for the resolved project.
@@ -3026,7 +3223,8 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
 
 
 def _render_tasks_listing(tl: TaskList,
-                          notes: Optional[dict[int, str]] = None) -> str:
+                          notes: Optional[dict[int, str]] = None,
+                          project_label: Optional[str] = None) -> str:
     """Render the local task list for ``ck list`` (STDOUT output).
 
     Format (grep/cut-friendly, no editor involved):
@@ -3050,6 +3248,12 @@ def _render_tasks_listing(tl: TaskList,
     beneath its task — the same note styling ``ck st`` uses. The
     project ``ck list`` path passes no mapping, so its output is
     byte-for-byte unchanged.
+
+    ``project_label`` (optional) suffixes the FIRST section header
+    with the owning project name — ``## Current Sprint (alpha)`` —
+    so a listing resolved from OUTSIDE the project directory still
+    says which project it belongs to. Only the first header carries
+    the label; later sections would just repeat it.
     """
     if not tl.tasks:
         return "No tasks. Add one with `ck add <text>`."
@@ -3059,7 +3263,12 @@ def _render_tasks_listing(tl: TaskList,
     current_section = object()  # sentinel: "no section yet"
     for t in tl.tasks:
         if t.section and t.section != current_section:
-            lines.append(f"## {t.section}")
+            header = f"## {t.section}"
+            # ``lines`` is empty only while rendering the FIRST
+            # header, so the project label lands exactly once.
+            if project_label and not lines:
+                header = f"{header} ({project_label})"
+            lines.append(header)
             current_section = t.section
         marker = t.status.canonical_marker
         lines.append(f"[{marker}] {t.id}. {t.title}")
@@ -3468,9 +3677,11 @@ _SPACES_KEYS = ("space", "focus", "progress", "last")
 #
 # - Project: 25 chars (name + ` *` cwd marker; path line is a separate
 #   ``~/../parent/project`` contraction sharing the same column cap)
-# - Progress: 9 chars (hardcoded two-line form: ``100/100`` on line 1
-#   and ``(100.0%)`` on line 2 — 7 and 8 chars max, 9 is the safety
-#   pad)
+# - Progress: EXACTLY 9 chars, the same fixed width both tables use.
+#   The cell is the tight TWO-LINE form ``<done>/<total>`` on line 1
+#   and ``(<pct>%)`` on line 2 (7 and 8 chars max, 9 is the safety
+#   pad), so the SPACES and GLOBAL DASHBOARD grids are column-for-
+#   column identical.
 # - Last Active: 16 chars (the rare > 30-day absolute timestamp form
 #   ``2025-12-04 11:30``; common short forms like ``5m ago`` /
 #   ``yesterday`` come in at 6-9 chars naturally)
@@ -3482,7 +3693,6 @@ _SPACES_KEYS = ("space", "focus", "progress", "last")
 # Active keep their natural content width when it falls under the cap.
 _PROJECT_CAP = 25
 _PROGRESS_WIDTH = 9
-_PROGRESS_CAP = 16  # spaces single-line "<done>/<total> (<pct>%)" cell
 _LAST_WIDTH_CAP = 16
 _TABLE_BUDGET = 80
 _FOCUS_TEXT_CAP = 80  # soft cap; table-budget clamp is the real gate
@@ -3813,9 +4023,11 @@ def _render_space_manager_list(project_name: Optional[str],
                  _truncate_right(snap["focus_title"] or "",
                                  _FOCUS_TEXT_CAP))
                 if snap["focus_id"] is not None else ("n/a", "")),
-            "progress": (_truncate_right(
-                f"{snap['done']}/{snap['total']} ({snap['pct']}%)",
-                _PROGRESS_CAP),),
+            # TWO-LINE progress, exactly like the GLOBAL DASHBOARD
+            # table: ``<done>/<total>`` then ``(<pct>%)``, sized to
+            # the shared ``_PROGRESS_WIDTH`` so both grids agree.
+            "progress": (f"{snap['done']}/{snap['total']}",
+                         f"({snap['pct']}%)"),
             "last": (_relative_time(snap["last"])
                      if snap["last"] else "n/a",),
         })
@@ -3824,8 +4036,8 @@ def _render_space_manager_list(project_name: Optional[str],
         _SPACES_HEADERS,
         _SPACES_KEYS,
         rows,
-        caps={"space": _PROJECT_CAP, "progress": _PROGRESS_CAP,
-              "last": _LAST_WIDTH_CAP},
+        caps={"space": _PROJECT_CAP, "last": _LAST_WIDTH_CAP},
+        fixed_widths={"progress": _PROGRESS_WIDTH},
         fluid_key="focus",
         palette=p,
     )
@@ -3866,8 +4078,15 @@ def _render_spaces_table(
     space renders as a standard table row through the SAME
     :func:`_render_grid` pipeline as the Git projects table —
     ``Space`` (name + path), ``Focus Task`` (``[<id>] [>] …`` or
-    ``n/a``), ``Progress`` (``0/5 (0.0%)``) and ``Last Active``
-    (relative timestamp from the space file's mtime).
+    ``n/a``), ``Progress`` (two-line ``<done>/<total>`` + ``(<pct>%)``)
+    and ``Last Active`` (relative timestamp from the space file's
+    mtime).
+
+    Column-for-column PARITY with ``GLOBAL DASHBOARD``: every cell is
+    a two-line (name/path, id/title, done/total + pct) or one-line
+    (Last Active) form and the Progress column shares the same exact
+    ``_PROGRESS_WIDTH``, so the two tables can never disagree about
+    width or content.
 
     The built-in defaults (``LOCAL`` / ``REMOTE``) are always
     listed first; every space file DISCOVERED in
@@ -3892,9 +4111,11 @@ def _render_spaces_table(
                 snap["focus_title"] or "", _FOCUS_TEXT_CAP)
         else:
             focus_head, focus_text = "n/a", ""
-        progress = (_truncate_right(
-            f"{snap['done']}/{snap['total']} ({snap['pct']}%)",
-            _PROGRESS_CAP),)
+        # TWO-LINE progress, mirroring the GLOBAL DASHBOARD table
+        # exactly: ``<done>/<total>`` then ``(<pct>%)``, sized to the
+        # shared ``_PROGRESS_WIDTH``. Both grids therefore render
+        # column-for-column identically.
+        progress = (f"{snap['done']}/{snap['total']}", f"({snap['pct']}%)")
         last = (_relative_time(snap["last"])
                 if snap["last"] else "n/a",)
         rows.append({
@@ -3908,8 +4129,8 @@ def _render_spaces_table(
         _SPACES_HEADERS,
         _SPACES_KEYS,
         rows,
-        caps={"space": _PROJECT_CAP, "progress": _PROGRESS_CAP,
-              "last": _LAST_WIDTH_CAP},
+        caps={"space": _PROJECT_CAP, "last": _LAST_WIDTH_CAP},
+        fixed_widths={"progress": _PROGRESS_WIDTH},
         fluid_key="focus",
         palette=palette,
     )

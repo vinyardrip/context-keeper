@@ -242,16 +242,27 @@ class TestCliWithRootlessKeeper(_IsolatedGlobalConfig, unittest.TestCase):
             self.assertIn(_NO_ROOT_SNIPPET, out, f"{argv}: {out}")
             self.assertNotIn("Traceback", out)
 
-    def test_read_commands_fall_back_to_global_registry(self):
-        """Rootless reads resolve through the GLOBAL tier: st/list
-        render the most-recently-registered project instead of
+    def test_status_falls_back_to_global_registry(self):
+        """Rootless ``ck st`` resolves through the GLOBAL tier: it
+        renders the most-recently-registered project instead of
         crashing on the dead cwd (matches the documented hierarchy).
         """
-        for argv in (["st"], ["list"]):
-            code, out = self._run_dangling(argv)
-            self.assertEqual(code, 0, f"{argv}: exit {code}: {out}")
-            self.assertIn("t1", out)
-            self.assertNotIn("Traceback", out)
+        code, out = self._run_dangling(["st"])
+        self.assertEqual(code, 0, f"st: exit {code}: {out}")
+        self.assertIn("t1", out)
+        self.assertNotIn("Traceback", out)
+
+    def test_list_outside_project_shows_nested_notice(self):
+        """Rootless ``ck list`` must NOT silently adopt a global
+        project: the dead cwd owns nothing, so there is no nested
+        project to adopt and the command lists its choices instead.
+        Still a clean exit 0 — never a traceback.
+        """
+        code, out = self._run_dangling(["list"])
+        self.assertEqual(code, 0, f"list: exit {code}: {out}")
+        self.assertIn("not a context-keeper project", out)
+        self.assertIn("ck list <project_name>", out)
+        self.assertNotIn("Traceback", out)
 
 
 class TestDanglingCwdEndToEnd(unittest.TestCase):

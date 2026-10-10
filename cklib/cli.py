@@ -40,6 +40,12 @@ Local (current project):
                              -e: edit plan, -g: global dashboard)
   st --all                   Also print the full PLAN.md
   list                       Print task list to STDOUT
+  list <project_name>        Print the task list of a REGISTERED
+                             project from any directory; an unknown
+                             name exits 1. With no argument OUTSIDE
+                             every project, `ck list` never guesses:
+                             it names the single nested project in the
+                             header or lists the available ones
   init                       Initialize .ck/ locally (use --register to register globally)
   start <ID>                 Mark task ID as focused ([>]); 0 resets focus.
                              A noted task that loses focus moves to
@@ -262,7 +268,11 @@ def build_parser() -> "argparse.ArgumentParser":
     p_dash.add_argument("-v", "--verbose", dest="verbose", action="store_true",
                         help="Block view: full triad context per project")
 
-    sub.add_parser("list", help="Print the task list to STDOUT")
+    p_list = sub.add_parser(
+        "list", help="Print the task list to STDOUT")
+    p_list.add_argument(
+        "project_name", nargs="?", default=None,
+        help="Registered project to list (default: the current project)")
 
     p_start = sub.add_parser("start", help="Focus a task (0 resets focus)")
     p_start.add_argument(
@@ -779,7 +789,11 @@ def _dispatch(argv: Optional[List[str]] = None) -> int:
         elif args.command == "dashboard":
             print(ck.dashboard(verbose=getattr(args, "verbose", False)))
         elif args.command == "list":
-            print(ck.tasks())
+            out, rc = ck.list_tasks(getattr(args, "project_name", None))
+            if rc:
+                _print_error(out)
+                return rc
+            print(out)
         elif args.command == "info":
             print(ck.info())
         elif args.command == "space":
@@ -1127,7 +1141,17 @@ def _legacy_dispatch(raw: List[str]) -> int:
             verbose = "-v" in rest or "--verbose" in rest
             print(ck.dashboard(verbose=verbose))
         elif cmd == "list":
-            print(ck.tasks())
+            # Optional positional project name: `ck list <project_name>`
+            # targets a registered project from ANY directory. With no
+            # argument the core layer decides (inside a project ->
+            # normal listing; outside -> explicit nested-project
+            # discovery, never a silent arbitrary fallback).
+            name = rest[0] if rest else None
+            out, rc = ck.list_tasks(name)
+            if rc:
+                _print_error(out)
+                return rc
+            print(out)
         elif cmd == "info":
             print(ck.info())
         elif cmd == "start":
