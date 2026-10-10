@@ -171,12 +171,25 @@ class TestNameStyling(unittest.TestCase):
             with self.subTest(style=style):
                 self.assertNotEqual(style, ui.BOLD_MAGENTA)
 
-    def test_spaces_name_is_bold(self):
-        """Space names keep their own (plain bold) styling."""
+    def test_spaces_name_is_cyan(self):
+        """Space names are cyan — the palette's info/context color.
+
+        The spec puts spaces and the project in context under cyan
+        (``\\033[36m``); only PROJECT rows in ``GLOBAL DASHBOARD`` get
+        bold magenta.
+        """
         out = _render_spaces_table(palette=ui.Palette(True))
-        self.assertIn(f"{ui.BOLD}LOCAL{ui.RESET}", out)
-        self.assertIn(f"{ui.BOLD}REMOTE{ui.RESET}", out)
+        self.assertIn(f"{ui.CYAN}LOCAL{ui.RESET}", out)
+        self.assertIn(f"{ui.CYAN}REMOTE{ui.RESET}", out)
         self.assertNotIn(ui.BOLD_MAGENTA, out)
+
+    def test_space_names_in_space_list_are_cyan(self):
+        """``ck space list`` uses the same engine, so same colour."""
+        out = _render_space_manager_list(None, None,
+                                         palette=ui.Palette(True))
+        for name in ("LOCAL", "REMOTE"):
+            with self.subTest(name=name):
+                self.assertIn(f"{ui.CYAN}{name}{ui.RESET}", out)
 
     def test_active_project_row_stays_bold_cyan(self):
         out = _render_space_manager_list("myproj", "/w/myproj",

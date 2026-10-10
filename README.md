@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.8.7-blue)]()
+[![version](https://img.shields.io/badge/version-0.8.8-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -103,7 +103,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.8.7
+ck -v    # → ck version 0.8.8
 ```
 
 ---
@@ -534,10 +534,38 @@ the dashboard tables, so a notice looks identical wherever it appears. Because
 styling occupies zero terminal columns, coloring the full line never reflows the
 table above it.
 
-In the tables themselves, the first column of `GLOBAL DASHBOARD` renders project
-names in **bold magenta** (`\033[1;35m`) so they are never confused with the cyan
-`[i]` hints. Space names in `SPACES` stay bold, and the active project in
-`ck space list` stays bold cyan.
+Every message color comes from one table, so the palette cannot drift between a
+badge and a banner:
+
+| Role | Color | Used by |
+|---|---|---|
+| `warn` | bold yellow `\033[1;33m` | `[!]` badges, the `[!] SANDBOX MODE ACTIVE` banner, focus hints |
+| `info` | cyan `\033[36m` | `[i]` badges and hints |
+| `ok` | bold green `\033[1;32m` | `[ok]` badges, success confirmations |
+| `err` | bold red `\033[1;31m` | `[err]` badges, `ERROR:`, hard failures |
+| project | bold magenta `\033[1;35m` | project names in `GLOBAL DASHBOARD` |
+
+Each is emitted as a **single combined SGR run**, never as a split `1m` + `33m`
+pair — a split pair can leave the trailing text inheriting bold-but-uncolored
+state on some terminals.
+
+Project names use bold magenta precisely so they can never be mistaken for a cyan
+`[i]` hint. Space names in `SPACES` keep their own styling, and the active project
+in `ck space list` is accented without a literal `[PROJECT]` tag.
+
+The sandbox banner is drawn by the same framing primitive as every other banner:
+
+```text
+┌─────────────────────────────────────────────────────┐
+│ [!] SANDBOX MODE ACTIVE                             │
+│ Active binary: /home/user/.local/bin/ck             │
+│ Type 'exit' or press Ctrl+D to return to production │
+└─────────────────────────────────────────────────────┘
+```
+
+The frame is measured in terminal **columns** on the plain text and styled
+afterwards, so a long path widens the box instead of wrapping, and no escape
+sequence can ever shift a border.
 
 `NO_COLOR` is the only opt-out:
 

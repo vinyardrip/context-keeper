@@ -906,17 +906,7 @@ def render_sandbox_banner(*, color: Optional[bool] = None) -> str:
     DYNAMIC-WIDTH box: the inner width is computed from the longest
     content row (label, active-binary path, exit hint), so the border
     expands for long binary paths and contracts for short ones —
-    no wrapping, no broken borders:
-
-        ┌─────────────────────────────────────────────────────┐
-        │ [!] SANDBOX MODE ACTIVE                             │
-        │ Active binary: /home/user/.local/bin/ck             │
-        │ Type 'exit' or press Ctrl+D to return to production │
-        └─────────────────────────────────────────────────────┘
-
-    Padding is measured in DISPLAY COLUMNS (see
-    :func:`cklib.ui.display_width`) so every row and both borders
-    share one exact width regardless of the styled/unstyled mode.
+    no wrapping, no broken borders.
 
     The badge is plain ASCII (``[!]``, not an emoji) on purpose: a
     pictographic glyph has no fixed column count — it measures 1, 2 or
@@ -924,19 +914,18 @@ def render_sandbox_banner(*, color: Optional[bool] = None) -> str:
     broke grid alignment before. Fixed-width ASCII keeps the frame
     identical on every terminal and font.
 
-    With color enabled the whole box is painted bold yellow (the
-    universal warning treatment). ``color`` defaults to the standard
-    palette decision (:func:`cklib.ui.color_enabled`): ``NO_COLOR``
+    The box itself is built by :func:`cklib.ui.frame`, the single
+    framing primitive shared with every other banner: it measures in
+    DISPLAY COLUMNS (:func:`cklib.ui.display_width`) so the frame
+    cannot break, and it paints the finished lines in the shared "warn"
+    colour as ONE combined ``1;33`` run per line. ``color`` defaults
+    to the standard palette decision
+    (:func:`cklib.ui.color_enabled`): ``NO_COLOR``
     wins, ``FORCE_COLOR``/``CLICOLOR_FORCE`` force it on, otherwise
     the target stream must be a TTY — so piped/non-interactive output
     stays byte-identical plain text.
     """
-    # DISPLAY-WIDTH PADDING: the box frame must align in terminal
-    # COLUMNS, not code points. ``len()`` miscounts anything whose
-    # code-point count differs from its column count, which pushes
-    # the closing ``│`` off by a column. Measure and pad by display
-    # width so every row and both borders share one exact width.
-    from .ui import display_width, pad_to_width
+    from .ui import NOTICE_STYLES, color_enabled, frame
 
     binary = active_binary_path()
     binary_str = str(binary) if binary is not None else "ck (not found on PATH)"
@@ -945,27 +934,22 @@ def render_sandbox_banner(*, color: Optional[bool] = None) -> str:
         f"{_BANNER_BINARY_LABEL} {binary_str}",
         _BANNER_HINT,
     )
-    pad = max(display_width(row) for row in rows)
-    inner = pad + 2  # content rows add '│ ' + ' │' (4); borders add 2
-    lines = (
-        f"┌{'─' * inner}┐",
-        *(f"│ {pad_to_width(row, pad)} │" for row in rows),
-        f"└{'─' * inner}┘",
-    )
     if color is None:
         try:
-            from .ui import color_enabled
             color = color_enabled()
         except Exception:
             color = False
-    if color:
-        try:
-            from .ui import Palette
-            palette = Palette(True)
-            return "\n".join(palette.bold_yellow(l) for l in lines)
-        except Exception:
-            pass
-    return "\n".join(lines)
+    # ``frame`` is the ONE box-drawing primitive in the codebase: it
+    # lays the frame out on plain text (so no escape can influence a
+    # measurement), then paints each finished line as a single combined
+    # warning-coloured SGR run. The banner is a warning, so it takes
+    # the shared "warn" style rather than a local copy of the colour.
+    try:
+        from .ui import Palette
+        return frame(rows, style=NOTICE_STYLES["warn"],
+                     palette=Palette(bool(color)))
+    except Exception:
+        return frame(rows, style=NOTICE_STYLES["warn"])
 
 
 def print_sandbox_banner(file=None) -> None:

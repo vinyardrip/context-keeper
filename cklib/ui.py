@@ -56,7 +56,7 @@ import os
 import re
 import sys
 import unicodedata
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 # ---------------------------------------------------------------------------
 # ANSI SGR codes (Select Graphic Rendition)
@@ -376,25 +376,43 @@ def strip_ansi(text: str) -> str:
 # Status badges ([!] / [i] / [ok] / [err])
 # ---------------------------------------------------------------------------
 
+# THE semantic color table for the whole CLI — the single source of
+# truth for what each KIND of message looks like. Every notice, badge,
+# banner and accent resolves its SGR from here, so "what color is a
+# warning?" has exactly one answer in the codebase:
+#
+#   warn   bold yellow  — [!] badges, the sandbox banner, focus hints
+#   info   cyan         — [i] badges, hints, spaces / the project in
+#                         context
+#   ok     bold green   — [ok] badges, success confirmations
+#   err    bold red     — [err] badges, hard failures
+#
+# Each value is ONE COMBINED SGR run (``1;33``, not ``1m`` + ``33m``).
+# A split pair would leave a window in which the trailing text could
+# inherit bold-but-uncolored state on terminals that re-scope per run —
+# the exact failure this table exists to prevent.
+NOTICE_STYLES: dict[str, str] = {
+    "warn": BOLD_YELLOW,
+    "info": CYAN,
+    "ok": BOLD_GREEN,
+    "err": BOLD_RED,
+}
+
 # Badge token text -> the combined SGR sequence that paints it.
 #
 # Every CLI notice opens with exactly one of these four badges, so a
 # user can scan a wall of output by COLOR ALONE without reading the
-# bracket text:
-#
-#   [!]   bold yellow — warnings / notices that need attention
-#   [i]   cyan        — information, hints, guidance
-#   [ok]  bold green  — success confirmations
-#   [err] bold red    — errors / failed operations
+# bracket text. Derived from :data:`NOTICE_STYLES` so a badge can never
+# drift from the color its semantic role is defined with.
 #
 # NONE of these are configurable: a badge's color is part of its
 # identity, so ``[err]`` is never rendered in the user's "muted"
 # slot color and can never be mistaken for a hint.
 BADGE_STYLES: dict[str, str] = {
-    "[!]": BOLD_YELLOW,
-    "[i]": CYAN,
-    "[ok]": BOLD_GREEN,
-    "[err]": BOLD_RED,
+    "[!]": NOTICE_STYLES["warn"],
+    "[i]": NOTICE_STYLES["info"],
+    "[ok]": NOTICE_STYLES["ok"],
+    "[err]": NOTICE_STYLES["err"],
 }
 
 # Convenience aliases for the four badge kinds.
@@ -465,6 +483,53 @@ def notice(token: str, message: str = "",
     if style is None or not p.enabled:
         return body
     return f"{style}{body}{RESET}"
+
+
+def frame(rows: Sequence[str], *, style: str = BOLD_YELLOW,
+          palette: Optional[Palette] = None) -> str:
+    """Draw a boxed, full-line-highlighted block around ``rows``.
+
+    The single framing primitive for BANNERS anywhere in the CLI (the
+    sandbox warning, the dev-mode header). It replaces the ad-hoc box
+    drawing that used to live in :mod:`cklib.sandbox`, so every framed
+    block is built and measured the same way.
+
+    DYNAMIC-WIDTH box: the frame is computed from the widest CONTENT
+    row, so a long path widens the box and a short one narrows it —
+    content is never wrapped and a border is never broken::
+
+        ┌─────────────────────────────────────────────────────┐
+        │ [!] SANDBOX MODE ACTIVE                             │
+        │ Active binary: /home/user/.local/bin/ck             │
+        │ Type 'exit' or press Ctrl+D to return to production │
+        └─────────────────────────────────────────────────────┘
+
+    Padding is measured in DISPLAY COLUMNS (:func:`display_width`),
+    never code points — ``len()`` miscounts wide glyphs and would push
+    the closing ``│`` off by a column.
+
+    Zero layout shift, twice over:
+
+    * the frame is laid out on the PLAIN text, and
+    * ``style`` is applied afterwards to the finished lines,
+
+    so the escapes can never influence a measurement. ``style`` is
+    applied as ONE combined SGR run per line, and each line is closed
+    by its own RESET — so a framed block can never leak colour into
+    whatever is printed after it.
+    """
+    p = palette if palette is not None else get_palette()
+    plain = [str(r) for r in rows]
+    pad = max((display_width(r) for r in plain), default=0)
+    inner = pad + 2  # content rows add '│ ' + ' │' (4); borders add 2
+    lines = [
+        f"┌{'─' * inner}┐",
+        *(f"│ {pad_to_width(r, pad)} │" for r in plain),
+        f"└{'─' * inner}┘",
+    ]
+    if not p.enabled:
+        return "\n".join(lines)
+    return "\n".join(p.paint(line, style) for line in lines)
 
 
 # ---------------------------------------------------------------------------
@@ -638,7 +703,9 @@ __all__ = [
     "pad_to_width",
     "take_columns",
     "fit_columns",
+    "NOTICE_STYLES",
     "BADGE_STYLES",
+    "frame",
     "WARN",
     "INFO",
     "OK",
