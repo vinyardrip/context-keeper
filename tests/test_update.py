@@ -850,7 +850,7 @@ class TestInstallShStreamDownload(_InstallShHarness):
             env=self._env(), cwd=str(self.base),
         )
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertIn("ck version 0.7.3", run.stdout)
+        self.assertIn("ck version 0.7.4", run.stdout)
 
     def test_reinstall_is_idempotent_and_preserves_ck_runtime_data(self):
         first = self._run()

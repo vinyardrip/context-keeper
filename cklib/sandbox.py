@@ -606,7 +606,7 @@ def resolved_global_binary_path(env: Optional[dict] = None) -> Path:
 # BOX WIDTH is dynamic too: computed from the longest content row,
 # so long binary paths widen the box and short ones narrow it —
 # never wrapping text or breaking the borders.
-_BANNER_LABEL = "⚠️  SANDBOX MODE ACTIVE"
+_BANNER_LABEL = "[!] SANDBOX MODE ACTIVE"
 _BANNER_HINT = "Type 'exit' or press Ctrl+D to return to production"
 _BANNER_BINARY_LABEL = "Active binary:"
 
@@ -651,7 +651,7 @@ def print_nesting_guard(file=None) -> None:
     just the warning and the current cross-project view.
     """
     out = file or sys.stdout
-    print("⚠️  Already in sandbox mode", file=out)
+    print("[!] Already in sandbox mode", file=out)
     print("[i] No nested session started. Type 'exit' to return to "
           "production.", file=out)
     print(file=out)
@@ -905,16 +905,21 @@ def render_sandbox_banner(*, color: Optional[bool] = None) -> str:
     expands for long binary paths and contracts for short ones —
     no wrapping, no broken borders:
 
-        ┌──────────────────────────────────────────────────────────┐
-        │ ⚠️  SANDBOX MODE ACTIVE                                  │
-        │ Active binary: /home/user/.local/bin/ck                  │
-        │ Type 'exit' or press Ctrl+D to return to production      │
-        └──────────────────────────────────────────────────────────┘
+        ┌─────────────────────────────────────────────────────┐
+        │ [!] SANDBOX MODE ACTIVE                             │
+        │ Active binary: /home/user/.local/bin/ck             │
+        │ Type 'exit' or press Ctrl+D to return to production │
+        └─────────────────────────────────────────────────────┘
 
     Padding is measured in DISPLAY COLUMNS (see
-    :func:`cklib.ui.display_width`) so wide Unicode — including the
-    double-width warning emoji — cannot push the closing ``│`` out
-    of alignment: every row and both borders share one exact width.
+    :func:`cklib.ui.display_width`) so every row and both borders
+    share one exact width regardless of the styled/unstyled mode.
+
+    The badge is plain ASCII (``[!]``, not an emoji) on purpose: a
+    pictographic glyph has no fixed column count — it measures 1, 2 or
+    3 columns depending on font and terminal — which is exactly what
+    broke grid alignment before. Fixed-width ASCII keeps the frame
+    identical on every terminal and font.
 
     With color enabled the whole box is painted bold yellow (the
     universal warning treatment). ``color`` defaults to the standard
@@ -924,9 +929,8 @@ def render_sandbox_banner(*, color: Optional[bool] = None) -> str:
     stays byte-identical plain text.
     """
     # DISPLAY-WIDTH PADDING: the box frame must align in terminal
-    # COLUMNS, not code points. ``len()`` under/over-counts wide
-    # Unicode (the double-width warning emoji is two columns across
-    # but its selector sequence is counted differently), which pushes
+    # COLUMNS, not code points. ``len()`` miscounts anything whose
+    # code-point count differs from its column count, which pushes
     # the closing ``│`` off by a column. Measure and pad by display
     # width so every row and both borders share one exact width.
     from .ui import display_width, pad_to_width
@@ -1163,7 +1167,7 @@ def emit_interceptor_banner_if_needed(
         print_sandbox_banner(file=file)
     else:
         print(
-            "⚠️  CK_SANDBOX is active, but no sandbox session is set up "
+            "[!] CK_SANDBOX is active, but no sandbox session is set up "
             "(no active project).\n"
             "   Run `ck-dev` to enter sandbox mode, or unset CK_SANDBOX "
             "to leave dev mode.",
