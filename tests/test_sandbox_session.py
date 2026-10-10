@@ -34,6 +34,7 @@ from unittest import mock
 from cklib import config as ckconfig
 from cklib import registry as ckregistry
 from cklib import sandbox as cksandbox
+from cklib import ui
 from cklib.cli import main
 from cklib.sandbox import (
     SANDBOX_ACTIVE_ENV,
@@ -196,12 +197,34 @@ class TestBannerRendering(unittest.TestCase):
 
     def test_color_is_bold_yellow(self):
         out = render_sandbox_banner(color=True)
-        # Every row is painted bold (\033[1m) + yellow (\033[33m) with
-        # a reset (the palette emits codes as separate SGR sequences).
-        self.assertEqual(out.count("\033[1m"), 5)
-        self.assertEqual(out.count("\033[33m"), 5)
+        # Every row is painted bold yellow as ONE combined ``1;33``
+        # SGR run, closed by its own reset. A split ``1m`` + ``33m``
+        # pair would leave a window where trailing text could inherit
+        # bold-but-uncolored state, so the combined form is required.
+        self.assertEqual(out.count("\033[1;33m"), 5)
         self.assertEqual(out.count("\033[0m"), 5)
+        self.assertNotIn("\033[1m", out)
+        self.assertNotIn("\033[33m", out.replace("\033[1;33m", ""))
         self.assertIn("[!] SANDBOX MODE ACTIVE", out)
+
+    def test_banner_color_is_the_shared_warn_style(self):
+        """The banner takes the CLI-wide warning colour, not a local
+        copy of it — one semantic table drives badges AND banners."""
+        out = render_sandbox_banner(color=True)
+        style = ui.NOTICE_STYLES["warn"]
+        for line in out.splitlines():
+            with self.subTest(line=line):
+                self.assertTrue(line.startswith(style), line)
+                self.assertTrue(line.endswith(ui.RESET), line)
+
+    def test_banner_framing_survives_a_wide_binary_path(self):
+        """A long CJK/emoji-heavy path must not break the frame."""
+        with mock.patch("cklib.sandbox.active_binary_path",
+                        return_value=Path("/日本/" + "語" * 40)):
+            out = render_sandbox_banner(color=False)
+        lines = out.splitlines()
+        widths = {ui.display_width(l) for l in lines}
+        self.assertEqual(len(widths), 1, f"ragged banner: {out!r}")
 
     def test_default_respects_no_color_env(self):
         # conftest pins NO_COLOR=1 for the whole session; the default

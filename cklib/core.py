@@ -4013,13 +4013,42 @@ def _project_display_name(entry) -> str:
     return "(unnamed)"
 
 
-# Name-column paint per grid. The GLOBAL DASHBOARD uses bold magenta
-# for project names; the SPACES table keeps plain bold for space names.
-# Both are deliberately distinct from every notice badge colour (see
-# :data:`cklib.ui.BOLD_MAGENTA`) so a row title never reads as a
-# status line.
+# Name-column paint per grid. Three roles, three colours, ONE
+# mechanism — all applied through :func:`_grid_row` so every table gets
+# the same after-truncation, zero-width paint:
+#
+#   projects in GLOBAL DASHBOARD  -> bold magenta (spec: never collide
+#                                    with the cyan [i] badge)
+#   spaces  in SPACES / contexts  -> cyan (spec: "spaces and the
+#                                    project in context" are info)
+#   default                        -> plain bold
+#
+# :data:`cklib.ui.NOTICE_STYLES` holds the notice colours; these are
+# the ROW colours, kept adjacent to their call site because they are
+# layout, not messaging.
 _NAME_STYLE_BOLD = "bold"
 _NAME_STYLE_MAGENTA = "magenta"
+_NAME_STYLE_CYAN = "cyan"
+
+# One dispatch table for the row-name paint. Collapsing the choices
+# here keeps :func:`_grid_row` free of style-specific conditionals, so
+# a new table's colour is a one-line entry rather than another branch
+# threaded through the renderer.
+_NAME_PAINTERS = {
+    _NAME_STYLE_BOLD: lambda p, s: p.bold(s),
+    _NAME_STYLE_MAGENTA: lambda p, s: p.bold_magenta(s),
+    _NAME_STYLE_CYAN: lambda p, s: p.cyan(s),
+}
+
+
+def _paint_name(text: str, style: str, palette) -> str:
+    """Paint an already-truncated name cell, in ONE method lookup.
+
+    Paint is applied AFTER truncation and occupies ZERO columns, so
+    the choice of colour can never move a border.
+    """
+    return _NAME_PAINTERS.get(style, _NAME_PAINTERS[_NAME_STYLE_BOLD])(
+        palette, text)
 
 
 def _grid_row(name: str, path: str, focus_head: str, focus_text: str,
@@ -4037,9 +4066,10 @@ def _grid_row(name: str, path: str, focus_head: str, focus_text: str,
 
     VISUAL HIERARCHY (both grids): the NAME line is the row's primary
     identifier, so it is painted emphatically and the path line below
-    it stays in the plain native color. ``name_style`` picks the paint —
-    :data:`_NAME_STYLE_MAGENTA` (projects) or :data:`_NAME_STYLE_BOLD`
-    (spaces). Paint is applied AFTER truncation and carries ZERO
+    it stays in the plain native color. ``name_style`` picks the paint
+    from :data:`_NAME_PAINTERS` — magenta for projects in
+    ``GLOBAL DASHBOARD``, cyan for spaces in the contexts table, bold
+    as the default. Paint is applied AFTER truncation and carries ZERO
     columns (:func:`cklib.ui.display_width` strips SGR), so styling can
     never shift a border. ``accent_name=False`` renders the name
     unstyled; ``palette=None`` also leaves it unstyled.
@@ -4047,9 +4077,7 @@ def _grid_row(name: str, path: str, focus_head: str, focus_text: str,
     name_line = _truncate_ellipsis(name, _PROJECT_CAP)
     path_line = _smart_path(path, _PROJECT_CAP)
     if accent_name and palette is not None:
-        name_line = (palette.bold_magenta(name_line)
-                     if name_style == _NAME_STYLE_MAGENTA
-                     else palette.bold(name_line))
+        name_line = _paint_name(name_line, name_style, palette)
     return {
         "name": (name_line, path_line),
         "focus": (focus_head, _truncate_right(focus_text, _FOCUS_TEXT_CAP)),
@@ -4432,7 +4460,7 @@ def _render_space_manager_list(project_name: Optional[str],
             snap["name"], snap["path"], focus_head, focus_text,
             _progress_cell(snap["done"], snap["total"], snap["pct"]),
             last,
-            palette=p))
+            palette=p, name_style=_NAME_STYLE_CYAN))
     out = _render_standard_grid(
         "SPACES (GLOBAL CONTEXTS)",
         _SPACES_FIRST_HEADER,
@@ -4508,7 +4536,8 @@ def _render_spaces_table(
             snap["name"], snap["path"], focus_head, focus_text,
             _progress_cell(snap["done"], snap["total"], snap["pct"]),
             last,
-            palette=palette if palette is not None else _chrome_palette()))
+            palette=palette if palette is not None else _chrome_palette(),
+            name_style=_NAME_STYLE_CYAN))
     # Literally the SAME engine and the SAME width policy as
     # ``GLOBAL DASHBOARD`` — see :func:`_render_standard_grid`.
     return _render_standard_grid(
