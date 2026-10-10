@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.8.9-blue)]()
+[![version](https://img.shields.io/badge/version-0.8.10-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -103,7 +103,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.8.9
+ck -v    # → ck version 0.8.10
 ```
 
 ---
@@ -132,7 +132,7 @@ ck -v    # → ck version 0.8.9
 | ck add \<text\> | Add a new open task (inserted before `## Completed`). On a freshly initialized plan holding only the untouched `ck init` seed task (`Describe the first task` / `Описать первую задачу`), the seed is replaced in place instead of appending a second entry |
 | ck move \<ID\> \<pos\|top\|bottom\> | Move a PENDING/ACTIVE task (`[ ]` / `[>]`) to a 1-based position among the active tasks, or to the first/last slot. The other active tasks shift to close the gap; titles, status markers and the focus are left untouched |
 | ck swap \<ID1\> \<ID2\> | Exchange the positions of two active tasks |
-| ck reorder \<ID1\> \<ID2\> ... | Set the relative order of the active tasks. Listed IDs move ahead of the unlisted ones, which keep their relative order — so `ck reorder 3 1` simply means "3 before 1" |
+| ck reorder \<ID1\> \<ID2\> ... | Set the relative order of the active tasks. Listed IDs move ahead of the unlisted ones, which keep their relative order — so `ck reorder 3 1` simply means "3 before 1". The confirmation is multi-line (applied IDs, then the resulting order with their post-reorder positions) and is followed by the auto-rendered sprint view — the exact `ck list` output for that project |
 | _(reordering a completed task)_ | **Refused.** A completed (`[x]`) task is history and is never reordered: the entire operation aborts with exit code 1 and `[err] Cannot move completed task #<id>. Only pending/active tasks can be reordered.` |
 | ck start \<ID\> | Focus a task (`- [>]`); `ck start 0` resets focus. A noted task that loses focus moves to Unfocused / Paused Context (note preserved until `ck done` archives it); a noteless one gets a soft attach-a-note hint |
 | ck done \<ID\|range\|list\> | Mark task(s) done (`- [x]`), e.g. `3`, `2-4`, `1,3,5`. Bare `ck done` completes the CURRENT FOCUS (usage error without one); the completed task's process note is archived into HISTORY.md and cleared |
@@ -372,8 +372,27 @@ which keep their relative order — so you never have to retype the entire list:
 
 ```text
 $ ck reorder 2 1
-[ok] Reordered active tasks.
+[ok] Reordered active tasks: 2, 1
+     New order:
+       1. write the migration
+       2. review the PR
+       3. ship the release
+
+## Current Sprint
+[ ] 1. write the migration
+[ ] 2. review the PR
+[>] 3. ship the release
 ```
+
+The confirmation is deliberately multi-line: the first line echoes the IDs you
+applied, the indented block underneath is the order now stored in `PLAN.md`.
+IDs are **positional**, so they are re-numbered after the move — the summary
+shows the IDs as they exist *after* the reorder.
+
+Because the file just changed, `ck reorder` immediately re-renders the sprint
+view (byte-for-byte the `ck list` output for that project) so you see the result
+without running a second command. `ck move` and `ck swap` keep their
+single-line confirmation and do **not** auto-render.
 
 ### Completed tasks are never reordered
 
@@ -1067,19 +1086,46 @@ ERROR: Project 'nope' not found.
 изменяются; маркер фокуса перемещается вместе со своей задачей.
 
 ```text
+$ ck list
+## Current Sprint
+[ ] 1. write the migration
+[ ] 2. review the PR
+[>] 3. ship the release
+
 $ ck move 3 1
 [ok] Moved task #3 -> position 1
+
+$ ck move 1 bottom
+[ok] Moved task #1 -> position 3
 
 $ ck swap 1 2
 [ok] Swapped task #1 <-> task #2
 
 $ ck reorder 2 1
-[ok] Reordered active tasks.
+[ok] Reordered active tasks: 2, 1
+     New order:
+       1. write the migration
+       2. review the PR
+       3. ship the release
+
+## Current Sprint
+[ ] 1. write the migration
+[ ] 2. review the PR
+[>] 3. ship the release
 ```
 
 Идентификаторы задач **позиционные** (нумеруются 1..N в порядке документа), поэтому
 после перестановки номер рядом с задачей меняется. Команда `ck move 1 bottom`
 переносит задачу на последнюю активную позицию.
+
+Подтверждение `ck reorder` намеренно многострочное: первая строка перечисляет
+применённые ID, отступленный блок под ней — порядок, который теперь записан в
+`PLAN.md`. ID позиционные, поэтому после перестановки они перенумеровываются,
+и в сводке показываются ID **после** применения команды. Так как файл только что
+изменился, `ck reorder` сразу же отрисовывает представление спринта (то же самое,
+что выводит `ck list` для этого проекта) — второй командой запускать ничего не
+нужно. Одиночные `ck move` и `ck swap` оставляют однострочное подтверждение и
+спринт автоматически **не** показывают.
 
 ### Завершённые задачи переставлять нельзя
 

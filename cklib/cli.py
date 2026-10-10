@@ -71,7 +71,11 @@ Local (current project):
   swap <ID1> <ID2>           Exchange the positions of two active tasks
   reorder <ID1> <ID2> ...    Set the relative order of active tasks;
                              listed IDs move ahead of unlisted ones,
-                             which keep their relative order
+                             which keep their relative order. Prints
+                             a multi-line summary of the applied
+                             change, then the refreshed sprint view
+                             (the `ck list` equivalent); `move` /
+                             `swap` stay single-line
   add <text>                 Insert a new open task before ## Completed
   note <text>                Attach/update a process note on the active task
                              (shown in `ck st`, cleared by `ck done`)
@@ -335,7 +339,8 @@ def build_parser() -> "argparse.ArgumentParser":
         help="Exchange the positions of two pending/active tasks")
     sub.add_parser(
         "reorder",
-        help="Set the relative order of pending/active tasks")
+        help="Set the relative order of pending/active tasks; prints "
+             "the new order plus the refreshed sprint view")
 
     p_note = sub.add_parser(
         "note", help="Attach a process note to the active task")
@@ -1017,6 +1022,29 @@ _REORDER_USAGE = {
 }
 
 
+def _render_sprint_after_reorder(ck) -> None:
+    """Print the target project's sprint view after ``ck reorder``.
+
+    A reorder changes what the user sees, so the fresh ``ck list``
+    rendering follows the confirmation immediately instead of making
+    them run a second command (v0.8.10). ONLY the multi-id ``reorder``
+    does this — the single-task ``move`` / ``swap`` keep their
+    one-line confirmation.
+
+    Rendering is best-effort: the reorder is already committed, so a
+    view failure can never turn a successful command into a failing
+    one (the sprint view is skipped, exit code stays 0).
+    """
+    try:
+        out, rc = ck.list_tasks()
+    except Exception:
+        return
+    if rc or not out:
+        return
+    print()
+    print(out)
+
+
 def _run_reorder(ck, action: str, tokens: List[str]) -> int:
     """Run ``move`` / ``swap`` / ``reorder`` and translate domain errors.
 
@@ -1029,6 +1057,10 @@ def _run_reorder(ck, action: str, tokens: List[str]) -> int:
       ``Cannot move completed task #N. Only pending/active tasks can
       be reordered.`` refusal;
     - success          → exit 0 and a styled ``[ok]`` confirmation.
+
+    ``reorder`` alone (never ``move`` / ``swap``) then re-renders the
+    project's sprint view, and its confirmation is the multi-line
+    summary produced by :meth:`ContextKeeper.reorder_tasks`.
 
     Returns the exit code (0 = success).
     """
@@ -1070,6 +1102,12 @@ def _run_reorder(ck, action: str, tokens: List[str]) -> int:
         _print_error(f"ERROR: {e}\n   Usage: {usage}")
         return 2
     _notice(ui.OK, message)
+    if action == "reorder":
+        # v0.8.10: a successful reorder immediately shows the fresh
+        # sprint view (the `ck list` equivalent) for the target
+        # project. Deliberately NOT done for single-task `move` /
+        # `swap`, whose confirmation stays a single line.
+        _render_sprint_after_reorder(ck)
     return 0
 
 
