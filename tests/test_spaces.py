@@ -379,6 +379,57 @@ class TestSpacesCli(_IsolatedHome):
 # --------------------------------------------------------------------------- #
 
 
+def _grid_row_cells(rendered: str, label: str) -> list[str]:
+    """The vertical lines of the grid row whose first cell is ``label``.
+
+    A grid row is a run of consecutive ``│``-prefixed lines (the
+    multi-line cell form), so the Progress cell is read from the SAME
+    row rather than from a loose substring match — that is what makes
+    the two-line layout assertable at all.
+    """
+    lines = rendered.splitlines()
+    block: list[str] = []
+    collecting = False
+    for line in lines:
+        if not line.startswith("│"):
+            if collecting:
+                break
+            continue
+        first = line.split("│")[1].strip()
+        if not collecting:
+            if first == label:
+                collecting = True
+                block.append(line)
+        else:
+            block.append(line)
+    if not block:
+        raise AssertionError(
+            f"no grid row with first cell {label!r} in:\n{rendered}")
+    cells_per_line = [len(l.split("│")) for l in block]
+    if len(set(cells_per_line)) != 1:
+        raise AssertionError(f"ragged grid row {block!r}")
+    return [
+        [l.split("│")[i].strip() for i in range(1, cells_per_line[0] - 1)]
+        for l in block
+    ]
+
+
+def _assert_two_line_progress(case, rendered: str, label: str,
+                              done: str, pct: str) -> None:
+    """Progress renders as ``<done>/<total>`` + ``(<pct>%)`` on line 2.
+
+    This is the SPACES/GLOBAL DASHBOARD parity contract: the ratio
+    and the percentage occupy two SEPARATE lines of the same grid row,
+    never one combined single-line cell.
+    """
+    cells = _grid_row_cells(rendered, label)
+    case.assertEqual(len(cells), 2, f"expected a 2-line row: {cells}")
+    case.assertTrue(cells[0][2].startswith(done),
+                    f"line 1 progress cell: {cells[0][2]!r}")
+    case.assertEqual(cells[1][2], pct,
+                     f"line 2 progress cell: {cells[1][2]!r}")
+
+
 class TestSpacesTable(_IsolatedHome):
     """LOCAL / REMOTE render through the shared table pipeline."""
 
@@ -415,8 +466,9 @@ class TestSpacesTable(_IsolatedHome):
         # Focus cell: [<id>] [>] head plus the focused task title.
         self.assertIn("[1] [>]", out)
         self.assertIn("install drivers", out)
-        # Progress cell: single-line "<done>/<total> (<pct>%)".
-        self.assertRegex(out, r"0/2 \(0\.0%\)")
+        # Progress cell: the TWO-LINE form "<done>/<total>" then
+        # "(<pct>%)" — identical to the GLOBAL DASHBOARD table.
+        _assert_two_line_progress(self, out, "LOCAL", "0/2", "(0.0%)")
         # Space cell carries name + path (contracted like projects).
         self.assertIn("spaces/local.md", out)
         # The unformatted task list is NOT dumped any more.
@@ -778,7 +830,7 @@ class TestSpaceCommandRouting(_IsolatedHome):
         out = ContextKeeper(root=Path(tempfile.gettempdir())).dashboard()
 
         self.assertIn("LOCAL", out)
-        self.assertIn("1/2 (50.0%)", out)
+        _assert_two_line_progress(self, out, "LOCAL", "1/2", "(50.0%)")
 
     def test_local_focus_reflected_in_dashboard(self):
         self._seed("local", "first task", "second task")
@@ -801,7 +853,7 @@ class TestSpaceCommandRouting(_IsolatedHome):
         self.assertIn("LOCAL", out)
         self.assertIn("[2] [>]", out)
         self.assertIn("second task", out)
-        self.assertIn("1/2 (50.0%)", out)
+        _assert_two_line_progress(self, out, "LOCAL", "1/2", "(50.0%)")
 
     def test_remote_actions_reflected_in_dashboard(self):
         self._seed("remote", "provision VPS", "open firewall")
@@ -813,7 +865,7 @@ class TestSpaceCommandRouting(_IsolatedHome):
         self.assertIn("REMOTE", out)
         self.assertIn("[1] [>]", out)
         self.assertIn("provision VPS", out)
-        self.assertIn("1/2 (50.0%)", out)
+        _assert_two_line_progress(self, out, "REMOTE", "1/2", "(50.0%)")
 
     def test_local_and_remote_state_stay_isolated(self):
         self._seed("local", "local task")
@@ -2038,8 +2090,9 @@ class TestDynamicSpaceDiscovery(_IsolatedHome):
         code, listing = self._run(["space", "list"])
         self.assertEqual(code, 0, listing)
         self.assertIn("TEST-CUSTOM", listing)
-        # Brand new and empty: 0/0, not skipped.
-        self.assertIn("0/0 (0.0%)", listing)
+        # Brand new and empty: 0/0, not skipped (two-line progress).
+        _assert_two_line_progress(self, listing, "TEST-CUSTOM", "0/0",
+                                  "(0.0%)")
 
     def test_created_space_appears_in_compact_dashboard(self):
         self._run(["space", "create", "test-custom"])
@@ -2220,7 +2273,7 @@ class TestSpaceManagement(_IsolatedHome):
         self.assertIn("SPACES (GLOBAL CONTEXTS)", out)
         self.assertIn("LOCAL", out)
         self.assertIn("REMOTE", out)
-        self.assertIn("0/1 (0.0%)", out)
+        _assert_two_line_progress(self, out, "LOCAL", "0/1", "(0.0%)")
         # Same four columns as the dashboard spaces table.
         header = [l for l in out.splitlines() if l.startswith("│ Space")]
         self.assertEqual(len(header), 1, out)

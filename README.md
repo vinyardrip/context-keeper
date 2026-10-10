@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.7.4-blue)]()
+[![version](https://img.shields.io/badge/version-0.7.5-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -103,7 +103,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.7.4
+ck -v    # → ck version 0.7.5
 ```
 
 ---
@@ -139,14 +139,14 @@ ck -v    # → ck version 0.7.4
 | ck log --all | View the full history: every rotation archive (`.md.gz` decompressed / legacy `.md.bak`, oldest first) concatenated with the current HISTORY.md |
 | ck st | Status overview (tri-state: Previous / Focus / Next); an explicit focus is duplicated at the top as `-> CURRENT FOCUS: [#<id>] <title>` (with its note). WORK CONTEXT shows `<< Done`, a conditional `[!] Skipped` (only on a real execution gap), `[>] Focus` / `Next`, `>> Upcoming`, and a highlighted bottom banner `>> Backlog: N task(s) remaining` |
 | ck notes | List all active process notes: `[>] Active Focus:` plus `[!] Unfocused / Paused Context:` with each paused task's bound note (`[i] No active process notes found.` when none) |
-| ck st -l / --list | Print the task list to STDOUT (same as `ck list`) |
+| ck st -l / --list | Print the task list to STDOUT. Inside a project this is identical to `ck list`; outside one it follows the `ck st` hierarchy (global-registry fallback), whereas `ck list` deliberately never guesses — see [ck list Outside a Project](#ck-list-outside-a-project) |
 | ck st -e / --edit | Open PLAN.md in your editor (same as `ck edit`) |
 | ck st -g / --global | Cross-project dashboard (same as `ck dashboard`) |
 | ck st --all | Full status incl. full PLAN.md |
 | ck -l / --list | Top-level shorthand for `ck st -l` (list tasks) |
 | ck -e / --edit | Top-level shorthand for `ck st -e` (edit plan) |
 | ck -g / --global | Top-level shorthand for `ck st -g` (global dashboard) |
-| ck list | Print the task list to STDOUT (pipe-friendly) |
+| ck list | Print the task list to STDOUT (pipe-friendly). Accepts an optional project name: `ck list <project_name>` lists that REGISTERED project from any directory (an unknown name exits 1 with `ERROR: Project '<name>' not found.`). With no argument outside every project it never guesses — one nested project is listed with its name in the header (`## Current Sprint (alpha)`), several (or none) produce the list of available nested projects plus the `ck list <project_name>` hint |
 | ck dashboard | Cross-project dashboard (compact table: Project \| Focus Task \| Progress \| Last Active) |
 | ck dashboard -v / --verbose | Detailed view: one card per project **and** per space, framed by thin `─` dividers (no side rails, so long titles never wrap), each carrying the progress line and the full `<< PREV` / `[>] FOCUS` / `>> NEXT` triad plus its process notes |
 | ck register [-n NAME] [--path PATH] | Add a project to the global registry |
@@ -185,7 +185,11 @@ The `ck dashboard` / `ck -g` output always opens with a unified
 `SPACES (GLOBAL CONTEXTS)` table (`Space | Focus Task | Progress | Last
 Active`) covering the `local` and `remote` spaces plus every custom
 space file discovered in `~/.config/ck/spaces/`, rendered above the
-Git projects table through the same table formatter. With
+Git projects table through the same table formatter. Its cell layout is
+column-for-column identical to the `GLOBAL DASHBOARD` grid below it:
+every row is two lines (`Space` name + contracted path, `[N] [>]` +
+task title, `<done>/<total>` + `(<pct>%)`), and the `Progress` column
+carries the same fixed width. With
 `ck dashboard -v` every space additionally gets its own bordered card
 (`MY SPACES`) with the progress line and the full `<< PREV` / `[>] FOCUS`
 / `>> NEXT` context triad plus its process notes — the same verbose
@@ -230,6 +234,43 @@ project directory has been deleted or moved. Such entries are labeled
 Run `ck prune` to remove those orphaned entries from
 `~/.config/ck/projects.json`. The command prints every purged project path
 and a summary count, so the registry cleanup is auditable.
+
+### `ck list` Outside a Project
+
+`ck list` never guesses. Run outside every project it does **not** silently
+adopt the most recently active entry from the global registry — instead it
+names what it found:
+
+```text
+$ cd ~/work            # holds registered projects alpha and beta
+$ ck list
+[!] Current directory is not a context-keeper project.
+
+Available nested projects:
+  - alpha
+  - beta
+
+To view tasks, navigate to a project directory or run: ck list <project_name>
+```
+
+A single nested project needs no choice, so its tasks are printed with the
+project named in the section header:
+
+```text
+$ ck list
+## Current Sprint (alpha)
+[ ] 1. ship the migration
+[>] 2. write the release notes
+```
+
+`ck list <project_name>` targets a registered project explicitly and works
+from any directory; an unknown name is an error (exit code 1), never an empty
+listing:
+
+```text
+$ ck list nope
+ERROR: Project 'nope' not found.
+```
 
 ---
 
@@ -769,6 +810,42 @@ chmod +x ck
 Команда `ck prune` удаляет осиротевшие записи из
 `~/.config/ck/projects.json`, печатает каждый удалённый путь и итоговое число
 очищенных проектов.
+
+### `ck list` вне проекта
+
+`ck list` никогда не угадывает. Запущенная вне любого проекта, команда **не**
+подставляет молча последний активный проект из глобального реестра — вместо
+этого она показывает, что нашла:
+
+```text
+$ cd ~/work            # внутри зарегистрированы проекты alpha и beta
+$ ck list
+[!] Current directory is not a context-keeper project.
+
+Available nested projects:
+  - alpha
+  - beta
+
+To view tasks, navigate to a project directory or run: ck list <project_name>
+```
+
+Когда вложенный проект ровно один, выбирать не нужно — его задачи выводятся
+с явным указанием проекта в заголовке секции:
+
+```text
+$ ck list
+## Current Sprint (alpha)
+[ ] 1. ship the migration
+[>] 2. write the release notes
+```
+
+`ck list <project_name>` явно указывает зарегистрированный проект и работает из
+любого каталога; неизвестное имя — это ошибка (код выхода 1), а не пустой вывод:
+
+```text
+$ ck list nope
+ERROR: Project 'nope' not found.
+```
 
 ---
 
