@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.8.1-blue)]()
+[![version](https://img.shields.io/badge/version-0.8.2-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -103,7 +103,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.8.1
+ck -v    # → ck version 0.8.2
 ```
 
 ---
@@ -189,11 +189,14 @@ The `ck dashboard` / `ck -g` output always opens with a unified
 `SPACES (GLOBAL CONTEXTS)` table (`Space | Focus Task | Progress | Last
 Active`) covering the `local` and `remote` spaces plus every custom
 space file discovered in `~/.config/ck/spaces/`, rendered above the
-Git projects table through the same table formatter. Its cell layout is
-column-for-column identical to the `GLOBAL DASHBOARD` grid below it:
-every row is two lines (`Space` name + contracted path, `[N] [>]` +
-task title, `<done>/<total>` + `(<pct>%)`), and the `Progress` column
-carries the same fixed width. With
+Git projects table through the **same table engine** — there is exactly
+one grid renderer in `ck`, and `GLOBAL DASHBOARD`, `SPACES (GLOBAL
+CONTEXTS)` and `ck space list` all call it with one shared width policy
+and one shared cell builder. They differ only in their title and in the
+label of the first column. Every row is two lines (`Space` name +
+contracted path, `[N] [>]` + task title, `<done>/<total>` +
+`(<pct>%)`), the `Progress` column has one exact fixed width, and the
+name/last-active columns share the same caps. With
 `ck dashboard -v` every space additionally gets its own bordered card
 (`MY SPACES`) with the progress line and the full `<< PREV` / `[>] FOCUS`
 / `>> NEXT` context triad plus its process notes — the same verbose
