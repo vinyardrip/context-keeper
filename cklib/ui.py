@@ -465,11 +465,80 @@ def pad_to_width(text: str, width: int) -> str:
     return text + " " * pad if pad > 0 else text
 
 
+def take_columns(text: str, width: int, *, from_end: bool = False) -> str:
+    """The longest PREFIX (or SUFFIX) of ``text`` fitting ``width``
+    display columns.
+
+    The single primitive every width-aware truncation is built on.
+    Counts COLUMNS, not code points: a CJK glyph costs two columns, so
+    ``take_columns("非同期処理", 3)`` returns ``"非同"`` (3 columns, 2
+    code points) rather than three full-width glyphs. A character
+    that would straddle the boundary is DROPPED rather than split, so
+    the result never exceeds ``width``.
+
+    ``from_end`` takes the SUFFIX instead of the prefix.
+    """
+    if width <= 0:
+        return ""
+    source = reversed(text) if from_end else text
+    out: list[str] = []
+    used = 0
+    for ch in source:
+        w = char_width(ch)
+        if used + w > width:
+            break
+        out.append(ch)
+        used += w
+    if from_end:
+        out.reverse()
+    return "".join(out)
+
+
+def fit_columns(text: str, width: int, *, keep: str = "start",
+                ellipsis: str = "...") -> str:
+    """Truncate ``text`` to at most ``width`` DISPLAY columns.
+
+    ``keep`` selects which part survives the cut:
+
+    - ``"start"``  — head survives, marker at the end
+      (``"abcdef"`` @ 6 → ``"abc..."``): the informative beginning of
+      a task title or a path stays readable;
+    - ``"end"``    — tail survives, marker at the front
+      (``"abcdef"`` @ 6 → ``"...def"``);
+    - ``"both"``   — head and tail both survive, marker in the middle
+      (``"[3] [>] implement the very long...ring module"``): keeps
+      the ``[<id>] [>]`` prefix AND the title's ending.
+
+    Widths too small for the marker degrade to a run of dots, matching
+    the historical behaviour for ``width <= 3``.
+
+    The result is guaranteed to fit ``width`` columns for ANY input,
+    including wide (CJK) text and ANSI-styled content.
+    """
+    if width <= 0:
+        return ""
+    if display_width(text) <= width:
+        return text
+    marker_w = display_width(ellipsis)
+    if width <= marker_w:
+        return take_columns(ellipsis, width)
+    room = width - marker_w
+    if keep == "end":
+        return ellipsis + take_columns(text, room, from_end=True)
+    if keep == "both":
+        head = room // 2
+        tail = room - head
+        return (take_columns(text, head)
+                + ellipsis
+                + take_columns(text, tail, from_end=True))
+    return take_columns(text, room) + ellipsis
+
+
 # ---------------------------------------------------------------------------
 # Uninitialized / no-project state (read commands: ck st & co)
 # ---------------------------------------------------------------------------
 
-NO_PROJECT_HEADING = "[!] No active project found."
+NO_PROJECT_HEADING = "No active project found."
 NO_PROJECT_HINT = (
     "Run 'ck init' in a project directory or switch context with "
     "'ck register'."
@@ -486,12 +555,14 @@ def render_no_project(palette: Optional[Palette] = None) -> str:
     ambiguous empty dashboard (``0/0 tasks``, ``focus not selected``)
     with a clean two-line message; no fake metrics are emitted.
 
-    The hint line inherits the native terminal text color (no
-    low-contrast gray).
+    The ``[!]`` badge goes through :func:`notice`, so it carries the
+    standard bold-yellow badge style with the reset immediately after
+    the token and the sentence in normal formatting. The hint line
+    inherits the native terminal text color (no low-contrast gray).
     """
     p = palette if palette is not None else get_palette()
     return "\n".join([
-        p.bold_yellow(NO_PROJECT_HEADING),
+        notice(WARN, NO_PROJECT_HEADING, p),
         p.muted(NO_PROJECT_HINT),
     ])
 
@@ -514,6 +585,15 @@ __all__ = [
     "char_width",
     "display_width",
     "pad_to_width",
+    "take_columns",
+    "fit_columns",
+    "BADGE_STYLES",
+    "WARN",
+    "INFO",
+    "OK",
+    "ERR",
+    "badge",
+    "notice",
     "NO_PROJECT_HEADING",
     "NO_PROJECT_HINT",
     "render_no_project",

@@ -15,6 +15,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
+from .ui import WARN, notice
+
 # Timestamp inside a rotation archive name:
 #   HISTORY_<YYYYMMDD>_<HHMMSS>.md.gz       (compressed, new style)
 #   HISTORY_<YYYYMMDD>_<HHMMSS>.md.bak      (uncompressed, legacy style)
@@ -64,7 +66,8 @@ def read_archive(path: Path) -> Tuple[str, str]:
                 return fh.read(), ""
         return path.read_text(encoding="utf-8"), ""
     except (OSError, EOFError, UnicodeDecodeError, gzip.BadGzipFile) as e:
-        return "", f"[!] Skipped unreadable archive {path.name}: {e}"
+        return "", notice(WARN, f"Skipped unreadable archive "
+                                f"{path.name}: {e}")
 
 
 def list_history_archives(ck_dir: Path) -> List[Path]:

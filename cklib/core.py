@@ -737,7 +737,7 @@ class ContextKeeper:
                 printer(f"[+] Created: {label}")
             return True
         if echo:
-            printer(f"[i] Exists: {label}")
+            printer(ui.notice(ui.INFO, f"Exists: {label}"))
         return False
 
     def _check_tools(self) -> dict[str, bool]:
@@ -2247,7 +2247,7 @@ class ContextKeeper:
         tl = self._load_plan()
         active = tl.active()
         if active is None:
-            printer("[!] No active task to save.")
+            printer(ui.notice(ui.WARN, "No active task to save."))
             return None
 
         task_id, task_title = active.id, active.title
@@ -2386,10 +2386,12 @@ class ContextKeeper:
         ]
         stage = [p for p in ck_artifacts if (self.root / p).exists()]
         if gith.local_commit(msg, path=self.root, stage=stage):
-            printer("[ok] Git commit created (local only - no push).")
+            printer(ui.notice(
+                ui.OK, "Git commit created (local only - no push)."))
             return msg
-        printer(
-            f"[!] Commit failed (entry remains saved in {history_rel})."
+        printer(ui.notice(
+            ui.WARN,
+            f"Commit failed (entry remains saved in {history_rel}).")
         )
         return None
 
@@ -3601,48 +3603,44 @@ def _safe_parse_plan(plan_path: Path) -> "TaskList | None":
 
 
 def _truncate(text: str, width: int) -> str:
-    """Truncate ``text`` to ``width`` columns with an ellipsis."""
+    """Truncate ``text`` to ``width`` COLUMNS, marker at the FRONT.
+
+    Thin wrapper over :func:`cklib.ui.fit_columns`. For single-width
+    text this is byte-identical to the historical ``"..." + tail``.
+    """
     if width <= 1:
         return text[:width]
-    if len(text) <= width:
-        return text
-    return "..." + text[-(width - 3):]
+    return ui.fit_columns(text, width, keep="end")
 
 
 def _truncate_right(text: str, width: int) -> str:
     """Right-side truncation: keep the START, ellipsis at the END.
 
-    ``"Написать доп. шаблоны"`` at width 18 → ``"Написать доп. ...``
-    — the informative head of a task title survives and the ellipsis
-    marks the cut at the visible right boundary. Never returns a
-    string longer than ``width``; the marker is plain ASCII ``...``.
+    The informative head of a task title survives and the ellipsis
+    marks the cut at the visible right boundary. The marker is plain
+    ASCII ``...``.
+
+    Guaranteed to fit ``width`` DISPLAY columns for ANY input: the cut
+    is measured in terminal columns, not code points, so a wide (CJK)
+    title cannot overflow its cell and push the grid's ``│`` borders
+    out of alignment.
     """
-    if width <= 0:
-        return ""
-    if len(text) <= width:
-        return text
-    if width <= 3:
-        return "." * width
-    return text[:width - 3] + "..."
+    return ui.fit_columns(text, width, keep="start")
 
 
 def _truncate_ellipsis(text: str, width: int) -> str:
-    """Fit ``text`` into ``width`` columns with a middle ASCII ellipsis.
+    """Fit ``text`` into ``width`` COLUMNS with a middle ASCII ellipsis.
 
-    Used by the dashboard table: long project names and focus-task
-    titles keep both their start and their end (the informative
-    parts) — e.g. ``[3] [>] implement the very long...ring module``
-    → the ``[<id>] [>]`` prefix and the title tail survive.
-    Never returns a string longer than ``width``; the ellipsis is
-    plain ``...`` (three ASCII dots), not a Unicode glyph.
+    Used by the dashboard and spaces tables: long project names and
+    focus-task titles keep both their start and their end (the
+    informative parts) so the ``[<id>] [>]`` prefix AND the title
+    tail survive. The ellipsis is plain ``...``, not a Unicode glyph.
+
+    Like :func:`_truncate_right` the budget is in terminal COLUMNS: a
+    wide-glyph name is cut EARLIER, never later, so the column can
+    never overflow.
     """
-    if len(text) <= width:
-        return text
-    if width <= 3:
-        return "." * width
-    keep_start = (width - 3) // 2
-    keep_end = width - 3 - keep_start
-    return f"{text[:keep_start]}...{text[len(text) - keep_end:]}"
+    return ui.fit_columns(text, width, keep="both")
 
 
 def _relative_time(iso: str, *, now: Optional[datetime] = None) -> str:
@@ -3952,25 +3950,43 @@ def _smart_path(path: str, width: int) -> str:
     the per-segment trimming; the two-segment shape is constant.
     """
     segments = [seg for seg in path.split("/") if seg]
+    if width <= 0:
+        return ""
     tail = "/".join(segments[-2:]) if len(segments) >= 2 \
         else (segments[-1] if segments else path)
     prefix = "~/../" if _tilde_path(path).startswith("~") else "/../"
     contracted = prefix + tail
-    budget = max(width - len(prefix) if width else 0, 0)
-    if budget and len(tail) > budget:
-        # Split the budget between parent and project, keeping the
-        # full structure: <parent-trim>/<project-trim>.
+    # HARD GUARANTEE: the result never exceeds ``width`` display
+    # columns. The per-segment trimming below can only REACH the
+    # budget when it is large enough to hold the two-segment shape
+    # (``parent/`` + both names); below that threshold the structural
+    # form is dropped and the whole tail is cut instead. Without this
+    # fallback the old ``max(..., 4)`` floors produced a string WIDER
+    # than ``width``, which overflowed the cell and pushed the grid's
+    # vertical ``│`` borders out of alignment.
+    budget = ui.display_width(prefix) if width else 0
+    tail_budget = width - budget if width else 0
+    if tail_budget > 0 and ui.display_width(tail) > tail_budget:
         parts = tail.split("/")
-        if len(parts) == 2:
+        # ``<sep>`` + one usable column per side is the minimum that
+        # still shows both segments; below it, keep the structure by
+        # spending the whole budget on the final segment.
+        if len(parts) == 2 and tail_budget >= 4:
             parent, project = parts
-            parent_budget = max(budget // 2 - 1, 4)
-            project_budget = max(budget - parent_budget - 1, 4)
-            tail = (f"{_truncate_right(parent, parent_budget)}"
-                    f"/{_truncate_right(project, project_budget)}")
+            parent_budget = (tail_budget - 1) // 2
+            project_budget = tail_budget - 1 - parent_budget
+            tail = (f"{ui.fit_columns(parent, parent_budget)}"
+                    f"/{ui.fit_columns(project, project_budget)}")
         else:
-            tail = _truncate_right(tail, budget)
-        contracted = prefix + tail
-    return contracted
+            tail = ui.fit_columns(tail, tail_budget)
+    if width and ui.display_width(prefix + tail) > width:
+        tail = ui.take_columns(
+            tail, max(width - ui.display_width(prefix), 0))
+    # Absolute last resort: below the prefix's own width the structural
+    # marker no longer fits either. Cutting it is lossy but keeps the
+    # caller's width contract, and a ragged cell is far worse than a
+    # terse path. Unreachable at the real ``_PROJECT_CAP``.
+    return ui.take_columns(prefix + tail, width)
 
 
 def _render_dashboard_table(states: list,
@@ -4164,11 +4180,20 @@ def _render_grid(title: str, headers: tuple, keys: tuple, rows: list, *,
         height = max(len(cell) for cell in cells)
         lines = []
         for i in range(height):
-            row_cells = [
-                " " + ui.pad_to_width(
-                    cell[i] if i < len(cell) else "", widths[k]) + " "
-                for cell, k in zip(cells, keys)
-            ]
+            row_cells = []
+            for cell, k in zip(cells, keys):
+                content = cell[i] if i < len(cell) else ""
+                # STRUCTURAL SAFETY NET: a cell may NEVER exceed its
+                # column. Widths are already computed from content and
+                # content is pre-truncated by the callers, but a single
+                # missed case (wide CJK glyphs, a pathological title, a
+                # future field) would push this row past the border
+                # and shift every ``│`` below it. Clamping here makes
+                # a ragged grid STRUCTURALLY IMPOSSIBLE.
+                if ui.display_width(content) > widths[k]:
+                    content = ui.take_columns(content, widths[k])
+                row_cells.append(" " + ui.pad_to_width(content, widths[k])
+                                 + " ")
             # Only the vertical glyphs carry the border paint; cell
             # content keeps whatever styling it was given.
             sep = p.border("│")
