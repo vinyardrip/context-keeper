@@ -46,9 +46,16 @@ def _env(**overrides) -> mock._patch_dict:
 
 
 class TestColorEnabled(unittest.TestCase):
+    """Color is ON by default; ``NO_COLOR`` is the only opt-out.
+
+    Since v0.8.4 the severity badges keep their color even through a
+    pipe or a file, so ``ck … > log.txt`` no longer silently loses
+    every success/failure signal.
+    """
+
     def test_no_color_disables_even_when_forced(self):
         """NO_COLOR is the highest-precedence opt-out: nothing
-        (not even FORCE_COLOR or a TTY) can re-enable colors."""
+        (not even FORCE_COLOR) can re-enable colors."""
         with _env(NO_COLOR="1", FORCE_COLOR="1", CLICOLOR_FORCE="1"):
             self.assertFalse(ui.color_enabled(_FakeTty()))
 
@@ -61,9 +68,11 @@ class TestColorEnabled(unittest.TestCase):
         with _env(FORCE_COLOR="1"):
             self.assertTrue(ui.color_enabled(io.StringIO()))
 
-    def test_force_color_zero_does_not_force(self):
+    def test_force_color_zero_still_colors(self):
+        """FORCE_COLOR=0 is not an opt-out any more: color is the
+        default and only NO_COLOR disables it."""
         with _env(FORCE_COLOR="0"):
-            self.assertFalse(ui.color_enabled(io.StringIO()))
+            self.assertTrue(ui.color_enabled(io.StringIO()))
 
     def test_clicolor_force_truthy_enables_when_piped(self):
         for value in ("1", "true", "YES", "on"):
@@ -72,30 +81,30 @@ class TestColorEnabled(unittest.TestCase):
                     ui.color_enabled(io.StringIO()), f"CLICOLOR_FORCE={value}"
                 )
 
-    def test_clicolor_force_zero_falls_back_to_tty(self):
+    def test_clicolor_force_zero_still_colors(self):
         with _env(CLICOLOR_FORCE="0"):
-            self.assertFalse(ui.color_enabled(io.StringIO()))
-            self.assertTrue(ui.color_enabled(_FakeTty()))
+            self.assertTrue(ui.color_enabled(io.StringIO()))
 
     def test_tty_enables_by_default(self):
         with _env():
             self.assertTrue(ui.color_enabled(_FakeTty()))
 
-    def test_pipe_disables_by_default(self):
+    def test_pipe_still_colored_by_default(self):
+        """THE behaviour change: a redirect no longer strips color."""
         with _env():
-            self.assertFalse(ui.color_enabled(io.StringIO()))
+            self.assertTrue(ui.color_enabled(io.StringIO()))
 
-    def test_no_isattr_stream_is_safe(self):
-        """A stream without isatty (None-like) must not raise."""
+    def test_stringio_and_object_streams_both_color(self):
+        """No stream type disables colors any more."""
         with _env():
-            self.assertFalse(ui.color_enabled(object()))
+            self.assertTrue(ui.color_enabled(io.StringIO()))
+            self.assertTrue(ui.color_enabled(object()))
 
-    def test_default_stream_is_stdout(self):
-        """Without an explicit stream, sys.stdout is probed."""
+    def test_stream_argument_does_not_change_the_decision(self):
         with _env(), mock.patch("sys.stdout", _FakeTty()):
             self.assertTrue(ui.color_enabled())
         with _env(), mock.patch("sys.stdout", io.StringIO()):
-            self.assertFalse(ui.color_enabled())
+            self.assertTrue(ui.color_enabled())
 
 
 # ---------------------------------------------------------------------------
@@ -144,10 +153,12 @@ class TestPalette(unittest.TestCase):
     def test_paint_empty_text_is_noop(self):
         self.assertEqual(ui.Palette(True).paint("", ui.BOLD), "")
 
-    def test_get_palette_respects_stream(self):
+    def test_get_palette_ignores_stream(self):
         with _env():
-            self.assertFalse(ui.get_palette(io.StringIO()).enabled)
+            self.assertTrue(ui.get_palette(io.StringIO()).enabled)
             self.assertTrue(ui.get_palette(_FakeTty()).enabled)
+        with _env(NO_COLOR="1"):
+            self.assertFalse(ui.get_palette(io.StringIO()).enabled)
 
     def test_strip_ansi_removes_all_sgr_sequences(self):
         p = ui.Palette(True)
@@ -819,6 +830,52 @@ class TestStatusBadges(unittest.TestCase):
         """ANSI codes must not count as columns (grid alignment)."""
         styled = ui.notice("[ok]", "ok", ui.Palette(True))
         self.assertEqual(ui.display_width(styled), len("[ok] ok"))
+
+
+class TestColorIsAlwaysOn(unittest.TestCase):
+    """Badges keep their colour through pipes; NO_COLOR is the opt-out."""
+
+    def test_color_survives_a_pipe(self):
+        with _env():
+            p = ui.get_palette(io.StringIO())
+            self.assertTrue(p.enabled)
+            self.assertIn("\033[1;33m", ui.badge("[!]", p))
+
+    def test_no_color_is_the_only_opt_out(self):
+        with _env(NO_COLOR="1"):
+            p = ui.get_palette(io.StringIO())
+            self.assertFalse(p.enabled)
+            self.assertEqual(ui.badge("[!]", p), "[!]")
+
+    def test_every_badge_is_styled_with_color_enabled(self):
+        p = ui.Palette(True)
+        expected = {
+            "[!]": "\033[1;33m[!]\033[0m",
+            "[i]": "\033[36m[i]\033[0m",
+            "[ok]": "\033[1;32m[ok]\033[0m",
+            "[err]": "\033[1;31m[err]\033[0m",
+        }
+        for token, want in expected.items():
+            with self.subTest(token=token):
+                self.assertEqual(ui.badge(token, p), want)
+
+    def test_notice_default_palette_is_colored(self):
+        """``notice()`` with no explicit palette must still colour."""
+        with _env():
+            line = ui.notice("[ok]", "done")
+            self.assertTrue(line.startswith("\033[1;32m[ok]\033[0m "), line)
+
+    def test_notice_respects_no_color(self):
+        with _env(NO_COLOR="1"):
+            self.assertEqual(ui.notice("[ok]", "done"), "[ok] done")
+
+    def test_reset_immediately_after_the_badge(self):
+        p = ui.Palette(True)
+        for token in ("[!]", "[i]", "[ok]", "[err]"):
+            with self.subTest(token=token):
+                self.assertTrue(
+                    ui.notice(token, "msg", p).startswith(
+                        f"{ui.BADGE_STYLES[token]}{token}{ui.RESET} msg"))
 
 
 if __name__ == "__main__":

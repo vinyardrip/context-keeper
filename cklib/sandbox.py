@@ -1129,10 +1129,13 @@ def reject_dev_exit(argv: Optional[list] = None) -> int:
     if argv is None:
         argv = sys.argv
     entry = Path(argv[0]).name if argv else "ck-dev"
-    print(
-        f"[!] '{entry} exit' cannot close an active subshell.\n"
-        "[!] To exit sandbox mode, type 'exit' or press Ctrl+D."
-    )
+    from . import ui
+    print(ui.notice(
+        ui.WARN, f"'{entry} exit' cannot close an active subshell.")
+        + "\n"
+        + ui.notice(
+            ui.WARN, "To exit sandbox mode, type 'exit' or press "
+                     "Ctrl+D."))
     return 1
 
 
@@ -1174,11 +1177,14 @@ def emit_interceptor_banner_if_needed(
     if active is not None:
         print_sandbox_banner(file=file)
     else:
+        from . import ui
         print(
-            "[!] CK_SANDBOX is active, but no sandbox session is set up "
-            "(no active project).\n"
-            "   Run `ck-dev` to enter sandbox mode, or unset CK_SANDBOX "
-            "to leave dev mode.",
+            ui.notice(ui.WARN,
+                      "CK_SANDBOX is active, but no sandbox session "
+                      "is set up (no active project).")
+            + "\n"
+            + "   Run `ck-dev` to enter sandbox mode, or unset "
+              "CK_SANDBOX to leave dev mode.",
             file=file or sys.stdout,
         )
         print(file=file or sys.stdout)

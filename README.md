@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.8.3-blue)]()
+[![version](https://img.shields.io/badge/version-0.8.4-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -103,7 +103,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.8.3
+ck -v    # → ck version 0.8.4
 ```
 
 ---
@@ -505,6 +505,22 @@ $ ck notes
 ```
 
 When nothing carries a note: `[i] No active process notes found.`
+
+---
+
+## Colors
+
+Status badges are colored **by default** and keep their color when the output is
+piped or redirected to a file: `[!]` bold yellow, `[i]` cyan, `[ok]` bold green,
+`[err]` and `ERROR:` bold red. The reset escape is emitted immediately after the
+badge, so the message that follows keeps your normal terminal formatting.
+
+`NO_COLOR` is the only opt-out:
+
+```bash
+NO_COLOR=1 ck st          # plain text, no escapes
+ck dashboard > log.txt    # badges stay colored inside the file
+```
 
 ---
 

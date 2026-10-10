@@ -23,6 +23,7 @@ from . import git as gith
 from . import registry
 from . import spaces
 from . import ui
+from .ui import ERR, INFO, OK, WARN, get_palette, notice
 from .sandbox import (
     PROJECTS_SUBDIR,
     is_dev_mode,
@@ -2012,8 +2013,10 @@ class ContextKeeper:
 
             To view tasks, navigate to a project directory or run: ck list <project_name>
         """
+        p = get_palette()
         lines = [
-            "[!] Current directory is not a context-keeper project.",
+            notice(WARN, "Current directory is not a "
+                   "context-keeper project.", p),
             "",
             "Available nested projects:",
         ]
@@ -2297,10 +2300,9 @@ class ContextKeeper:
                     _count_history_entries(history_text) > history_limit()
                 )
             note_recorded = True
-            printer(
-                f"[ok] Saved entry to {history_rel} "
-                "(local context history - not a Git commit)."
-            )
+            printer(notice(
+                OK, f"Saved entry to {history_rel} "
+                    "(local context history - not a Git commit)."))
 
             state = self._read_state()
             state["last_update"] = datetime.now().isoformat()
@@ -2320,10 +2322,9 @@ class ContextKeeper:
                 # Guardrail: a dev-mode session must never create a
                 # real Git commit (or init a repo) in the project.
                 # The sandboxed history entry above is already saved.
-                printer(
-                    f"[i] Dev mode: Git commit skipped "
-                    f"(sandbox). Entry saved in {history_rel}."
-                )
+                printer(notice(
+                    INFO, "Dev mode: Git commit skipped "
+                         f"(sandbox). Entry saved in {history_rel}."))
                 return None
             if not gith.is_git_repo(self.root):
                 ans = input_fn(
@@ -2331,10 +2332,10 @@ class ContextKeeper:
                     "local commits? (y/N): "
                 ).strip().lower()
                 if ans != "y":
-                    printer(
-                        f"[i] No commit created. Your entry is "
-                        f"saved in {history_rel} (local history only)."
-                    )
+                    printer(notice(
+                        INFO, "No commit created. Your entry is "
+                             f"saved in {history_rel} "
+                             "(local history only)."))
                     return None
                 if not gith.init_repo(self.root):
                     printer(
@@ -2352,10 +2353,10 @@ class ContextKeeper:
             if input_fn(
                 f"Create LOCAL Git commit \"{msg}\"? (y/N): "
             ).strip().lower() != "y":
-                printer(
-                    f"[i] No commit created. Your entry is saved "
-                    f"in {history_rel} (local history only)."
-                )
+                printer(notice(
+                    INFO, "No commit created. Your entry is "
+                         f"saved in {history_rel} "
+                         "(local history only)."))
                 return None
         except EOFError:
             # Non-interactive stdin ran out mid-flow. Abort cleanly:
@@ -2527,7 +2528,7 @@ class ContextKeeper:
             if live_text.strip():
                 parts.append(live_text)
         if not parts:
-            return "[i] No history entries found."
+            return notice(INFO, "No history entries found.")
         return "\n".join(parts)
 
     # ------------------------------------------------------------------ #
@@ -3277,11 +3278,10 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
         if first_pending is not None:
             start_cmd = ck.start_command()
             lines.append("")
-            lines.append(p.yellow(
-                f" [!] No active focus set. Run '{start_cmd} <ID>' "
-                f"(e.g., '{start_cmd} {first_pending.id}') "
-                "to set focus."
-            ))
+            lines.append(notice(
+                WARN, f"No active focus set. Run '{start_cmd} <ID>' "
+                     f"(e.g., '{start_cmd} {first_pending.id}') "
+                     "to set focus.", p))
 
     lines.append("")
     lines.append(p.bold(" -> WORK CONTEXT:"))
@@ -3542,10 +3542,10 @@ def _render_notes_listing(ck: ContextKeeper, tl: TaskList) -> str:
     has_any = bool(active_note) or any(
         note for _, _, note in paused_entries)
     if not has_any and focus is None and not paused_entries:
-        return "[i] No active process notes found."
+        return notice(INFO, "No active process notes found.")
     if not has_any:
         # Focus/paused tasks exist but carry no notes at all.
-        return "[i] No active process notes found."
+        return notice(INFO, "No active process notes found.")
 
     out: list[str] = []
     if focus is not None:
@@ -3554,7 +3554,7 @@ def _render_notes_listing(ck: ContextKeeper, tl: TaskList) -> str:
         if active_note:
             out.append(p.bold_cyan(f"     * Note: {active_note}"))
     if paused_entries:
-        out.append(p.bold_yellow("[!] Unfocused / Paused Context:"))
+        out.append(notice(WARN, "Unfocused / Paused Context:", p))
         for pid, ptitle, pnote in paused_entries:
             out.append(f"   - [{pid}] {ptitle}")
             if pnote:
@@ -3759,8 +3759,9 @@ def _render_dashboard(ck: Optional[ContextKeeper], *, list_projects,
         return (
             ops_block + "\n\n"
             "Global Dashboard\n"
-            "[i] No registered projects. Run `ck register` "
-            "in a project directory to begin.\n"
+            + ui.notice(ui.INFO,
+                         "No registered projects. Run `ck register` "
+                         "in a project directory to begin.") + "\n"
         )
 
     cwd = None
@@ -3799,8 +3800,10 @@ def _render_dashboard(ck: Optional[ContextKeeper], *, list_projects,
     )
     if missing_count:
         rendered += (
-            f"\n\n[i] Found {missing_count} missing project(s). "
-            "Run 'ck prune' to cleanup."
+            "\n\n"
+            + ui.notice(ui.INFO,
+                        f"Found {missing_count} missing project(s). "
+                        "Run 'ck prune' to cleanup.")
         )
     return ops_block + "\n\n" + rendered
 
@@ -4009,6 +4012,7 @@ def _render_standard_grid(title: str, first_header: str, rows: list, *,
     at exactly the same width — :func:`_grid_total_width` columns —
     for ANY content, and cannot drift apart.
     """
+    p = palette if palette is not None else ui.get_chrome_palette()
     return _render_grid(
         title,
         _grid_headers(first_header),
@@ -4016,13 +4020,20 @@ def _render_standard_grid(title: str, first_header: str, rows: list, *,
         rows,
         fixed_widths=dict(_GRID_FIXED_WIDTHS),
         fluid_key=_GRID_FLUID_KEY,
-        footer=footer,
-        palette=palette,
+        # The footer is a status hint: give it the standard ``[i]``
+        # badge, styled with the SAME palette the grid uses, so it
+        # honours NO_COLOR and can never render as plain text.
+        footer=ui.notice(ui.INFO, footer, p) if footer else None,
+        palette=p,
     )
 
 
-_DASH_FOOTER_TIP = (
-    "[i] Missing a project? Navigate to its folder and run "
+# Plain TEXT of the dashboard footer tip. It carries NO literal badge
+# token: :func:`_render_standard_grid` wraps it in a styled ``[i]``
+# badge using the effective palette, so the footer honours NO_COLOR
+# instead of hard-coding escapes at import time.
+_DASH_FOOTER_TEXT = (
+    "Missing a project? Navigate to its folder and run "
     "'ck init' (or 'ck register')."
 )
 
@@ -4163,7 +4174,7 @@ def _render_dashboard_table(states: list,
         "GLOBAL DASHBOARD",
         _DASH_FIRST_HEADER,
         rows,
-        footer=_DASH_FOOTER_TIP,
+        footer=_DASH_FOOTER_TEXT,
         palette=palette,
     )
 
@@ -4361,17 +4372,15 @@ def _render_space_manager_list(project_name: Optional[str],
         palette=p,
     )
     if project_name is None or project_path is None:
-        out += (
-            "\n[i] No project in this directory: un-prefixed commands "
-            "have no local context. Use `ck <space> <cmd>` for a "
-            "space."
-        )
+        out += "\n" + notice(
+            INFO, "No project in this directory: un-prefixed commands "
+                  "have no local context. Use `ck <space> <cmd>` for a "
+                  "space.", p)
     else:
-        out += (
-            f"\n[i] Un-prefixed commands (`ck st`, `ck list`, …) apply "
-            f"to the highlighted project ({project_name}). Use "
-            "`ck <space> <cmd>` for a space."
-        )
+        out += "\n" + notice(
+            INFO, "Un-prefixed commands (`ck st`, `ck list`, …) apply "
+                  f"to the highlighted project ({project_name}). Use "
+                  "`ck <space> <cmd>` for a space.", p)
     return out
 
 
@@ -4574,7 +4583,8 @@ def _render_verbose_triad(tl: TaskList, note_data: Optional[dict],
         out.append(p.muted("          (no open tasks)"))
     # --- Paused ledger: notes parked on non-anchor open tasks ---
     if paused_map:
-        out.append("       " + p.bold("[!] Unfocused / Paused Context:"))
+        out.append("       " + notice(WARN, "Unfocused / Paused "
+                                         "Context:", p))
         for pid, (ptitle, pnote) in paused_map.items():
             out.append(f"          - [{pid}] {ptitle}")
             if pnote:

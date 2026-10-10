@@ -279,6 +279,13 @@ class TestUnfocusedPausedContext(_NoteHarness):
     """
 
     def _run_cli(self, argv, cwd: Path) -> str:
+        """Run the CLI; returns ANSI-STRIPPED stdout.
+
+        These tests assert on note MESSAGES, never on colour: the CLI
+        colours by default (even into a pipe), so `_clean_env` clears
+        NO_COLOR here only to keep the environment predictable — the
+        output is stripped so the assertions stay content-based.
+        """
         buf = io.StringIO()
         orig_cwd = Path.cwd()
         os.chdir(cwd)
@@ -288,7 +295,7 @@ class TestUnfocusedPausedContext(_NoteHarness):
             self.assertEqual(code, 0, f"exit {code} for {argv!r}")
         finally:
             os.chdir(orig_cwd)
-        return buf.getvalue()
+        return ckui.strip_ansi(buf.getvalue())
 
     def test_switch_moves_noted_task_to_paused_block(self):
         ck = self._ck()
@@ -472,7 +479,9 @@ class TestInteractiveNotePrompt(_NoteHarness):
             self.assertEqual(code, 0, f"exit {code} for {argv!r}")
         finally:
             os.chdir(orig_cwd)
-        return buf.getvalue(), prompts
+        # ANSI-STRIPPED: these tests assert note CONTENT, never colour
+        # (the CLI colours by default, even into a pipe).
+        return ckui.strip_ansi(buf.getvalue()), prompts
 
     def test_tty_yes_saves_note_then_switches(self):
         ck = self._ck()
@@ -676,7 +685,9 @@ class TestStartIdempotency(_NoteHarness):
             self.assertEqual(code, 0, f"exit {code} for {argv!r}")
         finally:
             os.chdir(orig_cwd)
-        return buf.getvalue(), prompts
+        # ANSI-STRIPPED: these tests assert note CONTENT, never colour
+        # (the CLI colours by default, even into a pipe).
+        return ckui.strip_ansi(buf.getvalue()), prompts
 
     def test_already_focused_prints_notice_and_skips_prompt(self):
         ck = self._ck()  # plan has task 2 focused
@@ -762,6 +773,7 @@ class TestNotesCommand(_NoteHarness):
     """`ck notes`: structured listing of all active process notes."""
 
     def _run(self, argv, cwd: Path) -> str:
+        """Run the CLI; returns ANSI-STRIPPED stdout (content, not colour)."""
         buf = io.StringIO()
         orig_cwd = Path.cwd()
         os.chdir(cwd)
@@ -771,7 +783,7 @@ class TestNotesCommand(_NoteHarness):
             self.assertEqual(code, 0, f"exit {code} for {argv!r}")
         finally:
             os.chdir(orig_cwd)
-        return buf.getvalue()
+        return ckui.strip_ansi(buf.getvalue())
 
     def test_empty_state_message(self):
         ck = self._ck("# P\n- [ ] alpha\n- [ ] beta\n")

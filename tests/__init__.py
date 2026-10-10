@@ -49,5 +49,13 @@ if _SANDBOX_ROOT_ENV not in os.environ:
     os.environ[_SANDBOX_ROOT_ENV] = str(Path(_ISO_BASE) / ".sandbox")
     atexit.register(shutil.rmtree, _ISO_BASE, ignore_errors=True)
 
+# COLOR ISOLATION for `python -m unittest discover` (which does not load
+# the pytest ``conftest``). Since v0.8.4 the CLI emits ANSI by default —
+# including into pipes and StringIO — so a suite run outside pytest
+# would otherwise see escape sequences in every captured output and fail
+# byte-exact assertions. Pinning NO_COLOR makes the suite deterministic
+# under BOTH runners, exactly like the pytest fixture already does.
+os.environ.setdefault("NO_COLOR", "1")
+
 
 __all__ = []

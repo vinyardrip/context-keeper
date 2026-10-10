@@ -65,7 +65,13 @@ CK_DEV = REPO_ROOT / "ck-dev"
 
 
 def _subprocess_env(fake_home: Path) -> dict:
-    """Child env: isolated HOME, CK toggles and color forcing off."""
+    """Child env: isolated HOME, CK toggles off, output forced PLAIN.
+
+    These tests assert on the wrapper's CONTENT (banner text, exit
+    codes, routing), never on colour. The CLI now colours by default —
+    including through a pipe — so ``NO_COLOR`` is pinned to keep the
+    captured stdout byte-stable and readable.
+    """
     env = {
         k: v for k, v in os.environ.items()
         if k not in ("CK_SANDBOX", "CK_SANDBOX_ROOT", "CK_DEV",
@@ -74,6 +80,7 @@ def _subprocess_env(fake_home: Path) -> dict:
     }
     env["HOME"] = str(fake_home)
     env["CK_DISABLE_UPDATE_CHECK"] = "1"
+    env["NO_COLOR"] = "1"
     return env
 
 
@@ -563,10 +570,13 @@ class TestPhysicalInstallEndToEnd(unittest.TestCase):
             k: v for k, v in os.environ.items()
             if k not in ("CK_SANDBOX", "CK_SANDBOX_ROOT", "CK_DEV",
                          "CK_DEBUG", "CK_PROJECT_ROOT", "PYTHONPATH",
-                         "CK_DISABLE_UPDATE_CHECK")
+                         "CK_DISABLE_UPDATE_CHECK", "NO_COLOR",
+                         "FORCE_COLOR", "CLICOLOR_FORCE")
         }
         env["HOME"] = str(self.fake_home)
         env["CK_DISABLE_UPDATE_CHECK"] = "1"
+        # Content assertions only -> pin the child to plain output.
+        env["NO_COLOR"] = "1"
         return env
 
     def _run(self, argv: list, script: Path, cwd: Path):

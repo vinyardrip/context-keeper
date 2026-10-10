@@ -44,6 +44,7 @@ from unittest import mock
 from cklib import config as ckconfig
 from cklib import registry as ckregistry
 from cklib import sandbox as cksandbox
+from cklib.ui import strip_ansi
 from cklib.cli import main
 from cklib.core import ContextKeeper, ProjectContext
 from cklib.sandbox import resolve_write_path
@@ -128,7 +129,13 @@ class _IsolatedHome(unittest.TestCase):
     # -- CLI runner ------------------------------------------------------ #
 
     def run_cli(self, argv: list, cwd: Path) -> tuple:
-        """Run main(argv) with cwd bound; returns (exit_code, stdout)."""
+        """Run main(argv) with cwd bound; returns (exit_code, stdout).
+
+        The stdout is ANSI-STRIPPED. This module tests context
+        resolution, never colour: the CLI colours its output by default
+        (even into a pipe — see :func:`cklib.ui.color_enabled`), so
+        assertions here are written against plain text.
+        """
         buf = io.StringIO()
         orig_cwd = Path.cwd()
         os.chdir(cwd)
@@ -137,7 +144,7 @@ class _IsolatedHome(unittest.TestCase):
                 code = main(argv)
         finally:
             os.chdir(orig_cwd)
-        return code, buf.getvalue()
+        return code, strip_ansi(buf.getvalue())
 
 
 # ---------------------------------------------------------------------------
