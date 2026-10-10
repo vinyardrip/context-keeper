@@ -227,6 +227,47 @@ class TestListOutsideProject(_ListHarness):
         self.assertEqual(code, 1)
         self.assertIn("ERROR: Project 'far_away' not found.", out)
 
+    def test_registered_entry_does_not_mask_unregistered_siblings(self):
+        """The registry and the FILESYSTEM scan are MERGED, not
+        sequential tiers.
+
+        One registered folder among several physical projects used to
+        look like "exactly one nested project" (the scan only ran
+        when the registry knew nothing), so the registered one was
+        auto-listed while its unregistered siblings stayed invisible
+        — a silent pick with a plausible-looking alibi.
+        """
+        self.make_project("zeta_registered", ["registered task"])
+        self.make_project("alpha_unregistered", ["unregistered task"],
+                          register=False)
+
+        code, out = self.run_cli(["list"], self.root)
+
+        self.assertEqual(code, 0, out)
+        self.assertIn("Available nested projects:", out)
+        # BOTH tiers are offered, sorted by name.
+        self.assertIn("  - alpha_unregistered", out)
+        self.assertIn("  - zeta_registered", out)
+        self.assertLess(out.index("  - alpha_unregistered"),
+                        out.index("  - zeta_registered"))
+        # Neither project's tasks were dumped.
+        self.assertNotIn("registered task", out)
+        self.assertNotIn("unregistered task", out)
+
+    def test_every_mixed_tier_name_stays_addressable(self):
+        """Each name the merged notice prints resolves — registry
+        name, folder name and scan-only folder alike."""
+        self.make_project("zeta_registered", ["registered task"])
+        self.make_project("alpha_unregistered", ["unregistered task"],
+                          register=False)
+
+        for name, task in (("zeta_registered", "registered task"),
+                           ("alpha_unregistered", "unregistered task")):
+            with self.subTest(name=name):
+                code, out = self.run_cli(["list", name], self.root)
+                self.assertEqual(code, 0, out)
+                self.assertIn(task, out)
+
 
 class TestListExplicitProject(_ListHarness):
     """``ck list <project_name>`` — explicit targeting."""

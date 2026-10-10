@@ -2328,13 +2328,15 @@ class TestSpaceManagement(_IsolatedHome):
                              {"NO_COLOR": "", "FORCE_COLOR": "1"}):
             _, out = self._run(["space", "list"])
 
-        from cklib.ui import strip_ansi
+        from cklib.ui import strip_ansi, BOLD_MAGENTA
         row = next(l for l in out.splitlines()
                    if "accent-proj" in strip_ansi(l) and "│" in strip_ansi(l))
-        # bold + cyan wraps the name only — no tag, and the border paint
-        # never leaks onto the content.
-        self.assertIn("\033[1m\033[36maccent-proj\033[0m", row)
+        # bold magenta wraps the name only — no tag, and the border
+        # paint never leaks onto the content. This is the SAME colour
+        # the dashboard tables use, so every view agrees.
+        self.assertIn(f"{BOLD_MAGENTA}accent-proj\033[0m", row)
         self.assertNotIn("[PROJECT]", strip_ansi(row))
+        self.assertNotIn("\033[36m", row)
 
     def test_space_list_without_project_notes_the_absence(self):
         spaces.add_space_task("local", "a local task")

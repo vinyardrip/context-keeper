@@ -395,6 +395,189 @@ class TestGlobalFallback(_IsolatedHome):
 
 
 # ---------------------------------------------------------------------------
+# 3b. `ck st` OUTSIDE a project: nested discovery, never a silent pick
+# ---------------------------------------------------------------------------
+
+
+class TestStatusOutsideProject(_IsolatedHome):
+    """``ck st`` applies the SAME discovery rules as ``ck list``.
+
+    Before this behaviour existed, ``ck st`` outside every project
+    fell straight through to the GLOBAL tier — "most recently active
+    registered project" — and rendered it as if the user had asked
+    for it. The commands pinned here:
+
+    - several projects nested under the invocation directory → the
+      choice notice, and NOTHING of any project's status;
+    - exactly one nested project → its status, annotated with the
+      path that was picked;
+    - no argument outside → the same rules; ``ck st -l`` is
+      byte-identical to ``ck list``;
+    - ``ck st <project_name>`` → explicit targeting from anywhere,
+      unknown name → exit 1;
+    - ``ck st --all`` in the ambiguous case → the notice alone: no
+      foreign project's PLAN.md, no bogus "PLAN.md not found".
+    """
+
+    def _workspace(self, *names) -> Path:
+        """A parent folder holding ``names`` as nested projects.
+
+        Each project gets DISTINCTIVE task text (``<name> task``) so
+        a rendered block can always be attributed to one project —
+        the whole point of these tests is proving WHICH project (if
+        any) was printed.
+        """
+        ws = Path(self._tmp.name) / "workspace"
+        ws.mkdir(exist_ok=True)
+        for name in names:
+            root = self.make_project(name, parent=ws)
+            (root / ".ck" / "PLAN.md").write_text(
+                f"# {name}\n\n## Current Sprint\n- [ ] {name} task\n",
+                encoding="utf-8")
+        return ws
+
+    def test_multiple_nested_projects_are_listed_not_guessed(self):
+        ws = self._workspace("alpha", "beta")
+
+        with _clean_env():
+            code, out = self.run_cli(["st"], ws)
+
+        self.assertEqual(code, 0, out)
+        self.assertIn("not a context-keeper project", out)
+        self.assertIn("Available nested projects:", out)
+        self.assertIn("  - alpha", out)
+        self.assertIn("  - beta", out)
+        self.assertIn("ck st <project_name>", out)
+        # Crucially: NEITHER project's status block was rendered.
+        self.assertNotIn("alpha task", out)
+        self.assertNotIn("beta task", out)
+        self.assertNotIn("CURRENT FOCUS", out)
+        self.assertNotIn("tasks done", out)
+        self.assertNotIn("<- ", out)
+
+    def test_single_nested_project_is_rendered_with_its_path(self):
+        ws = self._workspace()
+        self.make_project("lonely", parent=ws)
+
+        with _clean_env():
+            code, out = self.run_cli(["st"], ws)
+
+        self.assertEqual(code, 0, out)
+        self.assertIn("> lonely", out)
+        # The annotation says WHICH project the command adopted.
+        self.assertIn(f"<- {ws / 'lonely'}", out)
+        self.assertNotIn("Available nested projects", out)
+
+    def test_registered_sibling_does_not_mask_the_scan(self):
+        """Registry ∪ scan: one registered project among several
+        physical ones must NOT read as "exactly one nested project"."""
+        ws = self._workspace("zeta_registered", "alpha_unregistered")
+        ckregistry.register_project(ws / "zeta_registered",
+                                    name="zeta_registered")
+
+        with _clean_env():
+            code, out = self.run_cli(["st"], ws)
+
+        self.assertEqual(code, 0, out)
+        self.assertIn("Available nested projects:", out)
+        self.assertIn("  - alpha_unregistered", out)
+        self.assertIn("  - zeta_registered", out)
+        self.assertNotIn("CURRENT FOCUS", out)
+        self.assertNotIn("alpha_unregistered task", out)
+        self.assertNotIn("zeta_registered task", out)
+
+    def test_st_l_is_byte_identical_to_ck_list_outside_a_project(self):
+        """``ck st -l`` is documented as the ``ck list`` view — same
+        bytes, same discovery, outside every project included."""
+        ws = self._workspace("alpha", "beta")
+
+        with _clean_env():
+            code_l, out_l = self.run_cli(["st", "-l"], ws)
+            code_list, out_list = self.run_cli(["list"], ws)
+
+        self.assertEqual(code_l, 0, out_l)
+        self.assertEqual(code_list, 0, out_list)
+        self.assertEqual(out_l, out_list)
+        self.assertIn("Available nested projects", out_l)
+        self.assertNotIn("tasks done", out_l)
+
+    def test_explicit_name_targets_status_from_any_directory(self):
+        ws = self._workspace("alpha", "beta")
+
+        with _clean_env():
+            code, out = self.run_cli(["st", "alpha"], ws)
+
+        self.assertEqual(code, 0, out)
+        self.assertIn("> alpha", out)
+        self.assertNotIn("> beta", out)
+        self.assertNotIn("Available nested projects", out)
+
+    def test_unknown_name_exits_1_with_error(self):
+        ws = self._workspace("alpha")
+
+        with _clean_env():
+            code, out = self.run_cli(["st", "nope"], ws)
+
+        self.assertEqual(code, 1)
+        self.assertIn("ERROR: Project 'nope' not found.", out)
+        self.assertNotIn("> alpha", out)
+
+    def test_named_target_with_all_prints_that_projects_plan(self):
+        ws = self._workspace("alpha", "beta")
+
+        with _clean_env():
+            code, out = self.run_cli(["st", "alpha", "--all"], ws)
+
+        self.assertEqual(code, 0, out)
+        self.assertIn("> alpha", out)
+        self.assertIn("FULL PLAN", out)
+        self.assertIn("alpha task", out)
+        self.assertNotIn("beta task", out)
+
+    def test_st_all_in_ambiguous_directory_prints_no_foreign_plan(self):
+        """Several candidates, none chosen: the notice stands alone.
+        No other project's PLAN.md — and no bogus "PLAN.md not
+        found" either, since every listed project HAS one."""
+        ws = self._workspace("alpha", "beta")
+
+        with _clean_env():
+            code, out = self.run_cli(["st", "--all"], ws)
+
+        self.assertEqual(code, 0, out)
+        self.assertIn("Available nested projects:", out)
+        self.assertNotIn("FULL PLAN", out)
+        self.assertNotIn("alpha task", out)
+        self.assertNotIn("beta task", out)
+        self.assertNotIn("PLAN.md not found", out)
+
+    def test_global_dashboard_flag_rejects_a_project_name(self):
+        """``-g`` is the cross-project view: pairing it with a target
+        is a usage error, never a silently ignored argument."""
+        ws = self._workspace("alpha")
+
+        with _clean_env():
+            code, out = self.run_cli(["st", "alpha", "-g"], ws)
+
+        self.assertEqual(code, 2)
+        self.assertIn("takes no project name", out)
+
+    def test_zero_nested_projects_keep_the_standard_global_fallback(self):
+        """Nothing nested → the documented fallback stands (the
+        registry decides, as it always did for this case)."""
+        proj = self.make_project("registered")
+        ckregistry.register_project(proj, name="registered")
+        bare = Path(self._tmp.name) / "empty"
+        bare.mkdir()
+
+        with _clean_env():
+            code, out = self.run_cli(["st"], bare)
+
+        self.assertEqual(code, 0, out)
+        self.assertIn("> registered", out)
+        self.assertNotIn("Available nested projects", out)
+
+
+# ---------------------------------------------------------------------------
 # 4. Resolution sources (unit-level)
 # ---------------------------------------------------------------------------
 

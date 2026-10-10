@@ -26,7 +26,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from cklib import ui
+from cklib import core, ui
 from cklib.core import (_project_display_name, _render_dashboard_table,
                         _render_space_manager_list, _render_spaces_table)
 
@@ -171,30 +171,47 @@ class TestNameStyling(unittest.TestCase):
             with self.subTest(style=style):
                 self.assertNotEqual(style, ui.BOLD_MAGENTA)
 
-    def test_spaces_name_is_cyan(self):
-        """Space names are cyan — the palette's info/context color.
+    def test_every_table_names_are_bold_magenta(self):
+        """ONE name colour across ALL three tables.
 
-        The spec puts spaces and the project in context under cyan
-        (``\\033[36m``); only PROJECT rows in ``GLOBAL DASHBOARD`` get
-        bold magenta.
+        ``GLOBAL DASHBOARD``, ``SPACES (GLOBAL CONTEXTS)`` and
+        ``ck space list`` — including the active-project row — render
+        their primary entity name in bold magenta. Cyan is reserved
+        for ``[i]`` badges, hints and active-context markers, and must
+        never appear on a name.
         """
-        out = _render_spaces_table(palette=ui.Palette(True))
-        self.assertIn(f"{ui.CYAN}LOCAL{ui.RESET}", out)
-        self.assertIn(f"{ui.CYAN}REMOTE{ui.RESET}", out)
-        self.assertNotIn(ui.BOLD_MAGENTA, out)
+        cases = (
+            ("GLOBAL DASHBOARD", _render_dashboard_table(
+                [_state("lbl", "/w/myproj")], palette=ui.Palette(True)),
+             "myproj"),
+            ("SPACES table", _render_spaces_table(
+                palette=ui.Palette(True)), "LOCAL"),
+            ("SPACES table", _render_spaces_table(
+                palette=ui.Palette(True)), "REMOTE"),
+            ("space list spaces", _render_space_manager_list(
+                None, None, palette=ui.Palette(True)), "LOCAL"),
+            ("space list spaces", _render_space_manager_list(
+                None, None, palette=ui.Palette(True)), "REMOTE"),
+            ("space list active project", _render_space_manager_list(
+                "myproj", "/w/myproj", palette=ui.Palette(True)), "myproj"),
+        )
+        for label, out, name in cases:
+            with self.subTest(view=label, name=name):
+                self.assertIn(f"{ui.BOLD_MAGENTA}{name}{ui.RESET}", out, label)
+                self.assertNotIn(f"{ui.CYAN}{name}{ui.RESET}", out, label)
+                self.assertNotIn(f"{ui.BOLD}{name}{ui.RESET}", out, label)
 
-    def test_space_names_in_space_list_are_cyan(self):
-        """``ck space list`` uses the same engine, so same colour."""
-        out = _render_space_manager_list(None, None,
-                                         palette=ui.Palette(True))
-        for name in ("LOCAL", "REMOTE"):
-            with self.subTest(name=name):
-                self.assertIn(f"{ui.CYAN}{name}{ui.RESET}", out)
-
-    def test_active_project_row_stays_bold_cyan(self):
-        out = _render_space_manager_list("myproj", "/w/myproj",
-                                         palette=ui.Palette(True))
-        self.assertIn(f"{ui.BOLD}{ui.CYAN}myproj{ui.RESET}", out)
+    def test_cyan_is_absent_from_every_name_cell(self):
+        """No view may put cyan on the first column at all."""
+        for out in (_render_spaces_table(palette=ui.Palette(True)),
+                    _render_space_manager_list("myproj", "/w/myproj",
+                                               palette=ui.Palette(True))):
+            for line in out.splitlines():
+                first = ui.strip_ansi(line).split("│")[1] if "│" in line else ""
+                if not first.strip() or first.strip() == "Space":
+                    continue
+                with self.subTest(line=first.strip()):
+                    self.assertNotIn(ui.CYAN, line)
 
     def test_styling_does_not_change_any_column_width(self):
         """Bold paint is zero-width: the grid geometry must be
@@ -208,6 +225,56 @@ class TestNameStyling(unittest.TestCase):
                     for l in styled.splitlines()
                     if l.startswith(("┌", "│", "├", "└"))]
         self.assertEqual(plain_w, styled_w)
+
+
+class TestVerboseCardNameStyling(unittest.TestCase):
+    """``dashboard -v`` cards use the SAME name colour as the tables.
+
+    The verbose view historically had its own renderer and painted
+    titles bold cyan while the compact table painted magenta — the
+    split this unification removes. Both paths now go through
+    :func:`cklib.core._paint_name`.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+
+    def _card(self, title: str) -> str:
+        """One verbose card, triad stubbed out.
+
+        The header is what is under test, so the body renderer is
+        replaced with a fixed line rather than a parsed plan.
+        """
+        with mock.patch.object(core, "_render_verbose_triad",
+                               return_value=["    <body>"]):
+            lines = core._render_card_body(title, "/w/x", None, None, [],
+                                           ui.Palette(True))
+        return lines[0]
+
+    def test_card_title_is_bold_magenta(self):
+        for title in ("alpha", "myspace", "LOCAL", "Pretty Label"):
+            with self.subTest(title=title):
+                self.assertEqual(self._card(title),
+                                 f" > {ui.BOLD_MAGENTA}{title}{ui.RESET}")
+
+    def test_card_title_is_never_cyan_or_plain_bold(self):
+        for title in ("alpha", "myspace"):
+            with self.subTest(title=title):
+                line = self._card(title)
+                self.assertNotIn(ui.CYAN, line)
+                self.assertNotIn(f"{ui.BOLD}{title}", line)
+
+    def test_marker_and_padding_do_not_shift(self):
+        """The `` [*]`` cwd marker stays outside the styled run."""
+        with mock.patch.object(core, "_render_verbose_triad",
+                               return_value=["    <body>"]):
+            lines = core._render_card_body("alpha", "/w/x", None, None, [],
+                                           ui.Palette(True), marker=" [*]")
+        self.assertEqual(lines[0],
+                         f" > {ui.BOLD_MAGENTA}alpha{ui.RESET} [*]")
+        self.assertEqual(ui.display_width(ui.strip_ansi(lines[0])),
+                         len(" > alpha [*]"))
 
 
 class TestStyleAppliedAfterTruncation(unittest.TestCase):

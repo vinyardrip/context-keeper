@@ -39,6 +39,13 @@ Usage: ck <command> [args]
 Local (current project):
   st [-l|-e|-g]              Status of current project (-l: list tasks,
                              -e: edit plan, -g: global dashboard)
+  st <project_name>          Status of a REGISTERED project, from any
+                             directory (same targeting rules as
+                             `ck list <project_name>`); an unknown
+                             name exits 1. With no argument OUTSIDE
+                             every project, `ck st` never guesses:
+                             it renders the single nested project or
+                             lists the available ones
   st --all                   Also print the full PLAN.md
   list                       Print task list to STDOUT
   list <project_name>        Print the task list of a REGISTERED
@@ -278,6 +285,11 @@ def build_parser() -> "argparse.ArgumentParser":
     p_st.add_argument("-g", "--global", dest="global_dash", action="store_true",
                       help="Show the global dashboard (same as `ck dashboard`)")
     p_st.add_argument("--all", action="store_true", help="Include full PLAN.md")
+    p_st.add_argument(
+        "project_name", nargs="?", default=None,
+        help="Registered project to show (default: the current "
+             "project; outside every project `ck st` names the "
+             "single nested project or lists the choices)")
 
     p_dash = sub.add_parser(
         "dashboard",
@@ -809,17 +821,21 @@ def _dispatch(argv: Optional[List[str]] = None) -> int:
         if args.command == "init":
             ck.init(register=args.register)
         elif args.command == "st":
+            # One implementation path for BOTH dispatch styles:
+            # translate the namespace to the legacy token list and
+            # run the shared ``ck st`` runner (targeting + views).
+            rest = []
+            if getattr(args, "project_name", None):
+                rest.append(args.project_name)
             if args.list_tasks:
-                print(ck.tasks())
+                rest.append("-l")
             elif args.edit:
-                ck.edit_plan()
+                rest.append("-e")
             elif getattr(args, "global_dash", False):
-                print(ck.dashboard())
+                rest.append("-g")
             elif args.all:
-                print(ck.status())
-                _print_full_plan(ck)
-            else:
-                print(ck.status())
+                rest.append("--all")
+            return _run_status(ck, rest)
         elif args.command == "dashboard":
             print(ck.dashboard(verbose=getattr(args, "verbose", False)))
         elif args.command == "list":
@@ -1201,16 +1217,86 @@ def _run_space_mgmt(rest: List[str]) -> int:
 
 
 def _print_full_plan(ck: ContextKeeper) -> None:
+    # AMBIGUOUS directory (several nested projects, none chosen): the
+    # discovery notice printed above already says why nothing follows
+    # — a plan exists in every listed project, so neither "PLAN.md not
+    # found" nor some other project's plan may appear here.
+    if ck.status_is_ambiguous():
+        return
     print("=" * 45)
     print(" FULL PLAN (PLAN.md)")
     print("=" * 45)
-    # Follows the same context resolution as the status block above:
-    # local → ancestors (up to the Git repo root) → global registry.
+    # Follows the SAME target resolution as the status block above
+    # (local → ancestors up to the Git repo root → nested-project
+    # discovery → global registry), so the plan printed here always
+    # belongs to the project that block named.
     text = ck.full_plan_text()
     if text is None:
         _notice(ui.WARN, "PLAN.md not found.\n")
     else:
         print(text)
+
+
+def _run_status(ck: ContextKeeper, rest: List[str]) -> int:
+    """Run ``ck st`` — view flags plus EXPLICIT project targeting.
+
+    ``ck st <project_name>`` rebinds the whole command to that
+    project from ANY working directory (same resolution as
+    ``ck list <project_name>``: registry name → folder name → the
+    nested-project scan), so an explicitly named target always wins
+    over whichever project the user happens to be standing in. An
+    unknown name is the same clean exit-1 error ``ck list`` prints —
+    never a silent fall back to a different project, never a
+    traceback. More than one positional token is a usage error.
+
+    ``-g`` (the GLOBAL dashboard) is a cross-project view, so
+    pairing it with a project name is rejected as a usage error
+    instead of silently ignoring the target.
+
+    Returns the exit code (0 = rendered, 1 = unknown project,
+    2 = usage).
+    """
+    positionals = [tok for tok in rest if not tok.startswith("-")]
+    if len(positionals) > 1:
+        _print_error("ERROR: Usage: ck st [<project_name>] "
+                     "[-l|-e|-g|--all]")
+        return 2
+    target = ck
+    if positionals:
+        name = positionals[0]
+        root = ck.resolve_named_project(name)
+        if root is None:
+            _print_error(f"ERROR: Project '{name}' not found.")
+            return 1
+        if "-g" in rest or "--global" in rest:
+            _print_error("ERROR: `ck st -g` renders the global "
+                         "dashboard and takes no project name "
+                         f"(got: {name}).")
+            return 2
+        # EXPLICIT TARGET: the named project becomes THE context, so
+        # every view flag below operates on it — never on whatever
+        # the current directory happens to resolve to.
+        target = ContextKeeper(root=root)
+    if "-l" in rest or "--list" in rest:
+        # ``ck st -l`` IS ``ck list`` — the documented same view — so
+        # it routes through the same command: outside every project
+        # the nested-project discovery decides there, and the GLOBAL
+        # registry tier never silently picks a task list for you.
+        out, rc = target.list_tasks()
+        if rc:
+            _print_error(out)
+            return rc
+        print(out)
+    elif "-e" in rest or "--edit" in rest:
+        target.edit_plan()
+    elif "-g" in rest or "--global" in rest:
+        print(target.dashboard())
+    elif "--all" in rest:
+        print(target.status())
+        _print_full_plan(target)
+    else:
+        print(target.status())
+    return 0
 
 
 def _legacy_dispatch(raw: List[str]) -> int:
@@ -1240,17 +1326,10 @@ def _legacy_dispatch(raw: List[str]) -> int:
         if cmd == "init":
             ck.init(register="--register" in rest)
         elif cmd == "st":
-            if "-l" in rest or "--list" in rest:
-                print(ck.tasks())
-            elif "-e" in rest or "--edit" in rest:
-                ck.edit_plan()
-            elif "-g" in rest or "--global" in rest:
-                print(ck.dashboard())
-            elif "--all" in rest:
-                print(ck.status())
-                _print_full_plan(ck)
-            else:
-                print(ck.status())
+            # Optional positional project name (`ck st <project_name>`)
+            # + the documented view flags, all handled by the shared
+            # runner so the argparse and legacy paths cannot drift.
+            return _run_status(ck, rest)
         elif cmd == "dashboard":
             verbose = "-v" in rest or "--verbose" in rest
             print(ck.dashboard(verbose=verbose))
