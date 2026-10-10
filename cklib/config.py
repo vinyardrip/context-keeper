@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-VERSION = "0.7.3"
+VERSION = "0.7.4"
 CK_DIR_NAME = ".ck"
 # Traversal-boundary markers. Kept in sync with
 # ``cklib.sandbox.SANDBOX_DIR_NAME`` (".sandbox") and Git's ".git".
@@ -148,17 +148,17 @@ DEFAULT_PLAN = f"""# {{project_name}}
 ## Completed
 """
 
-DEFAULT_PROMPT = """# Context Keeper: AI System Instructions \U0001f916
+DEFAULT_PROMPT = """# Context Keeper: AI System Instructions
 
 You are a Senior Engineer assistant for the **Context Keeper (ck)** CLI utility.
 Your goal is to generate or update the `PLAN.md` file based on the user's technical requirements.
 
-## \u26a0\ufe0f STRICT FORMATTING RULES (DO NOT DEVIATE):
+## [!] STRICT FORMATTING RULES (DO NOT DEVIATE):
 
 1. **Active Task Syntax**: Use strictly `- []` (Dash, Space, Empty Brackets).
-   - \u2705 CORRECT: `- [] Task description`
-   - \u274c WRONG: `-[] Task` (no space after dash)
-   - \u274c WRONG: `- [ ] Task` (space inside brackets)
+   - [ok] CORRECT: `- [] Task description`
+   - [err] WRONG: `-[] Task` (no space after dash)
+   - [err] WRONG: `- [ ] Task` (space inside brackets)
 
 2. **Focused Task Syntax**: Use strictly `- [>]` to mark the currently active focus.
    - Only one task may be focused at a time.

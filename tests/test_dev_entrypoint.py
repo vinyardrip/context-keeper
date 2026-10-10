@@ -684,7 +684,7 @@ class TestCkDevSessionLifecycle(_WrapperBase):
         # the fixture projects. The active binary is the CHECKOUT's
         # local dev binary: entry pins the checkout dir to the front
         # of PATH before the banner renders.
-        self.assertIn("\u26a0\ufe0f  SANDBOX MODE ACTIVE", out)
+        self.assertIn("[!] SANDBOX MODE ACTIVE", out)
         self.assertIn(f"Active binary: {self.checkout / 'ck'}", out)
         self.assertIn("Type 'exit' or press Ctrl+D to return to "
                       "production", out)

@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.7.3-blue)]()
+[![version](https://img.shields.io/badge/version-0.7.4-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -103,7 +103,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.7.3
+ck -v    # → ck version 0.7.4
 ```
 
 ---
@@ -224,7 +224,7 @@ project directory has been deleted or moved. Such entries are labeled
 `[MISSING]`, and the output ends with an actionable tip:
 
 ```text
-💡 Found X missing project(s). Run 'ck prune' to cleanup.
+[i] Found X missing project(s). Run 'ck prune' to cleanup.
 ```
 
 Run `ck prune` to remove those orphaned entries from
@@ -472,7 +472,7 @@ Bare `ck-dev` enters an interactive **session subshell**. On entry the warning b
 
 ```text
 ┌──────────────────────────────────────────────────────────────┐
-│ ⚠️  SANDBOX MODE ACTIVE                                      │
+│ [!] SANDBOX MODE ACTIVE                                      │
 │ Active binary: /home/you/projects/context-keeper/ck          │
 │ Type 'exit' or press Ctrl+D to return to production          │
 └──────────────────────────────────────────────────────────────┘
@@ -763,7 +763,7 @@ chmod +x ck
 `[MISSING]`, а в конце вывода появляется подсказка:
 
 ```text
-💡 Found X missing project(s). Run 'ck prune' to cleanup.
+[i] Found X missing project(s). Run 'ck prune' to cleanup.
 ```
 
 Команда `ck prune` удаляет осиротевшие записи из

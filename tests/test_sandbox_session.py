@@ -128,7 +128,7 @@ class TestBannerRendering(unittest.TestCase):
         inner = len(lines[0]) - 2
         self.assertEqual(lines[0], "┌" + "─" * inner + "┐")
         self.assertEqual(lines[4], "└" + "─" * inner + "┘")
-        self.assertEqual(lines[1].strip("│ "), "⚠️  SANDBOX MODE ACTIVE")
+        self.assertEqual(lines[1].strip("│ "), "[!] SANDBOX MODE ACTIVE")
         self.assertTrue(
             lines[2].strip("│ ").startswith("Active binary: "),
             f"missing Active binary row: {lines[2]!r}")
@@ -183,7 +183,7 @@ class TestBannerRendering(unittest.TestCase):
         for line in lines[1:4]:
             self.assertTrue(line.startswith("│") and line.endswith("│"))
         self.assertTrue(lines[4].startswith("└") and lines[4].endswith("┘"))
-        self.assertIn("⚠️  SANDBOX MODE ACTIVE", lines[1])
+        self.assertIn("[!] SANDBOX MODE ACTIVE", lines[1])
         self.assertIn("Active binary:", lines[2])
         self.assertIn("Type 'exit' or press Ctrl+D to return to "
                       "production", lines[3])
@@ -201,7 +201,7 @@ class TestBannerRendering(unittest.TestCase):
         self.assertEqual(out.count("\033[1m"), 5)
         self.assertEqual(out.count("\033[33m"), 5)
         self.assertEqual(out.count("\033[0m"), 5)
-        self.assertIn("⚠️  SANDBOX MODE ACTIVE", out)
+        self.assertIn("[!] SANDBOX MODE ACTIVE", out)
 
     def test_default_respects_no_color_env(self):
         # conftest pins NO_COLOR=1 for the whole session; the default
