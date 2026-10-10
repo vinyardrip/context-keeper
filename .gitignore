@@ -41,6 +41,7 @@ PROMPTS.md
 .aider.input.history
 .aider.tags.cache.*.sqlite
 .claude/
+.freebuff/
 .gemini/
 .cursor/
 .continue/
