@@ -782,14 +782,25 @@ class TestStatusBadges(unittest.TestCase):
                 self.assertEqual(ui.badge(token, ui.Palette(True)),
                                  f"{code}{token}{ui.RESET}")
 
-    def test_reset_lands_immediately_after_the_badge(self):
-        """The trailing message must NOT inherit the badge styling."""
+    def test_reset_lands_at_the_end_of_the_whole_line(self):
+        """The ENTIRE notice line carries the badge's colour.
+
+        The message is part of the styled run: exactly one style opens
+        the line and exactly one RESET closes it, so a notice can never
+        trail unstyled text into the next line of output.
+        """
         for token in ("[!]", "[i]", "[ok]", "[err]"):
             with self.subTest(token=token):
                 line = ui.notice(token, "trailing text",
                                  ui.Palette(True))
-                self.assertTrue(line.startswith("\033["), line)
-                self.assertIn(f"{token}\033[0m trailing text", line)
+                self.assertEqual(line.count("\033["), 2, line)
+                self.assertTrue(
+                    line.startswith(f"{ui.BADGE_STYLES[token]}{token} "),
+                    line)
+                self.assertTrue(line.endswith(f"trailing text{ui.RESET}"),
+                                line)
+                # The styled run is contiguous — no reset in the middle.
+                self.assertNotIn(f"{token}{ui.RESET}", line)
 
     def test_badges_are_combined_single_sgr_runs(self):
         """Bold+colour badges are ONE SGR run, not a split pair."""
@@ -863,19 +874,42 @@ class TestColorIsAlwaysOn(unittest.TestCase):
         """``notice()`` with no explicit palette must still colour."""
         with _env():
             line = ui.notice("[ok]", "done")
-            self.assertTrue(line.startswith("\033[1;32m[ok]\033[0m "), line)
+            self.assertEqual(line, "\033[1;32m[ok] done\033[0m")
 
     def test_notice_respects_no_color(self):
         with _env(NO_COLOR="1"):
             self.assertEqual(ui.notice("[ok]", "done"), "[ok] done")
 
-    def test_reset_immediately_after_the_badge(self):
+    def test_full_line_styling_costs_no_columns(self):
+        """Painting the message must not change the line's WIDTH.
+
+        This is what keeps a styled notice from shifting the layout of
+        whatever it is printed under.
+        """
         p = ui.Palette(True)
         for token in ("[!]", "[i]", "[ok]", "[err]"):
             with self.subTest(token=token):
-                self.assertTrue(
-                    ui.notice(token, "msg", p).startswith(
-                        f"{ui.BADGE_STYLES[token]}{token}{ui.RESET} msg"))
+                self.assertEqual(
+                    ui.display_width(ui.notice(token, "msg", p)),
+                    len(f"{token} msg"))
+
+    def test_multiline_notice_keeps_one_open_run(self):
+        """A newline inside the message does not close the style.
+
+        Terminals carry SGR across a newline, so every line stays
+        coloured and the single trailing RESET closes them all.
+        """
+        line = ui.notice("[!]", "line one\nline two", ui.Palette(True))
+        self.assertEqual(line.count("\033["), 2, line)
+        self.assertTrue(line.endswith(ui.RESET), line)
+
+    def test_notice_with_empty_message_is_still_colored(self):
+        p = ui.Palette(True)
+        self.assertEqual(ui.notice("[ok]", "", p), "\033[1;32m[ok]\033[0m")
+
+    def test_unknown_token_falls_back_to_plain_text(self):
+        p = ui.Palette(True)
+        self.assertEqual(ui.notice("[?]", "hi", p), "[?] hi")
 
 
 if __name__ == "__main__":

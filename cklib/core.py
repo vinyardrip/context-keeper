@@ -4013,10 +4013,20 @@ def _project_display_name(entry) -> str:
     return "(unnamed)"
 
 
+# Name-column paint per grid. The GLOBAL DASHBOARD uses bold magenta
+# for project names; the SPACES table keeps plain bold for space names.
+# Both are deliberately distinct from every notice badge colour (see
+# :data:`cklib.ui.BOLD_MAGENTA`) so a row title never reads as a
+# status line.
+_NAME_STYLE_BOLD = "bold"
+_NAME_STYLE_MAGENTA = "magenta"
+
+
 def _grid_row(name: str, path: str, focus_head: str, focus_text: str,
               progress: tuple, last: str, *,
               palette: Optional[ui.Palette] = None,
-              accent_name: bool = True) -> dict:
+              accent_name: bool = True,
+              name_style: str = _NAME_STYLE_BOLD) -> dict:
     """Build one grid row with the SHARED truncation applied.
 
     Every cell passes through the same display-width-aware helpers the
@@ -4026,16 +4036,20 @@ def _grid_row(name: str, path: str, focus_head: str, focus_text: str,
     overflow its column.
 
     VISUAL HIERARCHY (both grids): the NAME line is the row's primary
-    identifier, so it is painted bold and the path line below it stays
-    in the plain native color. Paint is applied AFTER truncation and
-    carries ZERO columns (:func:`cklib.ui.display_width` strips SGR), so
-    styling can never shift a border. ``accent_name=False`` renders the
-    name unstyled; ``palette=None`` also leaves it unstyled.
+    identifier, so it is painted emphatically and the path line below
+    it stays in the plain native color. ``name_style`` picks the paint —
+    :data:`_NAME_STYLE_MAGENTA` (projects) or :data:`_NAME_STYLE_BOLD`
+    (spaces). Paint is applied AFTER truncation and carries ZERO
+    columns (:func:`cklib.ui.display_width` strips SGR), so styling can
+    never shift a border. ``accent_name=False`` renders the name
+    unstyled; ``palette=None`` also leaves it unstyled.
     """
     name_line = _truncate_ellipsis(name, _PROJECT_CAP)
     path_line = _smart_path(path, _PROJECT_CAP)
     if accent_name and palette is not None:
-        name_line = palette.bold(name_line)
+        name_line = (palette.bold_magenta(name_line)
+                     if name_style == _NAME_STYLE_MAGENTA
+                     else palette.bold(name_line))
     return {
         "name": (name_line, path_line),
         "focus": (focus_head, _truncate_right(focus_text, _FOCUS_TEXT_CAP)),
@@ -4217,7 +4231,7 @@ def _render_dashboard_table(states: list,
 
         rows.append(_grid_row(
             name, entry.path, focus_head, focus_text, progress, last,
-            palette=p))
+            palette=p, name_style=_NAME_STYLE_MAGENTA))
 
     # The SAME engine the spaces table uses, with the SAME width
     # policy — see :func:`_render_standard_grid`.
