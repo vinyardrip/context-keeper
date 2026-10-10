@@ -3875,13 +3875,27 @@ def read_active_task_note(project_root: Path) -> Optional[dict]:
 # Dashboard: compact table (default)
 # ---------------------------------------------------------------------- #
 
-_DASH_HEADERS = ("Project", "Focus Task", "Progress", "Last Active")
-_DASH_KEYS = ("project", "focus", "progress", "last")
+# ---------------------------------------------------------------------- #
+# THE shared table contract (GLOBAL DASHBOARD / SPACES / `ck space list`)
+# ---------------------------------------------------------------------- #
+#
+# There is exactly ONE grid shape in this module. The dashboard's
+# ``GLOBAL DASHBOARD`` table, the ``SPACES (GLOBAL CONTEXTS)`` table and
+# the ``ck space list`` table all render through it with the SAME
+# columns, the SAME width policy and the SAME truncation helpers — the
+# only differences are the title and the label of the first column.
+#
+# The first column is keyed ``name`` (not ``project`` / ``space``)
+# because the engine has no opinion about what a row represents, only
+# about how wide its columns are. Sharing the key set is what lets a
+# single ``caps`` / ``fixed_widths`` policy below apply verbatim to
+# every grid: there is no second policy that can drift out of sync.
+_GRID_TAIL_HEADERS = ("Focus Task", "Progress", "Last Active")
+_GRID_KEYS = ("name", "focus", "progress", "last")
 
-# Unified SPACES table header — same four columns as the projects
-# table so both pass through one shared grid pipeline.
-_SPACES_HEADERS = ("Space", "Focus Task", "Progress", "Last Active")
-_SPACES_KEYS = ("space", "focus", "progress", "last")
+# First-column label per grid.
+_DASH_FIRST_HEADER = "Project"
+_SPACES_FIRST_HEADER = "Space"
 
 # Hard caps for the NARROW columns — kept tight so the table fits
 # inside an 80-column terminal (Alacritty etc.) without line wrapping.
@@ -3908,6 +3922,74 @@ _LAST_WIDTH_CAP = 16
 _TABLE_BUDGET = 80
 _FOCUS_TEXT_CAP = 80  # soft cap; table-budget clamp is the real gate
 _FOCUS_MIN_WIDTH = 10  # never squeeze Focus below 10 chars (header len)
+
+# THE width policy — one object, shared verbatim by every grid. Callers
+# pass ``dict(_GRID_CAPS)`` / ``dict(_GRID_FIXED_WIDTHS)`` so a grid can
+# never mutate the shared definition. Because the key set
+# (:data:`_GRID_KEYS`) is shared too, this policy is literally correct
+# for the projects table AND the spaces table: there is no second copy
+# to fall out of step.
+_GRID_CAPS = {"name": _PROJECT_CAP, "last": _LAST_WIDTH_CAP}
+_GRID_FIXED_WIDTHS = {"progress": _PROGRESS_WIDTH}
+_GRID_FLUID_KEY = "focus"
+
+
+def _grid_headers(first: str) -> tuple:
+    """Header tuple for a grid whose first column is labelled ``first``."""
+    return (first,) + _GRID_TAIL_HEADERS
+
+
+def _progress_cell(done: int, total: int, pct: float) -> tuple:
+    """The two-line Progress cell shared by every grid.
+
+    Line 1 ``<done>/<total>``, line 2 ``(<pct>%)`` — sized for the
+    exact ``_PROGRESS_WIDTH`` (7 and 8 columns at the longest).
+    """
+    return (f"{done}/{total}", f"({pct}%)")
+
+
+def _grid_row(name: str, path: str, focus_head: str, focus_text: str,
+              progress: tuple, last: str) -> dict:
+    """Build one grid row with the SHARED truncation applied.
+
+    Every cell passes through the same display-width-aware helpers the
+    projects table uses (:func:`_truncate_ellipsis`,
+    :func:`_smart_path`, :func:`_truncate_right`), so a long project
+    name and a long space name are cut identically and neither can
+    overflow its column.
+    """
+    return {
+        "name": (_truncate_ellipsis(name, _PROJECT_CAP),
+                 _smart_path(path, _PROJECT_CAP)),
+        "focus": (focus_head, _truncate_right(focus_text, _FOCUS_TEXT_CAP)),
+        "progress": progress,
+        "last": (last,),
+    }
+
+
+def _render_standard_grid(title: str, first_header: str, rows: list, *,
+                          footer: Optional[str] = None,
+                          palette: Optional[ui.Palette] = None) -> str:
+    """THE table engine: every project/space grid goes through here.
+
+    Thin, opinionated wrapper over :func:`_render_grid` that hard-wires
+    the shared column set and width policy, so no call site can pass a
+    different one. ``GLOBAL DASHBOARD``, ``SPACES (GLOBAL CONTEXTS)``
+    and ``ck space list`` are therefore guaranteed to agree on every
+    column width by construction rather than by convention.
+    """
+    return _render_grid(
+        title,
+        _grid_headers(first_header),
+        _GRID_KEYS,
+        rows,
+        caps=dict(_GRID_CAPS),
+        fixed_widths=dict(_GRID_FIXED_WIDTHS),
+        fluid_key=_GRID_FLUID_KEY,
+        footer=footer,
+        palette=palette,
+    )
+
 
 _DASH_FOOTER_TIP = (
     "[i] Missing a project? Navigate to its folder and run "
@@ -4025,56 +4107,32 @@ def _render_dashboard_table(states: list,
         name = entry.name + (" *" if s["is_cwd"] else "")
         if s["condition"] == "missing":
             name = f"[MISSING] {name}"
-        name_line = _truncate_ellipsis(name, _PROJECT_CAP)
-        # Path line: FLUSH LEFT (no leading indent) and contracted
-        # to the two-segment form ``~/../parent/project``. The full
-        # ``_PROJECT_CAP`` is the column budget; the path shares it
-        # with the name line (different rows, same column width).
-        path_line = _smart_path(entry.path, _PROJECT_CAP)
 
         last = _relative_time(entry.last_seen)
 
         if s["condition"] == "missing":
-            focus_head, focus_text = "n/a", ""
-            progress_lines = ("missing",)
+            focus_head, focus_text, progress = "n/a", "", ("missing",)
         elif s["condition"] == "corrupt":
-            focus_head, focus_text = "n/a", ""
-            progress_lines = ("corrupt",)
+            focus_head, focus_text, progress = "n/a", "", ("corrupt",)
         else:
             if tl_local.focused:
                 t = tl_local.focused[0]
                 focus_head = f"[{t.id}] [>]"
-                focus_text = _truncate_right(t.title, _FOCUS_TEXT_CAP)
+                focus_text = t.title
             else:
                 focus_head, focus_text = "(no focus)", ""
-            done_count = len(tl_local.done)
-            # Compact two-line progress: ``<done>/<total>`` on line 1
-            # and ``(<pct>%)`` on line 2. Both fit inside the 9-char
-            # ``_PROGRESS_WIDTH`` even at the longest (``100/100`` and
-            # ``(100.0%)`` = 7 and 8 chars).
-            progress_lines = (
-                f"{done_count}/{tl_local.total}",
-                f"({tl_local.completion_pct}%)",
-            )
+            progress = _progress_cell(len(tl_local.done), tl_local.total,
+                                      tl_local.completion_pct)
 
-        rows.append({
-            "project": (name_line, path_line),
-            "focus": (focus_head, focus_text),
-            "progress": progress_lines,
-            "last": (last,),
-        })
+        rows.append(_grid_row(
+            name, entry.path, focus_head, focus_text, progress, last))
 
-    # Declarative grid render: the SAME pipeline the spaces table
-    # uses (see _render_grid) — width policy is passed as config so
-    # neither table duplicates rendering logic.
-    return _render_grid(
+    # The SAME engine the spaces table uses, with the SAME width
+    # policy — see :func:`_render_standard_grid`.
+    return _render_standard_grid(
         "GLOBAL DASHBOARD",
-        _DASH_HEADERS,
-        _DASH_KEYS,
+        _DASH_FIRST_HEADER,
         rows,
-        caps={"project": _PROJECT_CAP, "last": _LAST_WIDTH_CAP},
-        fixed_widths={"progress": _PROGRESS_WIDTH},
-        fluid_key="focus",
         footer=_DASH_FOOTER_TIP,
         palette=palette,
     )
@@ -4233,9 +4291,10 @@ def _render_space_manager_list(project_name: Optional[str],
     the Space column and wrapping long project names. When no project
     resolves, a note says so explicitly instead of faking a row.
 
-    Reuses the SAME grid pipeline and cell shape as the dashboard's
-    ``SPACES (GLOBAL CONTEXTS)`` table, so the two views can never
-    disagree about a space's focus, progress or last-active stamp.
+    Reuses the SAME engine, the SAME width policy and the SAME cell
+    builder as the dashboard's ``SPACES (GLOBAL CONTEXTS)`` table, so
+    the three views can never disagree about a space's focus, progress
+    or last-active stamp — nor about column widths.
     """
     p = palette if palette is not None else ui.get_chrome_palette()
     rows: list[dict] = []
@@ -4243,40 +4302,32 @@ def _render_space_manager_list(project_name: Optional[str],
         # The active project is marked by ACCENT ONLY — a bold/cyan
         # name and nothing else. A literal `[PROJECT]` tag used to
         # widen the Space column and wrap long project names; colour
-        # costs no columns, so the grid keeps its layout.
+        # costs no columns, so the grid keeps its layout. The row is
+        # built by the shared builder and THEN painted, so the accent
+        # can never change how the cell is measured.
         rows.append({
-            "space": (p.bold_cyan(project_name),
-                      p.muted(_smart_path(project_path, _PROJECT_CAP))),
-            "focus": (p.muted("n/a"), ""),
-            "progress": (p.muted("n/a"),),
-            "last": (p.muted("n/a"),),
+            k: (p.bold_cyan(v[0]), p.muted(v[1])) if k == "name" else v
+            for k, v in _grid_row(
+                project_name, project_path, "n/a", "",
+                (p.muted("n/a"),), p.muted("n/a")).items()
         })
     for space in _space_order():
         snap = spaces.space_snapshot(space)
-        rows.append({
-            "space": (_truncate_ellipsis(snap["name"], _PROJECT_CAP),
-                      _smart_path(snap["path"], _PROJECT_CAP)),
-            "focus": (
-                (f"[{snap['focus_id']}] [>]",
-                 _truncate_right(snap["focus_title"] or "",
-                                 _FOCUS_TEXT_CAP))
-                if snap["focus_id"] is not None else ("n/a", "")),
-            # TWO-LINE progress, exactly like the GLOBAL DASHBOARD
-            # table: ``<done>/<total>`` then ``(<pct>%)``, sized to
-            # the shared ``_PROGRESS_WIDTH`` so both grids agree.
-            "progress": (f"{snap['done']}/{snap['total']}",
-                         f"({snap['pct']}%)"),
-            "last": (_relative_time(snap["last"])
-                     if snap["last"] else "n/a",),
-        })
-    out = _render_grid(
+        if snap["focus_id"] is not None:
+            focus_head = f"[{snap['focus_id']}] [>]"
+            focus_text = snap["focus_title"] or ""
+        else:
+            focus_head, focus_text = "n/a", ""
+        last = (_relative_time(snap["last"])
+                if snap["last"] else "n/a")
+        rows.append(_grid_row(
+            snap["name"], snap["path"], focus_head, focus_text,
+            _progress_cell(snap["done"], snap["total"], snap["pct"]),
+            last))
+    out = _render_standard_grid(
         "SPACES (GLOBAL CONTEXTS)",
-        _SPACES_HEADERS,
-        _SPACES_KEYS,
+        _SPACES_FIRST_HEADER,
         rows,
-        caps={"space": _PROJECT_CAP, "last": _LAST_WIDTH_CAP},
-        fixed_widths={"progress": _PROGRESS_WIDTH},
-        fluid_key="focus",
         palette=p,
     )
     if project_name is None or project_path is None:
@@ -4339,37 +4390,23 @@ def _render_spaces_table(
     rows: list[dict] = []
     for space in space_order:
         snap = spaces.space_snapshot(space)
-        name_line = _truncate_ellipsis(snap["name"], _PROJECT_CAP)
-        # Path line uses the SAME contraction helper as the projects
-        # table, so both tables render paths identically.
-        path_line = _smart_path(snap["path"], _PROJECT_CAP)
         if snap["focus_id"] is not None:
             focus_head = f"[{snap['focus_id']}] [>]"
-            focus_text = _truncate_right(
-                snap["focus_title"] or "", _FOCUS_TEXT_CAP)
+            focus_text = snap["focus_title"] or ""
         else:
             focus_head, focus_text = "n/a", ""
-        # TWO-LINE progress, mirroring the GLOBAL DASHBOARD table
-        # exactly: ``<done>/<total>`` then ``(<pct>%)``, sized to the
-        # shared ``_PROGRESS_WIDTH``. Both grids therefore render
-        # column-for-column identically.
-        progress = (f"{snap['done']}/{snap['total']}", f"({snap['pct']}%)")
         last = (_relative_time(snap["last"])
-                if snap["last"] else "n/a",)
-        rows.append({
-            "space": (name_line, path_line),
-            "focus": (focus_head, focus_text),
-            "progress": progress,
-            "last": last,
-        })
-    return _render_grid(
+                if snap["last"] else "n/a")
+        rows.append(_grid_row(
+            snap["name"], snap["path"], focus_head, focus_text,
+            _progress_cell(snap["done"], snap["total"], snap["pct"]),
+            last))
+    # Literally the SAME engine and the SAME width policy as
+    # ``GLOBAL DASHBOARD`` — see :func:`_render_standard_grid`.
+    return _render_standard_grid(
         "SPACES (GLOBAL CONTEXTS)",
-        _SPACES_HEADERS,
-        _SPACES_KEYS,
+        _SPACES_FIRST_HEADER,
         rows,
-        caps={"space": _PROJECT_CAP, "last": _LAST_WIDTH_CAP},
-        fixed_widths={"progress": _PROGRESS_WIDTH},
-        fluid_key="focus",
         palette=palette,
     )
 
