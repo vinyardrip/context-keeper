@@ -7,13 +7,17 @@ yellow/cyan active focus).
 Color decision precedence (first match wins):
 
 1. ``NO_COLOR`` set (non-empty, any value — https://no-color.org)
-   → colors always OFF, nothing can override it.
-2. ``FORCE_COLOR`` set (non-empty, not ``0``) → colors ON even when
-   piped, for readers that render ANSI (``less -R``, pagers, logs).
-3. ``CLICOLOR_FORCE`` truthy (``1``/``true``/``yes``/``on``) → same
-   as FORCE_COLOR.
-4. Otherwise: the target stream is a TTY (``sys.stdout.isatty()``)
-   → ON interactively, OFF for pipes/redirects.
+   → colors always OFF, nothing can override it. **This is the only
+   opt-out.**
+2. Otherwise → colors ALWAYS ON, including when stdout is a pipe or a
+   file. ``FORCE_COLOR`` / ``CLICOLOR_FORCE`` are still honoured but
+   are now redundant.
+
+Rationale: the status badges (``[!]`` ``[i]`` ``[ok]`` ``[err]``) are
+the primary severity channel of this CLI. Dropping them on a redirect
+meant ``ck … > log.txt`` lost every success/failure signal, so TTY
+detection is deliberately NOT consulted. A user who wants plain text
+sets ``NO_COLOR``.
 
 CONTRAST POLICY (dark/transparent-theme friendly):
 
@@ -161,28 +165,30 @@ def resolve_color(value: Any) -> Optional[str]:
 
 
 def color_enabled(stream: Any = None) -> bool:
-    """Return True when ANSI colors should be emitted to ``stream``.
+    """Return True when ANSI colors should be emitted.
 
-    ``stream`` defaults to ``sys.stdout``. See the module docstring
-    for the precedence rules (``NO_COLOR`` > ``FORCE_COLOR`` /
-    ``CLICOLOR_FORCE`` > TTY detection). Never raises: a stream
-    without ``isatty`` (or one that fails the probe) is treated as
-    non-interactive.
+    COLOR IS THE DEFAULT, NOT A LUXURY. Status badges are the only
+    way a user can tell a success from a failure at a glance, so they
+    keep their color **even when stdout is a pipe or a file**. Suppressing
+    them on a redirect is what made ``ck … > log.txt`` silently drop
+    every severity signal.
+
+    ``NO_COLOR`` is therefore the ONLY opt-out, and it wins absolutely:
+
+    - ``NO_COLOR`` set (non-empty)   -> False
+    - ``FORCE_COLOR`` / ``CLICOLOR_FORCE`` -> True (redundant, kept for
+      compatibility with callers that set them explicitly)
+    - otherwise                      -> True
+
+    ``stream`` is accepted for call-site compatibility and no longer
+    affects the decision: TTY detection is deliberately NOT consulted.
+    Never raises.
     """
     if os.environ.get("NO_COLOR"):
         # Highest precedence: an explicit opt-out cannot be forced back on.
         return False
-    force = os.environ.get("FORCE_COLOR")
-    if force and force != "0":
-        return True
-    if os.environ.get("CLICOLOR_FORCE", "").lower() in _TRUTHY_ENV:
-        return True
-    if stream is None:
-        stream = sys.stdout
-    try:
-        return bool(stream.isatty())
-    except (AttributeError, ValueError, OSError):
-        return False
+    # Everything else is colored. ``stream`` is unused on purpose.
+    return True
 
 
 class Palette:

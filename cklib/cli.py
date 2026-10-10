@@ -221,10 +221,19 @@ _LOCAL_ONLY_COMMANDS = frozenset({
 
 # User-facing message shown when a local command runs from a working
 # directory whose descriptor is gone (rootless keeper).
-_NO_ROOT_MESSAGE = (
-    "[!] Not in a valid project directory. "
+# Plain TEXT (no literal badge): rendered through ``notice()`` so the
+# ``[!]`` token is styled and NO_COLOR still suppresses it. Built LAZILY
+# because the colour decision must be taken at call time — the
+# environment can change between import and dispatch.
+_NO_ROOT_TEXT = (
+    "Not in a valid project directory. "
     "cd into your project (or use a global command: ck st -g)."
 )
+
+
+def _no_root_message() -> str:
+    """The rootless-cwd guidance line, with a styled ``[!]`` badge."""
+    return ui.notice(ui.WARN, _NO_ROOT_TEXT)
 
 
 def build_parser() -> "argparse.ArgumentParser":
@@ -767,7 +776,7 @@ def _dispatch(argv: Optional[List[str]] = None) -> int:
     # but the commands above have no project to operate on and must
     # fail with a clean, actionable message instead of a traceback.
     if raw[0] in _LOCAL_ONLY_COMMANDS and find_project_root() is None:
-        print(_NO_ROOT_MESSAGE)
+        print(_no_root_message())
         return 1
 
     # DYNAMIC SPACE ROUTING: `ck <space> <action>` routes to the
@@ -900,10 +909,8 @@ def _dispatch(argv: Optional[List[str]] = None) -> int:
                 print(f"Pruned {len(pruned)} missing entries:")
                 for p in pruned:
                     print(f"   * {p}")
-                print(
-                    f"[ok] Summary: {len(pruned)} project(s) purged "
-                    "from the global registry."
-                )
+                _notice(ui.OK, f"Summary: {len(pruned)} project(s) "
+                          "purged from the global registry.")
             else:
                 _notice(ui.OK, "Nothing to prune.")
         elif args.command == "install":
@@ -1116,9 +1123,8 @@ def _run_space_mgmt(rest: List[str]) -> int:
                 print("Usage: ck space rename <old> <new>")
                 return 2
             info = spaces.rename_space(args[0], args[1])
-            print(
-                f"[ok] Renamed space {info['from']!r} -> {info['to']!r}: "
-                f"{info['moved']}")
+            _notice(ui.OK, f"Renamed space {info['from']!r} -> "
+                      f"{info['to']!r}: {info['moved']}")
             if info["notes_moved"]:
                 print("     Process notes (sidecar) carried along.")
             return 0
@@ -1168,8 +1174,8 @@ def _run_space_mgmt(rest: List[str]) -> int:
                     _notice(ui.INFO, "Aborted.")
                     return 2
             info = spaces.delete_space(name, confirmed=True)
-            print(
-                f"[ok] Deleted space {info['name']!r} ({info['removed']}).")
+            _notice(ui.OK, f"Deleted space {info['name']!r} "
+                      f"({info['removed']}).")
             if info["notes"]:
                 print("     Process notes (sidecar) deleted too.")
             return 0
@@ -1391,10 +1397,8 @@ def _legacy_dispatch(raw: List[str]) -> int:
                 print(f"Pruned {len(pruned)} missing entries:")
                 for p in pruned:
                     print(f"   * {p}")
-                print(
-                    f"[ok] Summary: {len(pruned)} project(s) purged "
-                    "from the global registry."
-                )
+                _notice(ui.OK, f"Summary: {len(pruned)} project(s) "
+                          "purged from the global registry.")
             else:
                 _notice(ui.OK, "Nothing to prune.")
         elif cmd in ("local", "remote"):
@@ -1624,11 +1628,9 @@ def _run_space_command(space: str, rest: List[str]) -> int:
         else:
             _notice(ui.OK, "Focus reset.")
         if result.get("demoted_id") is not None:
-            print(
-                f"[i] Task #{result['demoted_id']} "
-                f"{result['demoted_title']} lost focus "
-                "(demoted to open)."
-            )
+            _notice(ui.INFO, f"Task #{result['demoted_id']} "
+                             f"{result['demoted_title']} lost focus "
+                             "(demoted to open).")
         return 0
 
     if action == "note":
@@ -1770,10 +1772,9 @@ def _refresh_installed_copy() -> None:
         return
     source = _resolve_install_source("ck")
     if source is None:
-        print(
-            "[!] An installed copy exists but no launcher source was "
-            "found; run `ck install` from the checkout to refresh it."
-        )
+        _notice(ui.WARN, "An installed copy exists but no launcher "
+                   "source was found; run `ck install` from the "
+                   "checkout to refresh it.")
         return
     _notice(ui.INFO, "Refreshing installed production copy ...")
     _install_physical_copy(source, target)
@@ -1832,10 +1833,9 @@ def _refuse_global_mutation_in_dev_mode(action: str) -> bool:
     """
     if not is_dev_mode():
         return False
-    print(
-        f"[!] Dev mode: `{action}` would mutate the global installation "
-        f"({USER_INSTALL_PATH}, {SNAPSHOT_INSTALL_DIR})."
-    )
+    _notice(ui.WARN, f"Dev mode: `{action}` would mutate the global "
+               f"installation ({USER_INSTALL_PATH}, "
+               f"{SNAPSHOT_INSTALL_DIR}).")
     print(
         "    Sandbox sessions never touch global state — run this "
         "command outside dev mode (plain `ck` without CK_SANDBOX)."
@@ -1859,10 +1859,8 @@ def _install_user(dev: bool = False) -> None:
     environment): ``./ck-dev``. Nothing is installed.
     """
     if dev:
-        print(
-            "[!] Deprecated: `ck install --dev` no longer creates "
-            "~/.local/bin/ck-dev."
-        )
+        _notice(ui.WARN, "Deprecated: `ck install --dev` no longer "
+                   "creates ~/.local/bin/ck-dev.")
         print(
             "    Dev mode runs via local binary execution from the "
             "checkout: ./ck-dev <command>"
