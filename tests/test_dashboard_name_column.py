@@ -152,14 +152,31 @@ class TestNameStyling(unittest.TestCase):
                     os.environ[key] = value
         self.addCleanup(_restore)
 
-    def test_dashboard_name_is_bold(self):
+    def test_dashboard_name_is_bold_magenta(self):
+        """Project names are bold magenta — never cyan.
+
+        Cyan already belongs to the ``[i]`` notice badge; a cyan
+        project name sitting next to a cyan hint made the two read as
+        the same kind of thing.
+        """
         out = _render_dashboard_table([_state("lbl", "/w/myproj")])
-        self.assertIn(f"{ui.BOLD}myproj{ui.RESET}", out)
+        self.assertIn(f"{ui.BOLD_MAGENTA}myproj{ui.RESET}", out)
+        self.assertNotIn(f"{ui.BOLD}myproj{ui.RESET}", out)
+        self.assertNotIn(f"{ui.CYAN}myproj{ui.RESET}", out)
+
+    def test_dashboard_name_magenta_differs_from_every_badge_color(self):
+        """No notice badge shares the project-name colour."""
+        out = _render_dashboard_table([_state("lbl", "/w/myproj")])
+        for style in ui.BADGE_STYLES.values():
+            with self.subTest(style=style):
+                self.assertNotEqual(style, ui.BOLD_MAGENTA)
 
     def test_spaces_name_is_bold(self):
+        """Space names keep their own (plain bold) styling."""
         out = _render_spaces_table(palette=ui.Palette(True))
         self.assertIn(f"{ui.BOLD}LOCAL{ui.RESET}", out)
         self.assertIn(f"{ui.BOLD}REMOTE{ui.RESET}", out)
+        self.assertNotIn(ui.BOLD_MAGENTA, out)
 
     def test_active_project_row_stays_bold_cyan(self):
         out = _render_space_manager_list("myproj", "/w/myproj",
@@ -187,10 +204,10 @@ class TestStyleAppliedAfterTruncation(unittest.TestCase):
         long_dir = "d" * 80
         out = _render_dashboard_table(
             [_state("lbl", f"/w/{long_dir}")], palette=ui.Palette(True))
-        # Exactly one bold run on the name line, and it is closed.
+        # Exactly one magenta run on the name line, and it is closed.
         row = next(l for l in out.splitlines()
                    if ui.strip_ansi(l).lstrip("│ ").startswith("d"))
-        self.assertIn(f"{ui.BOLD}", row)
+        self.assertIn(f"{ui.BOLD_MAGENTA}", row)
         self.assertLessEqual(
             ui.display_width(ui.strip_ansi(row).split("│")[1]), 27)
 

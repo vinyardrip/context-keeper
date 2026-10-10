@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.8.6-blue)]()
+[![version](https://img.shields.io/badge/version-0.8.7-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -103,7 +103,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.8.6
+ck -v    # → ck version 0.8.7
 ```
 
 ---
@@ -519,8 +519,25 @@ When nothing carries a note: `[i] No active process notes found.`
 
 Status badges are colored **by default** and keep their color when the output is
 piped or redirected to a file: `[!]` bold yellow, `[i]` cyan, `[ok]` bold green,
-`[err]` and `ERROR:` bold red. The reset escape is emitted immediately after the
-badge, so the message that follows keeps your normal terminal formatting.
+`[err]` and `ERROR:` bold red.
+
+A notice colors its **entire line**: the badge and the sentence that follows are
+one styled run, closed by a single reset at the end of the line.
+
+```text
+[!] PLAN.md not found.          <- whole line bold yellow, not just "[!]"
+[i] Run 'ck init' in a project. <- whole line cyan
+```
+
+This is the same engine for root-level commands and for the hints printed under
+the dashboard tables, so a notice looks identical wherever it appears. Because
+styling occupies zero terminal columns, coloring the full line never reflows the
+table above it.
+
+In the tables themselves, the first column of `GLOBAL DASHBOARD` renders project
+names in **bold magenta** (`\033[1;35m`) so they are never confused with the cyan
+`[i]` hints. Space names in `SPACES` stay bold, and the active project in
+`ck space list` stays bold cyan.
 
 `NO_COLOR` is the only opt-out:
 

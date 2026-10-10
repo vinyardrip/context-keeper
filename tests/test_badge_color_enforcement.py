@@ -30,12 +30,15 @@ from cklib import config as ckconfig
 from cklib import ui
 from cklib.cli import main
 
-# The exact sequences the spec requires.
+# The exact sequences the spec requires: the OPENING style run of each
+# notice. There is deliberately NO reset here — a notice paints its
+# WHOLE line (badge + sentence) as one styled run closed by a single
+# trailing reset, so the identity of a notice is its opening sequence.
 STYLED = {
-    "[!]": "\033[1;33m[!]\033[0m",
-    "[i]": "\033[36m[i]\033[0m",
-    "[ok]": "\033[1;32m[ok]\033[0m",
-    "[err]": "\033[1;31m[err]\033[0m",
+    "[!]": "\033[1;33m[!]",
+    "[i]": "\033[36m[i]",
+    "[ok]": "\033[1;32m[ok]",
+    "[err]": "\033[1;31m[err]",
 }
 
 

@@ -68,6 +68,7 @@ GREEN = "\033[32m"
 YELLOW = "\033[33m"
 CYAN = "\033[36m"
 RED = "\033[31m"
+MAGENTA = "\033[35m"
 
 # COMBINED bold+color sequences for status badges. Unlike
 # ``bold_yellow`` & co. (which emit BOLD and the color as two separate
@@ -79,6 +80,14 @@ RED = "\033[31m"
 BOLD_YELLOW = "\033[1;33m"
 BOLD_GREEN = "\033[1;32m"
 BOLD_RED = "\033[1;31m"
+
+# Bold magenta — NOT a badge colour. Reserved for the project-name
+# column of the GLOBAL DASHBOARD: cyan already belongs to the [i]
+# notice badge, and a cyan project name next to a cyan hint made the
+# two read as the same kind of thing. Magenta is far from every badge
+# colour (yellow/cyan/green/red) in hue, so a project name can never
+# be mistaken for a status line.
+BOLD_MAGENTA = "\033[1;35m"
 
 # Orange/amber banner: inverted, high-contrast background highlight
 # (bold + amber background 43 + black foreground 30). Used for the
@@ -297,6 +306,14 @@ class Palette:
     def bold_red(self, text: str) -> str:
         return self.paint(text, BOLD, RED)
 
+    def bold_magenta(self, text: str) -> str:
+        """Project identifiers (GLOBAL DASHBOARD name column).
+
+        Deliberately far from every badge colour so a project name is
+        never confused with a status line — see :data:`BOLD_MAGENTA`.
+        """
+        return self.paint(text, BOLD_MAGENTA)
+
     def banner(self, text: str) -> str:
         """Bottom banner line: orange/amber background highlight.
 
@@ -392,9 +409,12 @@ def badge(token: str, palette: Optional[Palette] = None) -> str:
 
     ``token`` is one of ``"[!]"`` / ``"[i]"`` / ``"[ok]"`` / ``"[err]"``
     (the :data:`WARN` / :data:`INFO` / :data:`OK` / :data:`ERR`
-    aliases). The RESET is emitted IMMEDIATELY after the badge and
-    BEFORE any message text, so the trailing sentence is rendered in
-    the terminal's standard formatting — never bold, never colored.
+    aliases). The RESET is emitted IMMEDIATELY after the badge, so the
+    badge is a self-contained atomic styled token.
+
+    This is the bare-badge primitive. Status LINES — badge plus its
+    sentence — are built by :func:`notice`, which deliberately paints
+    the whole line in one run instead of resetting here.
 
     A disabled palette (or an unknown token) returns the plain token,
     so piped / ``NO_COLOR`` output stays byte-identical to the
@@ -411,17 +431,40 @@ def notice(token: str, message: str = "",
            palette: Optional[Palette] = None) -> str:
     """A complete ``badge`` + message line, ready for ``print``.
 
-    The message is deliberately left UNSTYLED (see :func:`badge`) so
-    only the badge carries color::
+    The WHOLE line carries the badge's colour — badge and message are
+    one styled run closed by a single trailing RESET::
 
-        [i] Run 'ck init' in a project directory or ...   (cyan [i])
-        [ok] Added task (id=4): ship the release          (green [ok])
+        \\033[1;33m[!] PLAN.md not found.\\033[0m
+        \\033[36m[i] Run 'ck init' in a project directory or ...\\033[0m
 
-    ``message`` may be empty, in which case only the badge is
-    emitted. Newlines inside ``message`` are preserved verbatim.
+    An earlier contract coloured only the badge and reset immediately
+    after it, which made every notice a two-tone line and left the
+    sentence — the part that actually carries the meaning — in the
+    terminal's default colour. Colouring the full line keeps a notice
+    legible as ONE unit when it is read at a glance, which is the whole
+    point of a status line.
+
+    Every caller funnels through here (the CLI's ``_notice`` and every
+    dashboard renderer alike), so root-level output and in-table
+    output are now guaranteed to be styled identically rather than
+    merely similar.
+
+    Styling costs zero display columns (:func:`display_width` strips
+    SGR), so painting the message cannot shift any surrounding layout.
+
+    ``message`` may be empty, in which case only the badge is emitted.
+    Newlines inside ``message`` are preserved verbatim: terminals carry
+    SGR state across a newline, so every line of a multi-line notice
+    keeps the colour, and the single trailing RESET closes them all.
+    A disabled palette returns the plain unstyled text, so piped /
+    ``NO_COLOR`` output stays byte-identical to the unstyled text.
     """
-    head = badge(token, palette)
-    return f"{head} {message}" if message else head
+    style = BADGE_STYLES.get(token)
+    p = palette if palette is not None else get_palette()
+    body = f"{token} {message}" if message else token
+    if style is None or not p.enabled:
+        return body
+    return f"{style}{body}{RESET}"
 
 
 # ---------------------------------------------------------------------------
@@ -561,10 +604,10 @@ def render_no_project(palette: Optional[Palette] = None) -> str:
     ambiguous empty dashboard (``0/0 tasks``, ``focus not selected``)
     with a clean two-line message; no fake metrics are emitted.
 
-    The ``[!]`` badge goes through :func:`notice`, so it carries the
-    standard bold-yellow badge style with the reset immediately after
-    the token and the sentence in normal formatting. The hint line
-    inherits the native terminal text color (no low-contrast gray).
+    The ``[!]`` badge and its heading go through :func:`notice`, so
+    the whole line carries the standard bold-yellow notice style. The
+    hint line inherits the native terminal text color (no
+    low-contrast gray).
     """
     p = palette if palette is not None else get_palette()
     return "\n".join([
@@ -580,6 +623,8 @@ __all__ = [
     "YELLOW",
     "CYAN",
     "RED",
+    "MAGENTA",
+    "BOLD_MAGENTA",
     "BANNER_BG",
     "COLOR_NAMES",
     "PALETTE_SLOTS",
