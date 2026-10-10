@@ -67,6 +67,7 @@ from .sandbox import (
     is_within_sandbox,
     sandbox_root,
 )
+from .ui import INFO, OK, WARN, notice
 
 # --------------------------------------------------------------------------- #
 # Fixture constants
@@ -432,17 +433,17 @@ def setup_sandbox(*, printer: Callable[[str], None] = print,
     in_place = (not force) and _cwd_inside_sandbox()
     try:
         if in_place:
-            printer(
-                "[i] cwd is inside the sandbox: re-initializing IN PLACE "
-                "(no destructive wipe — your working directory stays valid)"
-            )
+            printer(notice(
+                INFO, "cwd is inside the sandbox: re-initializing IN "
+                     "PLACE (no destructive wipe — your working "
+                     "directory stays valid)"))
         else:
             if force and _cwd_inside_sandbox():
-                printer(
-                    "[!] Forced rebuild from INSIDE the sandbox: the wipe "
-                    "will invalidate working directories under .sandbox/ "
-                    "(re-enter with `ck-dev` afterwards)"
-                )
+                printer(notice(
+                    WARN, "Forced rebuild from INSIDE the sandbox: the "
+                          "wipe will invalidate working directories "
+                          "under .sandbox/ (re-enter with `ck-dev` "
+                          "afterwards)"))
             clean_sandbox(quiet=True)
         config_dir = root / CONFIG_SUBDIR
         projects_dir = root / PROJECTS_SUBDIR
@@ -459,7 +460,7 @@ def setup_sandbox(*, printer: Callable[[str], None] = print,
         )
         return False
 
-    printer(f"[ok] Sandbox mock environment built at {root}")
+    printer(notice(OK, f"Sandbox mock environment built at {root}"))
     printer(
         f"   ├── config/projects.json - registered: {ALPHA_PROJECT}, "
         f"{ORPHANED_PROJECT} (registry-only)"

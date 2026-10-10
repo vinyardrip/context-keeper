@@ -40,6 +40,7 @@ from .config import (
     LEGACY_GLOBAL_CONFIG_FILE,
     file_lock,
 )
+from .ui import WARN, notice
 
 
 class RegistryCorruptError(RuntimeError):
@@ -76,8 +77,8 @@ def _quarantine_corrupt(target: Path) -> None:
             f"backed up ({e}); aborting to avoid data loss"
         ) from e
     print(
-        f"[!] Corrupt registry detected; original moved to "
-        f"{backup}",
+        notice(WARN, f"Corrupt registry detected; original moved to "
+                     f"{backup}"),
         file=sys.stderr,
     )
 
