@@ -15,8 +15,12 @@ list for activity that belongs to no single Git repository:
 Storage is deliberately boring: one plain Markdown plan per space
 at ``~/.config/ck/spaces/<name>.md``, using the exact same
 ``- [ ]`` / ``- [>]`` / ``- [x]`` task syntax as ``PLAN.md`` so
-the same parser and renderer apply. Directories are created lazily
-— no ``~/.config/ck/spaces`` tree appears until the first write.
+the same parser and renderer apply. The BUILT-IN defaults
+(``local`` / ``remote``) are materialized from the canonical
+scaffold at CLI startup (:func:`ensure_default_spaces`) — an
+existing file is strictly preserved, never rewritten. Custom
+spaces and their parent directories still appear lazily — no
+``~/.config/ck/spaces`` tree for them until the first write.
 
 :class:`SpaceManager` is the CENTRALIZED space engine: it treats
 a global space file identically to a project ``PLAN.md`` by
@@ -341,6 +345,23 @@ def _space_exists_anywhere(name: str) -> bool:
     )
 
 
+def _write_space_file(name: str) -> Path:
+    """Write the default scaffold to ``<name>.md`` (dev-mode aware).
+
+    Shared by :func:`create_space` (explicit user action, after
+    full validation) and :func:`ensure_default_spaces` (startup
+    auto-init, whose names come from the built-in list only — the
+    built-ins are RESERVED and would fail validation). The write is
+    atomic under a fail-closed lock, and parent directories are
+    created lazily by :func:`_write_path`.
+    """
+    path = _write_path(name)
+    text = _EMPTY_SPACE.format(space=name)
+    with file_lock(path):
+        _atomic_write_text(path, text)
+    return path
+
+
 def create_space(name: str) -> Path:
     """Create a new space file from the default template.
 
@@ -354,11 +375,53 @@ def create_space(name: str) -> Path:
     Returns the created path.
     """
     validate_new_space_name(name)
-    path = _write_path(name)
-    text = _EMPTY_SPACE.format(space=name)
-    with file_lock(path):
-        _atomic_write_text(path, text)
-    return path
+    return _write_space_file(name)
+
+
+def ensure_default_spaces() -> list[str]:
+    """Create missing default spaces (``local`` / ``remote``) at startup.
+
+    Idempotent, strictly non-destructive initialization (v0.8.12):
+
+    - probes the SAME directory set every space read uses
+      (:func:`_space_exists_anywhere`); a space whose file exists in
+      ANY of them is PRESERVED byte-for-byte — never rewritten,
+      reset or deleted, so user tasks and process notes survive;
+    - a missing space is materialized from the canonical scaffold
+      (byte-identical to the lazy first-write file), with the
+      existence check REPEATED inside the fail-closed lock so a
+      concurrent first ``ck <space> add`` can never be overwritten;
+    - only the built-in names (:data:`cklib.config.SPACE_NAMES`)
+      are ever touched — custom spaces are never created or modified;
+    - follows the standard dev-mode redirect (:func:`_write_path`),
+      so a sandboxed session never mutates the real config tree;
+    - never raises: a read-only or broken config tree must not break
+      the command being started.
+
+    Returns the list of names actually created (empty when every
+    default already existed).
+    """
+    created: list[str] = []
+    for name in config.SPACE_NAMES:
+        try:
+            if _space_exists_anywhere(name):
+                continue
+            path = _write_path(name)
+            with file_lock(path):
+                # Re-probe UNDER the lock: another process (or a
+                # concurrent first ``ck <space> add``) may have
+                # materialized the file in the meantime — the
+                # loser must not overwrite the winner's file.
+                if path.is_file() or _space_exists_anywhere(name):
+                    continue
+                _atomic_write_text(
+                    path, _EMPTY_SPACE.format(space=name))
+            created.append(name)
+        except Exception:
+            # One unwritable/broken space must never block the
+            # others — and never break the starting command.
+            continue
+    return created
 
 
 def rename_space(old_name: str, new_name: str) -> dict:
@@ -996,6 +1059,7 @@ __all__ = [
     "RESERVED_SPACE_NAMES",
     "validate_new_space_name",
     "create_space",
+    "ensure_default_spaces",
     "rename_space",
     "validate_deletable_space",
     "SpaceNotFoundError",

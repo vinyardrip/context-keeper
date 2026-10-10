@@ -21,6 +21,10 @@ Covered surface:
 - The unified ``SPACES (GLOBAL CONTEXTS)`` table renders above the Git
   projects table in ``ck dashboard``, using the SAME grid formatter
   (Space | Focus Task | Progress | Last Active) — no list-style dump.
+- Default global spaces (``local`` / ``remote``) auto-initialize at
+  startup: missing built-ins are created from the canonical scaffold,
+  existing space files are preserved byte-for-byte, custom spaces
+  are never touched (v0.8.12).
 """
 
 from __future__ import annotations
@@ -2405,8 +2409,15 @@ class TestSpaceManagement(_IsolatedHome):
                 code, out = self._run(["space", "create", name])
                 self.assertEqual(code, 2, out)
                 self.assertIn("ERROR", out)
-        self.assertFalse(spaces.spaces_dir().exists()
-                         and any(spaces.spaces_dir().iterdir()))
+        # None of the REJECTED names materialised a file. (The dir
+        # legitimately holds the startup auto-initialized defaults
+        # local.md / remote.md since v0.8.12.)
+        leftovers = [
+            p for p in spaces.spaces_dir().glob("*.md")
+            if p.stem not in ("local", "remote")
+        ]
+        self.assertEqual(leftovers, [],
+                         f"rejected names created files: {leftovers}")
 
     def test_create_rejects_reserved_names(self):
         for name in sorted(spaces.RESERVED_SPACE_NAMES):
@@ -2826,6 +2837,142 @@ class TestSpaceManagement(_IsolatedHome):
         # The production space is untouched throughout.
         self.assertTrue(production.is_file())
         self.assertIn("a", self._run(["work", "list"])[1])
+
+
+# --------------------------------------------------------------------------- #
+# 8. Default-space auto-initialization at startup (v0.8.12)
+# --------------------------------------------------------------------------- #
+
+
+class TestDefaultSpacesAutoInit(_IsolatedHome):
+    """Startup auto-init creates missing built-ins, preserves existing.
+
+    ``ensure_default_spaces`` must be idempotent, strictly
+    non-destructive (an existing ``local.md`` / ``remote.md`` is kept
+    byte-for-byte, sidecar included), limited to the built-in names,
+    silent, and it must never raise.
+    """
+
+    def test_missing_defaults_created_from_scaffold(self):
+        self.assertEqual(spaces.ensure_default_spaces(),
+                         ["local", "remote"])
+        for name in ("local", "remote"):
+            path = spaces.space_path(name)
+            self.assertTrue(path.is_file())
+            self.assertEqual(
+                path.read_text(encoding="utf-8"),
+                spaces._EMPTY_SPACE.format(space=name),
+            )
+
+    def test_second_run_is_a_noop(self):
+        self.assertEqual(spaces.ensure_default_spaces(),
+                         ["local", "remote"])
+        stamps = {name: spaces.space_path(name).stat().st_mtime_ns
+                  for name in ("local", "remote")}
+        self.assertEqual(spaces.ensure_default_spaces(), [])
+        for name in ("local", "remote"):
+            self.assertEqual(spaces.space_path(name).stat().st_mtime_ns,
+                             stamps[name],
+                             f"{name}.md was rewritten on re-run")
+
+    def test_existing_space_preserved_byte_for_byte(self):
+        """A populated space file AND its note sidecar survive."""
+        original = (
+            "# local\n\n## Current Sprint\n- [>] 7. precious task\n\n"
+            "## Completed\n"
+        )
+        spaces.space_path("local").parent.mkdir(
+            parents=True, exist_ok=True)
+        spaces.space_path("local").write_text(original,
+                                               encoding="utf-8")
+        sidecar = spaces.state_path("local")
+        sidecar.write_text('{"notes": {"7": "keep me"}}',
+                           encoding="utf-8")
+
+        created = spaces.ensure_default_spaces()
+
+        # Only the MISSING default is created; local is untouched.
+        self.assertEqual(created, ["remote"])
+        self.assertEqual(spaces.space_path("local").read_text(
+            encoding="utf-8"), original)
+        self.assertEqual(sidecar.read_text(encoding="utf-8"),
+                         '{"notes": {"7": "keep me"}}')
+        self.assertTrue(spaces.space_path("remote").is_file())
+
+    def test_custom_spaces_never_created_or_touched(self):
+        alpha = spaces.space_path("alpha")
+        alpha.parent.mkdir(parents=True, exist_ok=True)
+        alpha.write_text("# alpha\n\n- [ ] mine\n", encoding="utf-8")
+
+        created = spaces.ensure_default_spaces()
+
+        self.assertEqual(created, ["local", "remote"])
+        self.assertEqual(alpha.read_text(encoding="utf-8"),
+                         "# alpha\n\n- [ ] mine\n")
+
+    def test_under_lock_reprobe_drops_race_loser(self):
+        """The in-lock re-probe never clobbers a concurrent first write."""
+        answers = {
+            "local": iter([False, True]),    # 2nd probe: file appeared
+            "remote": iter([False, False]),
+        }
+        with mock.patch.object(
+                spaces, "_space_exists_anywhere",
+                side_effect=lambda name: next(answers[name])):
+            created = spaces.ensure_default_spaces()
+
+        self.assertEqual(created, ["remote"])
+        self.assertFalse(spaces.space_path("local").exists())
+        self.assertTrue(spaces.space_path("remote").is_file())
+
+    def test_silent_and_never_raises_on_broken_config_tree(self):
+        buf = io.StringIO()
+        with mock.patch.object(spaces, "_write_path",
+                               side_effect=OSError("read-only fs")):
+            with redirect_stdout(buf):
+                self.assertEqual(spaces.ensure_default_spaces(), [])
+        self.assertEqual(buf.getvalue(), "")
+
+    def test_cli_startup_initializes_defaults(self):
+        """Any command materializes the defaults — from any cwd."""
+        elsewhere = tempfile.TemporaryDirectory()
+        self.addCleanup(elsewhere.cleanup)
+        cwd = os.getcwd()
+        os.chdir(elsewhere.name)
+        self.addCleanup(os.chdir, cwd)
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = main(["space", "list"])
+        self.assertEqual(code, 0, buf.getvalue())
+        self.assertTrue(spaces.space_path("local").is_file())
+        self.assertTrue(spaces.space_path("remote").is_file())
+        # The hook is transparent: no auto-init chatter on stdout.
+        self.assertNotIn("auto-init", buf.getvalue().lower())
+
+    def test_cli_startup_preserves_existing_space(self):
+        spaces.add_space_task("remote", "prod server pinned")
+        before = spaces.space_path("remote").read_text(encoding="utf-8")
+
+        with redirect_stdout(io.StringIO()):
+            code = main(["dashboard"])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(spaces.space_path("remote").read_text(
+            encoding="utf-8"), before)
+        self.assertTrue(spaces.space_path("local").is_file())
+
+    def test_dev_mode_session_skips_auto_init(self):
+        """A sandbox session never materializes global config."""
+        os.environ["CK_SANDBOX"] = "1"
+        self.addCleanup(os.environ.pop, "CK_SANDBOX", None)
+        from cklib.cli import _ensure_default_spaces
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            _ensure_default_spaces()
+        self.assertEqual(buf.getvalue(), "")
+        self.assertFalse(spaces.spaces_dir().exists())
 
 
 if __name__ == "__main__":

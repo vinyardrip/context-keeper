@@ -1,6 +1,6 @@
 # ROADMAP / PLAN
 
-Current version: v0.8.11
+Current version: v0.8.12
 
 ## Backlog
 - [x] Инициализировать базовую структуру проекта (.ck/)
@@ -44,7 +44,7 @@ Current version: v0.8.11
 - [x] Подробная обратная связь `ck reorder` и авто-рендер спринта (`v0.8.10`)
 - [x] Seamless ck update mechanism: environment detection (symlink-resolved install path, `.git` vs standalone) — safe `git pull` for checkouts, in-place `install.sh` refresh preserving `.ck/` for standalone installs (`v0.8.11`)
 - [x] Startup version check для standalone-установок: GitHub releases API + non-intrusive `ck update` notice, throttle 24h (`v0.8.11`)
-- [ ] Global default spaces (local/remote): Automatic initialization of default global task spaces regardless of the current working directory
+- [x] Global default spaces (local/remote): Automatic initialization of default global task spaces regardless of the current working directory, with strict preservation of existing space files (`v0.8.12`)
 - [ ] Shell Completion: автодополнение команд, флагов, проектов и пространств в Bash / Zsh
 - [ ] Подготовка клиентского модуля синхронизации состояний (`.ck/state.json`)
 - [ ] Дополнительные шаблоны `prompt.md` для ролей ИИ

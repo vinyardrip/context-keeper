@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.8.11-blue)]()
+[![version](https://img.shields.io/badge/version-0.8.12-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -103,7 +103,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.8.11
+ck -v    # → ck version 0.8.12
 ```
 
 ---
@@ -160,7 +160,7 @@ ck -v    # → ck version 0.8.11
 | ck space create \<name\> / new | Create a new space from the default template (`## Current Sprint` / `## Completed`); rejects unsafe, reserved (`list`/`create`/`rename`/`delete`/`project`/`local`/`remote`) and taken names |
 | ck space rename \<old\> \<new\> / mv | Rename a space, carrying its `.json` note sidecar along so no process notes are lost |
 | ck space delete \<name\> [-y] | Permanently delete a space **and** its note sidecar. The target is validated **first** (a missing space reports `ERROR:` with exit 1 immediately — no stdin read, no prompt; invalid input exits 2), and an existing space asks `Are you sure …? [y/N]` on a terminal and refuses without confirmation when non-interactive. Built-in `local` / `remote` can never be deleted. No `rm` alias — the verb is spelled out |
-| ck local add \<text\> | Add a task to the workstation space (`~/.config/ck/spaces/local.md`; directories created lazily) |
+| ck local add \<text\> | Add a task to the workstation space (`~/.config/ck/spaces/local.md`; `local`/`remote` are auto-initialized at startup — an existing space file is never overwritten) |
 | ck local list | List workstation space tasks in the project `ck list` layout (`##` section headers, `[ ]`/`[>]`/`[x]` markers), with attached process notes rendered as `* Note:` lines under their tasks |
 | ck local st / ck local status | Detailed workstation space status view — same layout as `ck st` (header bar, progress, CURRENT FOCUS with its process note, WORK CONTEXT: Done / Skipped / Focus / Next / Upcoming / Unfocused-Paused / Backlog) |
 | ck local st -l / --list | Space task listing (synonym of `ck local list`) |

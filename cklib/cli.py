@@ -773,6 +773,10 @@ def _dispatch(argv: Optional[List[str]] = None) -> int:
     if raw[0] == "-v" or raw[0] == "--version":
         print(f"ck version {VERSION}")
         return 0
+    # AUTO-INIT: default global spaces (local/remote) materialize on
+    # the first CLI use, from any working directory; existing space
+    # files are strictly preserved and dev-mode sessions are skipped.
+    _ensure_default_spaces()
     # LIGHTWEIGHT STARTUP VERSION CHECK (standalone installs only):
     # one throttled GitHub API probe per day, a single stderr line
     # when a newer release exists; a no-op for dev checkouts, pip
@@ -1003,6 +1007,33 @@ def _maybe_notify(ck: ContextKeeper) -> None:
 _NO_STARTUP_CHECK_COMMANDS = frozenset({
     "update", "install", "uninstall", "dev", "sandbox", "ck-clean",
 })
+
+
+def _ensure_default_spaces() -> None:
+    """Materialize the default global spaces (``local`` / ``remote``).
+
+    Startup auto-init (v0.8.12): the first ``ck`` invocation — from
+    ANY working directory — creates the missing built-in space files
+    from the canonical scaffold. Safety contract (enforced by
+    :func:`cklib.spaces.ensure_default_spaces`):
+
+    - an existing space file is strictly preserved — never
+      rewritten, reset or deleted;
+    - custom spaces are never touched; only the built-ins are
+      probed;
+    - dev-mode sessions are skipped entirely (the sandbox never
+      materializes global config, and global state is never mutated
+      from a session);
+    - any failure is swallowed so initialization can never break the
+      command being started, and the hook itself prints nothing.
+    """
+    try:
+        if is_dev_mode():
+            return
+        from . import spaces
+        spaces.ensure_default_spaces()
+    except Exception:
+        pass
 
 
 def _startup_version_check(cmd: str) -> None:
