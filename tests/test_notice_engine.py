@@ -16,15 +16,16 @@ This pins the centralised contract:
   style;
 * :func:`cklib.ui.frame` is the only box-drawing primitive: it measures
   in display columns, so no ANSI sequence can ever shift a border;
-* the project-name colour is bold magenta and must not collide with the
-  cyan used by ``[i]``.
+* the NAME colour is bold magenta everywhere — compact tables and
+  verbose card headers alike — so cyan stays reserved for ``[i]``
+  badges, hints and active-context markers.
 """
 
 from __future__ import annotations
 
 import unittest
 
-from cklib import ui
+from cklib import core, ui
 from cklib.core import (_render_dashboard_table, _render_space_manager_list,
                         _render_spaces_table)
 
@@ -192,17 +193,29 @@ class TestProjectNameColorIsMagenta(unittest.TestCase):
                           t.splitlines() if l[:1] in "┌│├└"]
         self.assertEqual(geom(plain), geom(styled))
 
-    def test_space_names_use_cyan_not_project_magenta(self):
-        """Magenta marks PROJECT rows; spaces are the info cyan.
+    def test_space_names_use_magenta_not_cyan(self):
+        """Magenta marks EVERY name — project and space alike.
 
-        This is the anti-clash rule at the table level: the cyan of a
-        space name and the cyan of an ``[i]`` hint are the same
-        declared info colour, while magenta is reserved for project
-        identifiers in ``GLOBAL DASHBOARD``.
+        This is the unification rule at the table level: cyan belongs
+        to ``[i]`` badges, hints and active-context markers only, and
+        must never appear on a name cell.
         """
         out = _render_spaces_table(palette=ui.Palette(True))
-        self.assertNotIn(PROJECT_COLOR, out)
-        self.assertIn(f"{ui.NOTICE_STYLES['info']}LOCAL{ui.RESET}", out)
+        self.assertIn(f"{PROJECT_COLOR}LOCAL{ui.RESET}", out)
+        self.assertIn(f"{PROJECT_COLOR}REMOTE{ui.RESET}", out)
+        for name in ("LOCAL", "REMOTE"):
+            with self.subTest(name=name):
+                self.assertNotIn(f"{ui.CYAN}{name}{ui.RESET}", out)
+
+    def test_no_name_style_selects_cyan(self):
+        """The dispatch table exposes no cyan entry, by construction.
+
+        An unknown style falls back to bold, so cyan cannot leak into a
+        name cell through a typo either.
+        """
+        self.assertNotIn("cyan", core._NAME_PAINTERS)
+        self.assertEqual(core._paint_name("X", "cyan", ui.Palette(True)),
+                         f"{ui.BOLD}X{ui.RESET}")
 
     def test_active_project_row_is_not_plain_bold(self):
         out = _render_space_manager_list("myproj", "/w/myproj",

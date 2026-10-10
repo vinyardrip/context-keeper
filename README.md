@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.8.8-blue)]()
+[![version](https://img.shields.io/badge/version-0.8.9-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -103,7 +103,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.8.8
+ck -v    # → ck version 0.8.9
 ```
 
 ---
@@ -297,6 +297,30 @@ listed *and* addressable by name, so the notice is always actionable — an empt
 sandbox or a never-registered folder of projects still shows you what is there.
 Hidden directories, dependency trees (`node_modules`, `venv`, …) and symlinked
 directories are skipped.
+
+### `ck st` Outside a Project
+
+`ck st` follows the very same discovery rules — it never silently adopts the most
+recently active registry entry either:
+
+- exactly **one** project nested under the current directory → its status is
+  rendered, annotated with `<- <path>` so you can see which project was picked;
+- **several** nested projects → the same choice notice, listing every option and
+  pointing at `ck st <project_name>` / `ck list <project_name>`;
+- **none** → the standard global fallback (most recently active registered
+  project) or the explicit `No active project found` state — a clean exit, never
+  a traceback.
+
+`ck st <project_name>` targets a project explicitly from any directory, exactly
+like `ck list <project_name>`; an unknown name exits 1 with
+`ERROR: Project '<name>' not found.` The view flags then apply to the *named*
+project: `ck st alpha -l` lists alpha's tasks, `ck st alpha --all` prints alpha's
+status plus its full `PLAN.md`. `ck st -g` is the cross-project dashboard, so it
+takes no project name (pairing them is a usage error).
+
+`ck st --all` only ever prints the plan of the project the status block above it
+actually shows — an ambiguous directory never pairs the discovery notice with
+some other project's plan.
 
 ---
 
@@ -1010,6 +1034,29 @@ ERROR: Project 'nope' not found.
 незарегистрированные проекты показываются в списке **и** доступны по имени, так
 что подсказка всегда остаётся рабочей. Скрытые каталоги, деревья зависимостей
 (`node_modules`, `venv`, …) и симлинки пропускаются.
+
+### `ck st` вне проекта
+
+`ck st` следует тем же правилам обнаружения — молча подставлять последний
+активный проект реестра команда тоже не будет:
+
+- ровно **один** проект во вложенных каталогах текущего — выводится его статус
+  с аннотацией `<- <путь>`, чтобы было видно, какой проект выбран;
+- **несколько** вложенных проектов — то же уведомление со списком всех вариантов
+  и подсказкой `ck st <project_name>` / `ck list <project_name>`;
+- **ноль** — стандартный фолбэк на глобальный реестр (самый недавно активный
+  зарегистрированный проект) либо явное состояние `No active project found`:
+  чистый выход, без трейсбэков.
+
+`ck st <project_name>` явно указывает проект из любого каталога — по тем же
+правилам, что и `ck list <project_name>` (имя реестра → имя каталога → скан);
+неизвестное имя — код выхода 1 и `ERROR: Project '<name>' not found.` Флаги вида
+применяются к **именованному** проекту: `ck st alpha -l` выводит задачи alpha,
+`ck st alpha --all` — её статус и полный `PLAN.md`. `ck st -g` — это кросс-проектный
+дашборд, поэтому имя проекта он не принимает (сочетание — usage-ошибка).
+
+`ck st --all` печатает PLAN.md только того проекта, чей статус показан выше, —
+при нескольких кандидатах план не выбирается молча.
 
 ---
 

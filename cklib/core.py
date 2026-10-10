@@ -1896,22 +1896,76 @@ class ContextKeeper:
     # COMMAND: status / dashboard
     # ------------------------------------------------------------------ #
 
+    def _status_target(self) -> tuple:
+        """Resolve what ``ck st`` renders, exactly once.
+
+        Returns ``(root, source, notice)``:
+
+        - a project root plus its resolution source when the target
+          is UNAMBIGUOUS — the local/parent context, exactly one
+          project nested under the invocation directory, or the
+          standard global fallback when nothing is nested;
+        - ``(None, "", notice)`` when SEVERAL projects are nested:
+          the caller renders the choice notice instead of guessing;
+        - ``(None, "", None)`` when nothing resolves at all (the
+          explicit uninitialized state).
+
+        Sharing this one resolver between :meth:`status` and
+        :meth:`full_plan_text` is what keeps ``ck st --all`` honest:
+        the plan printed underneath always belongs to the very
+        project the status block named — an ambiguous directory can
+        never pair a discovery notice with some other project's
+        PLAN.md.
+        """
+        ctx = self.resolve_context()
+        if ctx is not None and ctx.source in ("local", "parent"):
+            return (ctx.root, ctx.source, None)
+
+        # Outside every project: the GLOBAL tier must not silently
+        # decide which project to render.
+        nested = self.nested_projects()
+        if len(nested) == 1:
+            # One nested project cannot be a wrong pick; the "global"
+            # source keeps the ``<- <path>`` annotation so the user
+            # SEES which project was rendered.
+            return (nested[0][1], "global", None)
+        if len(nested) > 1:
+            return (None, "", self.render_nested_projects_notice(
+                [n for n, _ in nested], command="st"))
+
+        # Zero nested projects: the standard global fallback stands
+        # (most recently active registered project, else the explicit
+        # uninitialized state) — a graceful degradation, never a
+        # traceback.
+        if ctx is None:
+            return (None, "", None)
+        return (ctx.root, ctx.source, None)
+
     def status(self) -> str:
         """Return the single-project status block as a string.
 
-        The plan context is resolved through the full hierarchy
-        (local → ancestors up to the Git repo root → global registry).
-        When NO context resolves, an explicit uninitialized-state
-        message is returned — never a fake ``0/0`` dashboard. The
-        resolution heals a stale dev-mode mirror first (see
+        Resolution (first match wins): local → ancestors up to the
+        Git repo root → nested-project discovery → global registry.
+
+        OUTSIDE every project the discovery tier decides, never the
+        registry's "most recently active" entry: exactly ONE project
+        nested under the invocation directory renders (annotated with
+        its path), several render the choice notice
+        (:meth:`render_nested_projects_notice`) listing every option,
+        and zero falls back to the standard global behaviour. When NO
+        context resolves, an explicit uninitialized-state message is
+        returned — never a fake ``0/0`` dashboard. The resolution
+        heals a stale dev-mode mirror first (see
         :meth:`_plan_display_path`).
         """
-        ctx = self.resolve_context()
-        if ctx is None:
+        root, source, notice = self._status_target()
+        if notice is not None:
+            return notice
+        if root is None:
             return ui.render_no_project()
-        keeper = self._keeper_for(ctx.root)
+        keeper = self._keeper_for(root)
         tl = parse_plan_file(keeper._plan_display_path())
-        return _render_local_status(keeper, tl, source=ctx.source)
+        return _render_local_status(keeper, tl, source=source)
 
     def tasks(self) -> str:
         """Return the resolved project's task list for STDOUT.
@@ -1921,10 +1975,19 @@ class ContextKeeper:
         ``[<status marker>] <id>. <title>``, grouped by section with
         ``##``-style headers. Suitable for ``ck tasks | grep ...``.
 
-        The plan context is resolved through the same hierarchy as
-        ``ck st`` (stale-mirror healing included); with no
-        resolvable context the empty-list hint is returned (no fake
-        metrics involved).
+        The plan context is resolved through the full hierarchy
+        (local → ancestors up to the Git repo root → global registry,
+        stale-mirror healing included); with no resolvable context
+        the empty-list hint is returned (no fake metrics involved).
+
+        This is the API-level reader: OUTSIDE every project the
+        hierarchy's GLOBAL tier still applies here. The user-facing
+        commands ``ck list`` / ``ck st -l`` route through
+        :meth:`list_tasks` instead, where that global tier is
+        replaced by the nested-project discovery — a command must
+        never pick a project on the user's behalf, while an explicit
+        API caller asking for "the resolved context" still gets the
+        documented hierarchy.
         """
         ctx = self.resolve_context()
         if ctx is None:
@@ -1940,21 +2003,27 @@ class ContextKeeper:
     def nested_projects(self, *, include_unregistered: bool = True) -> list:
         """Projects located AT or BELOW the invocation directory.
 
-        Two tiers, in order:
+        Two tiers, MERGED — never one tier replacing the other:
 
         1. REGISTERED projects nested under the directory — the
            authoritative set, carrying their registry names;
-        2. when tier 1 is EMPTY, a FILESYSTEM scan (depth 2) for
-           project folders that exist on disk but were never
-           registered (:func:`scan_nested_project_folders`). This is
-           what makes ``ck list`` useful in an empty-sandbox or
-           never-registered context instead of just saying "nothing
-           here".
+        2. a FILESYSTEM scan (depth 2) for project folders that
+           physically exist but were never registered
+           (:func:`scan_nested_project_folders`).
 
-        Tier 2 only runs when tier 1 found nothing, so a registered
-        project is never shadowed by an unregistered folder of the
-        same name. Returns ``(name, root)`` pairs; callers decide how
-        to render them, never a silent "first match wins".
+        The scan runs EVEN when tier 1 found something: a single
+        registered project must not mask its unregistered siblings,
+        or "one registered folder among several on disk" would look
+        like "exactly one nested project" and be auto-selected —
+        precisely the silent guess this discovery exists to prevent.
+        A folder covered by the registry keeps its registry NAME
+        (one entry per path); ``include_unregistered=False``
+        restricts the result to tier 1.
+
+        Returns ``(name, root)`` pairs sorted by project NAME — a
+        folder known to the registry appears exactly once, under its
+        registry name — so the notice is a stable, predictable list
+        of CHOICES, never a silent "first match wins".
         """
         directory = self._invocation_dir()
         if directory is None:
@@ -1964,9 +2033,20 @@ class ContextKeeper:
              Path(e.path))
             for e in registered_entries_under(directory)
         ]
-        if registered or not include_unregistered:
+        if not include_unregistered:
             return registered
-        return scan_nested_project_folders(directory)
+        scanned = scan_nested_project_folders(directory)
+        if not registered:
+            return sorted(scanned, key=lambda item: item[0])
+        # De-duplicate by RESOLVED path: a registered folder shows up
+        # in both tiers and must appear once, under its registry name
+        # (stable sort: equal names keep the registry entry first).
+        known = {_resolved_or_abs(path) for _name, path in registered}
+        merged = registered + [
+            (name, path) for name, path in scanned
+            if _resolved_or_abs(path) not in known
+        ]
+        return sorted(merged, key=lambda item: item[0])
 
     def _discovered_project_by_name(self, name: str) -> Optional[Path]:
         """Resolve ``name`` against the folders a FILESYSTEM scan sees.
@@ -1999,8 +2079,9 @@ class ContextKeeper:
             return None
 
     @staticmethod
-    def render_nested_projects_notice(names: list) -> str:
-        """The "not a project here" notice for ``ck list``.
+    def render_nested_projects_notice(names: list,
+                                      command: str = "list") -> str:
+        """The "not a project here" notice for ``ck list`` / ``ck st``.
 
         ASCII-only bullet (``-``), matching the rest of the CLI's
         plain-text output::
@@ -2012,6 +2093,13 @@ class ContextKeeper:
               - test_isolation_sub
 
             To view tasks, navigate to a project directory or run: ck list <project_name>
+
+        ``command`` only selects the ACTIONABLE hint at the bottom:
+        ``"st"`` leads with ``ck st <project_name>`` (the command the
+        user actually ran) and still names ``ck list <project_name>``
+        as the task-listing spelling of the same target. The header
+        and the choice list are identical for both commands — one
+        discovery notice, two entry points.
         """
         p = get_palette()
         lines = [
@@ -2024,42 +2112,68 @@ class ContextKeeper:
             lines.extend(f"  - {n}" for n in names)
         else:
             lines.append("  (none registered here)")
-        lines.extend([
-            "",
-            "To view tasks, navigate to a project directory or run: "
-            "ck list <project_name>",
-        ])
+        if command == "st":
+            hint = [
+                "To view status, navigate to a project directory or "
+                "run: ck st <project_name>",
+                "(the same project's task list: "
+                "ck list <project_name>)",
+            ]
+        else:
+            hint = [
+                "To view tasks, navigate to a project directory or "
+                "run: ck list <project_name>",
+            ]
+        lines.extend(["", *hint])
         return "\n".join(lines)
+
+    def resolve_named_project(self, name: str) -> Optional[Path]:
+        """Resolve an EXPLICIT target (``ck list <name>`` /
+        ``ck st <name>``) from ANY working directory.
+
+        The registry is consulted first (exact ``name``, then a
+        project whose FOLDER name matches — ``register --name`` may
+        rename an entry while users keep typing the folder); a
+        project that is only physically present under the invocation
+        directory (unregistered) is accepted through the discovery
+        scan, so every name the notice prints is addressable and
+        nothing more.
+
+        Returns None for a genuinely unknown name — the caller
+        reports the clean "not found" error instead of rendering
+        some other project.
+        """
+        if not name:
+            return None
+        root = registered_project_by_name(name)
+        if root is None:
+            # Unregistered-but-present fallback: the name must be one
+            # this very command would have listed.
+            root = self._discovered_project_by_name(name)
+        return root
 
     def list_tasks(self, project_name: Optional[str] = None) -> tuple:
         """``ck list`` orchestration — returns ``(output, exit_code)``.
 
-        Three explicit branches, never a silent arbitrary pick:
+        Two explicit branches, never a silent arbitrary pick:
 
         1. ``project_name`` given — resolve that project
-           (``ck list alpha`` works from anywhere) and render its
-           tasks. The registry is consulted first; a project that is
-           only physically present under the invocation directory
-           (unregistered) is accepted too, so every name the
-           discovery notice prints is actually actionable. An unknown
-           name is an error, not an empty listing.
-        2. Inside a project (local / parent context) — the normal
-           listing, byte-for-byte unchanged.
-        3. OUTSIDE any project — never fall back to one arbitrary
-           registry entry. With exactly ONE nested project the tasks
-           render with the project named in the section header; with
-           zero or several the user gets the listing of choices.
+           (:meth:`resolve_named_project`; ``ck list alpha`` works
+           from anywhere) and render its tasks. An unknown name is
+           an error, not an empty listing.
+        2. No argument — inside a project (local / parent context)
+           the normal listing, byte-for-byte unchanged; OUTSIDE
+           every project the nested-project discovery decides: exactly
+           ONE nested project renders with its name in the section
+           header, zero or several render the choice notice. The
+           GLOBAL registry tier never picks one silently.
 
         Returns exit code ``1`` only for the unknown-project case;
         every other branch succeeds (``0``) or reports the empty
         plan state in-band.
         """
         if project_name:
-            root = registered_project_by_name(project_name)
-            if root is None:
-                # Unregistered-but-present fallback: the name must be
-                # one this very command would have listed.
-                root = self._discovered_project_by_name(project_name)
+            root = self.resolve_named_project(project_name)
             if root is None:
                 return (f"ERROR: Project '{project_name}' not found.", 1)
             keeper = self._keeper_for(root)
@@ -2105,16 +2219,32 @@ class ContextKeeper:
         tl = parse_plan_file(keeper._plan_display_path())
         return _render_notes_listing(keeper, tl)
 
-    def full_plan_text(self) -> Optional[str]:
-        """Full PLAN.md text of the resolved context (None if missing).
+    def status_is_ambiguous(self) -> bool:
+        """True when ``ck st`` renders the nested-project CHOICE notice.
 
-        Used by ``ck st --all``: the printed plan follows the same
-        context resolution as the status block above it.
+        Lets ``ck st --all`` skip the FULL PLAN section entirely when
+        no target was selected: a PLAN.md exists in every listed
+        project, so "PLAN.md not found." would be untrue and printing
+        ANY one of them would be exactly the silent guess this
+        discovery removed.
         """
-        ctx = self.resolve_context()
-        if ctx is None:
+        root, _source, notice = self._status_target()
+        return notice is not None and root is None
+
+    def full_plan_text(self) -> Optional[str]:
+        """Full PLAN.md text of the resolved status target (None if none).
+
+        Used by ``ck st --all``: the printed plan follows EXACTLY the
+        target :meth:`status` resolved, so the block can never pair a
+        discovery notice with an arbitrary global project's plan. An
+        ambiguous directory (several nested projects, none chosen)
+        and an uninitialized state both return None — no plan is ever
+        silently selected.
+        """
+        root, _source, notice = self._status_target()
+        if root is None:
             return None
-        path = self._keeper_for(ctx.root)._plan_display_path()
+        path = self._keeper_for(root)._plan_display_path()
         if not path.is_file():
             return None
         try:
@@ -4013,22 +4143,20 @@ def _project_display_name(entry) -> str:
     return "(unnamed)"
 
 
-# Name-column paint per grid. Three roles, three colours, ONE
-# mechanism — all applied through :func:`_grid_row` so every table gets
-# the same after-truncation, zero-width paint:
+# Name-column paint per grid. ONE mechanism, ONE colour — every table
+# and every verbose card header resolves its primary-entity name
+# through :func:`_paint_name`, so no view can drift:
 #
-#   projects in GLOBAL DASHBOARD  -> bold magenta (spec: never collide
-#                                    with the cyan [i] badge)
-#   spaces  in SPACES / contexts  -> cyan (spec: "spaces and the
-#                                    project in context" are info)
-#   default                        -> plain bold
+#   project / space / context name  -> bold magenta
+#   (neutral fallback)              -> plain bold
 #
-# :data:`cklib.ui.NOTICE_STYLES` holds the notice colours; these are
-# the ROW colours, kept adjacent to their call site because they are
-# layout, not messaging.
+# There is deliberately NO cyan entry. Cyan is reserved for
+# informational badges (``[i]``), hints and active-context markers —
+# using it for a name is exactly the collision this unification
+# removed. A request for an unknown style falls back to bold, so cyan
+# can never leak into a name cell by typo either.
 _NAME_STYLE_BOLD = "bold"
 _NAME_STYLE_MAGENTA = "magenta"
-_NAME_STYLE_CYAN = "cyan"
 
 # One dispatch table for the row-name paint. Collapsing the choices
 # here keeps :func:`_grid_row` free of style-specific conditionals, so
@@ -4037,7 +4165,6 @@ _NAME_STYLE_CYAN = "cyan"
 _NAME_PAINTERS = {
     _NAME_STYLE_BOLD: lambda p, s: p.bold(s),
     _NAME_STYLE_MAGENTA: lambda p, s: p.bold_magenta(s),
-    _NAME_STYLE_CYAN: lambda p, s: p.cyan(s),
 }
 
 
@@ -4067,9 +4194,9 @@ def _grid_row(name: str, path: str, focus_head: str, focus_text: str,
     VISUAL HIERARCHY (both grids): the NAME line is the row's primary
     identifier, so it is painted emphatically and the path line below
     it stays in the plain native color. ``name_style`` picks the paint
-    from :data:`_NAME_PAINTERS` — magenta for projects in
-    ``GLOBAL DASHBOARD``, cyan for spaces in the contexts table, bold
-    as the default. Paint is applied AFTER truncation and carries ZERO
+    from :data:`_NAME_PAINTERS` — bold magenta for every project,
+    space and context name across both the compact tables and the
+    verbose cards. Paint is applied AFTER truncation and carries ZERO
     columns (:func:`cklib.ui.display_width` strips SGR), so styling can
     never shift a border. ``accent_name=False`` renders the name
     unstyled; ``palette=None`` also leaves it unstyled.
@@ -4433,18 +4560,22 @@ def _render_space_manager_list(project_name: Optional[str],
     p = palette if palette is not None else ui.get_chrome_palette()
     rows: list[dict] = []
     if project_name is not None and project_path is not None:
-        # The active project is marked by ACCENT ONLY — a bold/cyan
+        # The active project is marked by ACCENT ONLY — a bold magenta
         # name and nothing else. A literal `[PROJECT]` tag used to
         # widen the Space column and wrap long project names; colour
-        # costs no columns, so the grid keeps its layout. It is painted
-        # bold+cyan (stronger than the plain bold used for ordinary
-        # space names) so it still reads as THE active context.
+        # costs no columns, so the grid keeps its layout.
+        #
+        # It is painted through the SHARED ``_grid_row`` /
+        # ``_paint_name`` dispatch — the same path every other name cell
+        # takes — rather than by wrapping the finished cell in a local
+        # escape sequence, which is how the views drifted apart in the
+        # first place.
         active = _grid_row(
             project_name, project_path, "n/a", "",
             (p.muted("n/a"),), p.muted("n/a"),
-            palette=None, accent_name=False)
+            palette=p, name_style=_NAME_STYLE_MAGENTA)
         rows.append({
-            k: (p.bold_cyan(v[0]), p.muted(v[1])) if k == "name" else v
+            k: (v[0], p.muted(v[1])) if k == "name" else v
             for k, v in active.items()
         })
     for space in _space_order():
@@ -4460,7 +4591,7 @@ def _render_space_manager_list(project_name: Optional[str],
             snap["name"], snap["path"], focus_head, focus_text,
             _progress_cell(snap["done"], snap["total"], snap["pct"]),
             last,
-            palette=p, name_style=_NAME_STYLE_CYAN))
+            palette=p, name_style=_NAME_STYLE_MAGENTA))
     out = _render_standard_grid(
         "SPACES (GLOBAL CONTEXTS)",
         _SPACES_FIRST_HEADER,
@@ -4537,7 +4668,7 @@ def _render_spaces_table(
             _progress_cell(snap["done"], snap["total"], snap["pct"]),
             last,
             palette=palette if palette is not None else _chrome_palette(),
-            name_style=_NAME_STYLE_CYAN))
+            name_style=_NAME_STYLE_MAGENTA))
     # Literally the SAME engine and the SAME width policy as
     # ``GLOBAL DASHBOARD`` — see :func:`_render_standard_grid`.
     return _render_standard_grid(
@@ -4735,17 +4866,19 @@ def _render_card_body(title: str, path: str, tl: Optional[TaskList],
                 - [3] third task
                   * Note: waiting on deps
 
-    ``title`` is painted bold/cyan (the loudest element), the ``@``
-    path muted (metadata never competes with content), and the body
-    comes from the shared :func:`_render_verbose_triad` renderer so
-    cards stay byte-identical between spaces and projects.
+    ``title`` is painted bold magenta — the SAME colour, through the SAME
+    :func:`_paint_name` dispatcher, as the compact table's name column,
+    so ``ck dashboard`` and ``ck dashboard -v`` cannot drift apart.
+    The ``@`` path is muted (metadata never competes with content), and
+    the body comes from the shared :func:`_render_verbose_triad`
+    renderer so cards stay byte-identical between spaces and projects.
 
     Lines are NEVER truncated and carry no trailing padding, so a long
     title simply runs long instead of losing characters — and the output
     stays copy/paste- and diff-clean.
     """
     p = palette if palette is not None else ui.get_palette()
-    lines = [f" > {p.bold_cyan(title)}{marker}"]
+    lines = [f" > {_paint_name(title, _NAME_STYLE_MAGENTA, p)}{marker}"]
     if path:
         lines.append(p.muted(f"   @ {path}"))
     lines.append("")
