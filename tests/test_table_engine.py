@@ -19,10 +19,11 @@ import unittest
 from pathlib import Path
 
 from cklib import ui
-from cklib.core import (_GRID_CAPS, _GRID_FIXED_WIDTHS, _GRID_FLUID_KEY,
+from cklib.core import (_GRID_FIXED_WIDTHS, _GRID_FOCUS_WIDTH, _GRID_FLUID_KEY,
                         _GRID_KEYS, _LAST_WIDTH_CAP, _PROJECT_CAP,
-                        _PROGRESS_WIDTH, _grid_headers, _grid_row,
-                        _progress_cell, _render_standard_grid, _smart_path,
+                        _PROGRESS_WIDTH, _TABLE_BUDGET, _grid_headers,
+                        _grid_row, _grid_total_width, _progress_cell,
+                        _render_standard_grid, _smart_path,
                         _truncate_ellipsis, _truncate_right)
 
 CORE = Path(__file__).resolve().parent.parent / "cklib" / "core.py"
@@ -54,6 +55,25 @@ def _cells(rendered: str, label: str) -> list[list[str]]:
         raise AssertionError(f"no row {label!r} in:\n{rendered}")
     n = len(block[0].split("│"))
     return [[l.split("│")[i].strip() for i in range(1, n - 1)] for l in block]
+
+
+def _top_border(rendered: str) -> str:
+    """The top rule of a grid — its outer boundary."""
+    top = next(l for l in rendered.splitlines() if l.startswith("┌"))
+    return top
+
+
+def _seams(top_border: str) -> list[int]:
+    """Character offsets of the interior column seams."""
+    return [i for i, ch in enumerate(top_border) if ch in "┬┼"]
+
+
+def _column_widths(rendered: str) -> list[int]:
+    """Widths of the four data columns, read off the header row."""
+    header = next(l for l in rendered.splitlines()
+                  if l.startswith("│ Project") or l.startswith("│ Space"))
+    # Each cell is " content " — two padding columns wider.
+    return [ui.display_width(c) - 2 for c in header.split("│")[1:-1]]
 
 
 class TestSingleEngineIsStructural(unittest.TestCase):
@@ -122,15 +142,23 @@ class TestSingleEngineIsStructural(unittest.TestCase):
 class TestSharedPolicy(unittest.TestCase):
     """One policy object, correct for every grid."""
 
-    def test_policy_matches_the_documented_constants(self):
-        self.assertEqual(_GRID_CAPS["name"], _PROJECT_CAP)
-        self.assertEqual(_GRID_CAPS["last"], _LAST_WIDTH_CAP)
+    def test_every_column_has_an_exact_fixed_width(self):
+        """No column may be content-derived — that is what let the two
+        tables drift to different widths."""
+        self.assertEqual(set(_GRID_FIXED_WIDTHS), set(_GRID_KEYS))
+        self.assertEqual(_GRID_FIXED_WIDTHS["name"], _PROJECT_CAP)
+        self.assertEqual(_GRID_FIXED_WIDTHS["focus"], _GRID_FOCUS_WIDTH)
         self.assertEqual(_GRID_FIXED_WIDTHS["progress"], _PROGRESS_WIDTH)
-        self.assertEqual(_GRID_FLUID_KEY, "focus")
+        self.assertEqual(_GRID_FIXED_WIDTHS["last"], _LAST_WIDTH_CAP)
 
-    def test_policy_keys_match_the_shared_key_set(self):
-        self.assertEqual(set(_GRID_CAPS) | set(_GRID_FIXED_WIDTHS),
-                         set(_GRID_KEYS) - {_GRID_FLUID_KEY})
+    def test_focus_width_is_derived_from_the_budget(self):
+        chrome = 5 + 8          # (n+1) separators + 2 padding per cell
+        self.assertEqual(_GRID_FOCUS_WIDTH,
+                         _TABLE_BUDGET - chrome - _PROJECT_CAP
+                         - _PROGRESS_WIDTH - _LAST_WIDTH_CAP)
+
+    def test_contracted_total_width_is_the_terminal_budget(self):
+        self.assertEqual(_grid_total_width(), _TABLE_BUDGET)
 
     def test_headers_cover_the_key_set(self):
         for label in ("Project", "Space"):
@@ -143,10 +171,9 @@ class TestSharedPolicy(unittest.TestCase):
     def test_a_grid_cannot_mutate_the_shared_policy(self):
         """The wrapper passes copies, so one table cannot poison the
         policy for the next render."""
-        before = dict(_GRID_CAPS)
+        before = dict(_GRID_FIXED_WIDTHS)
         _render_standard_grid("X", "Space", [], palette=ui.Palette(False))
-        self.assertEqual(_GRID_CAPS, before)
-        self.assertEqual(_GRID_FIXED_WIDTHS, {"progress": _PROGRESS_WIDTH})
+        self.assertEqual(_GRID_FIXED_WIDTHS, before)
 
 
 class TestSharedCellBuilder(unittest.TestCase):
@@ -289,16 +316,12 @@ class TestRealRenderersAgree(unittest.TestCase):
         return {"entry": entry, "tl": tl, "condition": condition,
                 "is_cwd": False}
 
-    @staticmethod
-    def _column_widths(rendered: str) -> list[int]:
-        """Widths of the four data columns, read off the header row."""
-        header = next(l for l in rendered.splitlines()
-                      if l.startswith("│ Project") or
-                      l.startswith("│ Space"))
-        # Each cell is " content ", i.e. two padding columns wider.
-        return [ui.display_width(c) - 2 for c in header.split("│")[1:-1]]
-
-    def test_real_renderers_share_every_non_fluid_column(self):
+    def test_real_renderers_are_identical_width(self):
+        """THE assertion: the two REAL renderers must produce the
+        same total width and the same column seams, whatever content
+        they hold. This is the check that was previously weakened to
+        accept a real defect.
+        """
         from cklib.core import _render_dashboard_table, _render_spaces_table
 
         states = [
@@ -312,24 +335,50 @@ class TestRealRenderersAgree(unittest.TestCase):
         self.assertEqual(dash.splitlines()[0], "GLOBAL DASHBOARD")
         self.assertEqual(spaces.splitlines()[0], "SPACES (GLOBAL CONTEXTS)")
 
-        dash_cols, space_cols = self._column_widths(dash), \
-            self._column_widths(spaces)
-        self.assertEqual(len(dash_cols), 4)
+        dash_top = _top_border(dash)
+        spaces_top = _top_border(spaces)
+        self.assertEqual(len(dash_top), len(spaces_top),
+                         "tables must be the same overall width")
+        self.assertEqual(len(dash_top), _grid_total_width())
+        self.assertEqual(_seams(dash_top), _seams(spaces_top),
+                         "column seams must sit at identical offsets")
+        self.assertEqual(_column_widths(dash), _column_widths(spaces))
 
-        # Progress is an EXACT fixed width, so it must be identical.
-        self.assertEqual(dash_cols[2], space_cols[2], "progress column")
+    def test_real_renderers_match_for_extreme_content(self):
+        """Long names, CJK, huge counts — geometry must not move."""
+        from cklib.core import _render_dashboard_table, _render_spaces_table
 
-        # The capped columns are min(natural content, cap): different
-        # rows legitimately give different widths, but both must obey
-        # the SAME caps — that shared policy is what makes the two
-        # grids interchangeable.
-        for label, cols in (("dashboard", dash_cols),
-                            ("spaces", space_cols)):
-            with self.subTest(table=label):
-                self.assertLessEqual(cols[0], _PROJECT_CAP)
-                self.assertEqual(cols[2], _PROGRESS_WIDTH)
-                self.assertLessEqual(cols[3], _LAST_WIDTH_CAP)
-                self.assertGreaterEqual(cols[1], 10)  # _FOCUS_MIN_WIDTH
+        states = [
+            self._state("名前が長いプロジェクト名" * 5, "/家/" + "路" * 120,
+                        0, 1),
+            self._state("x" * 300, "/" + "y" * 300, 99999, 99999),
+        ]
+        dash = _render_dashboard_table(states, palette=ui.Palette(False))
+        spaces = _render_spaces_table(palette=ui.Palette(False))
+
+        self.assertEqual(len(_top_border(dash)), len(_top_border(spaces)))
+        self.assertEqual(_seams(_top_border(dash)),
+                         _seams(_top_border(spaces)))
+
+    def test_every_content_case_renders_at_the_contract_width(self):
+        from cklib.core import _render_standard_grid
+
+        cases = [
+            [],
+            [("a", "/a", "[1] [>]", "t", (0, 0, 0.0), "n/a")],
+            [("N" * 300, "/" + "p" * 300, "[1] [>]", "T" * 300,
+              (99999, 99999, 100.0), "2d ago")] * 5,
+            [("名前" * 60, "/家/" + "路" * 100, "[1] [>]", "題" * 200,
+              (1, 2, 50.0), "yesterday")] * 3,
+        ]
+        for index, rows in enumerate(cases):
+            built = [_grid_row(n, p, h, t, _progress_cell(d, tt, pc), l)
+                     for n, p, h, t, (d, tt, pc), l in rows]
+            for label in ("Project", "Space"):
+                out = _render_standard_grid("T", label, built,
+                                            palette=ui.Palette(False))
+                with self.subTest(case=index, label=label):
+                    self.assertEqual(set(_geom(out)), {_grid_total_width()})
 
     def test_both_real_renderers_stay_rectangular(self):
         from cklib.core import _render_dashboard_table, _render_spaces_table

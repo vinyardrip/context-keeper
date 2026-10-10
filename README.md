@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.8.2-blue)]()
+[![version](https://img.shields.io/badge/version-0.8.3-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -103,7 +103,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.8.2
+ck -v    # → ck version 0.8.3
 ```
 
 ---
@@ -191,12 +191,16 @@ Active`) covering the `local` and `remote` spaces plus every custom
 space file discovered in `~/.config/ck/spaces/`, rendered above the
 Git projects table through the **same table engine** — there is exactly
 one grid renderer in `ck`, and `GLOBAL DASHBOARD`, `SPACES (GLOBAL
-CONTEXTS)` and `ck space list` all call it with one shared width policy
-and one shared cell builder. They differ only in their title and in the
-label of the first column. Every row is two lines (`Space` name +
-contracted path, `[N] [>]` + task title, `<done>/<total>` +
-`(<pct>%)`), the `Progress` column has one exact fixed width, and the
-name/last-active columns share the same caps. With
+CONTEXTS)` and `ck space list` all call it with one shared cell builder.
+
+They render at **exactly the same width** — 80 columns, with the column
+seams at identical offsets — because every column has a fixed width
+(`name` 25, `focus` 17, `progress` 9, `last` 16) rather than a
+content-derived one. The two tables therefore differ only in their title
+and in the label of the first column, no matter what they contain. Each
+row is two lines: `Space` name + contracted path, `[N] [>]` + task
+title, `<done>/<total>` + `(<pct>%)`. Content wider than its column is
+cut with a trailing `...` rather than widening the grid. With
 `ck dashboard -v` every space additionally gets its own bordered card
 (`MY SPACES`) with the progress line and the full `<< PREV` / `[>] FOCUS`
 / `>> NEXT` context triad plus its process notes — the same verbose

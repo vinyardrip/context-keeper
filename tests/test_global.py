@@ -267,7 +267,10 @@ class TestDashboardTable(_IsolatedRegistry, unittest.TestCase):
             # Focused task renders as a two-line cell: ``[<id>]
             # [>]`` on the head line, the (truncated) text below.
             self.assertIn("[1] [>]", out)
-            self.assertIn("implement feature X", out)
+            # The Focus column has an EXACT fixed width (shared with the
+            # spaces table), so a title wider than that column is cut
+            # with a trailing ``...`` rather than widening the grid.
+            self.assertIn("implement feat", out)
             # Progress renders as a compact TWO-LINE ratio:
             # ``done/total`` on line 1, ``(pct%)`` on line 2.
             self.assertIn("0/1", out)
