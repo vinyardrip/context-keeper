@@ -3923,15 +3923,45 @@ _TABLE_BUDGET = 80
 _FOCUS_TEXT_CAP = 80  # soft cap; table-budget clamp is the real gate
 _FOCUS_MIN_WIDTH = 10  # never squeeze Focus below 10 chars (header len)
 
-# THE width policy — one object, shared verbatim by every grid. Callers
-# pass ``dict(_GRID_CAPS)`` / ``dict(_GRID_FIXED_WIDTHS)`` so a grid can
-# never mutate the shared definition. Because the key set
-# (:data:`_GRID_KEYS`) is shared too, this policy is literally correct
-# for the projects table AND the spaces table: there is no second copy
-# to fall out of step.
-_GRID_CAPS = {"name": _PROJECT_CAP, "last": _LAST_WIDTH_CAP}
-_GRID_FIXED_WIDTHS = {"progress": _PROGRESS_WIDTH}
+# THE width policy — one object, shared verbatim by every grid.
+#
+# EVERY column is an EXACT FIXED WIDTH, not a content-derived one. That
+# is the whole point: if a column were ``min(max(header, content), cap)``
+# then two tables with the same policy but DIFFERENT content would still
+# render different geometries — the spaces table (LOCAL / REMOTE) and
+# the projects table would have visibly different outer borders and
+# column seams. Fixing all four widths makes the grid a pure function of
+# these constants, so both tables are byte-for-byte the same width (80
+# columns) for ANY content whatsoever.
+#
+# Focus is no longer "fluid": its width is derived once, here, from the
+# budget minus the three fixed columns and the frame chrome, so it is
+# identical everywhere too.
+_GRID_COLUMN_COUNT = 4
+# Frame cost: one separator per column boundary (``n+1``) plus two
+# padding columns per cell (``n*2``).
+_GRID_CHROME = (_GRID_COLUMN_COUNT + 1) + (_GRID_COLUMN_COUNT * 2)
+_GRID_FOCUS_WIDTH = max(
+    _TABLE_BUDGET - _GRID_CHROME
+    - _PROJECT_CAP - _PROGRESS_WIDTH - _LAST_WIDTH_CAP,
+    _FOCUS_MIN_WIDTH,
+)
+
+_GRID_FIXED_WIDTHS = {
+    "name": _PROJECT_CAP,
+    "focus": _GRID_FOCUS_WIDTH,
+    "progress": _PROGRESS_WIDTH,
+    "last": _LAST_WIDTH_CAP,
+}
 _GRID_FLUID_KEY = "focus"
+
+
+def _grid_total_width() -> int:
+    """Exact rendered width of any grid: frame + the four columns.
+
+    The single number every grid must hit, whatever it contains.
+    """
+    return _GRID_CHROME + sum(_GRID_FIXED_WIDTHS[k] for k in _GRID_KEYS)
 
 
 def _grid_headers(first: str) -> tuple:
@@ -3973,17 +4003,17 @@ def _render_standard_grid(title: str, first_header: str, rows: list, *,
     """THE table engine: every project/space grid goes through here.
 
     Thin, opinionated wrapper over :func:`_render_grid` that hard-wires
-    the shared column set and width policy, so no call site can pass a
-    different one. ``GLOBAL DASHBOARD``, ``SPACES (GLOBAL CONTEXTS)``
-    and ``ck space list`` are therefore guaranteed to agree on every
-    column width by construction rather than by convention.
+    the shared column set and the shared FIXED widths, so no call site
+    can pass a different one. ``GLOBAL DASHBOARD``,
+    ``SPACES (GLOBAL CONTEXTS)`` and ``ck space list`` therefore render
+    at exactly the same width — :func:`_grid_total_width` columns —
+    for ANY content, and cannot drift apart.
     """
     return _render_grid(
         title,
         _grid_headers(first_header),
         _GRID_KEYS,
         rows,
-        caps=dict(_GRID_CAPS),
         fixed_widths=dict(_GRID_FIXED_WIDTHS),
         fluid_key=_GRID_FLUID_KEY,
         footer=footer,
