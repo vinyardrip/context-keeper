@@ -3981,8 +3981,42 @@ def _progress_cell(done: int, total: int, pct: float) -> tuple:
     return (f"{done}/{total}", f"({pct}%)")
 
 
+def _project_display_name(entry) -> str:
+    """The project's DIRECTORY name — the first column's primary label.
+
+    The registry stores a display label that may be anything the user
+    passed to ``ck register -n``, may have been auto-derived, or may be
+    stale relative to the folder on disk. The dashboard's first column
+    is an identifier of a *place on disk*, so it resolves to the last
+    path segment: the project's own directory name.
+
+    That restores the historical contract ("project name == directory
+    name") and prevents generic container labels — a sandbox mirror
+    registered as ``.../.sandbox/projects`` shows ``projects``, and a
+    registry row whose ``path`` was rewritten shows the real folder
+    rather than the old label.
+
+    Falls back to the registry label when the path is unusable (empty,
+    or not parseable), so a row is never nameless.
+    """
+    raw = getattr(entry, "path", "") or ""
+    if raw:
+        try:
+            folder = Path(raw).name
+        except (TypeError, ValueError):
+            folder = ""
+        if folder and folder not in (".", ".."):
+            return folder
+    label = getattr(entry, "name", "") or ""
+    if label:
+        return label
+    return "(unnamed)"
+
+
 def _grid_row(name: str, path: str, focus_head: str, focus_text: str,
-              progress: tuple, last: str) -> dict:
+              progress: tuple, last: str, *,
+              palette: Optional[ui.Palette] = None,
+              accent_name: bool = True) -> dict:
     """Build one grid row with the SHARED truncation applied.
 
     Every cell passes through the same display-width-aware helpers the
@@ -3990,10 +4024,20 @@ def _grid_row(name: str, path: str, focus_head: str, focus_text: str,
     :func:`_smart_path`, :func:`_truncate_right`), so a long project
     name and a long space name are cut identically and neither can
     overflow its column.
+
+    VISUAL HIERARCHY (both grids): the NAME line is the row's primary
+    identifier, so it is painted bold and the path line below it stays
+    in the plain native color. Paint is applied AFTER truncation and
+    carries ZERO columns (:func:`cklib.ui.display_width` strips SGR), so
+    styling can never shift a border. ``accent_name=False`` renders the
+    name unstyled; ``palette=None`` also leaves it unstyled.
     """
+    name_line = _truncate_ellipsis(name, _PROJECT_CAP)
+    path_line = _smart_path(path, _PROJECT_CAP)
+    if accent_name and palette is not None:
+        name_line = palette.bold(name_line)
     return {
-        "name": (_truncate_ellipsis(name, _PROJECT_CAP),
-                 _smart_path(path, _PROJECT_CAP)),
+        "name": (name_line, path_line),
         "focus": (focus_head, _truncate_right(focus_text, _FOCUS_TEXT_CAP)),
         "progress": progress,
         "last": (last,),
@@ -4141,11 +4185,17 @@ def _render_dashboard_table(states: list,
     keep the budget.
     """
     rows: list[dict] = []
+    p = palette if palette is not None else _chrome_palette()
     for s in states:
         entry = s["entry"]
         tl_local = s["tl"]
 
-        name = entry.name + (" *" if s["is_cwd"] else "")
+        # The first column is the project's DIRECTORY name (see
+        # :func:`_project_display_name`), plus the cwd marker and the
+        # [MISSING] tag.
+        name = _project_display_name(entry)
+        if s["is_cwd"]:
+            name += " *"
         if s["condition"] == "missing":
             name = f"[MISSING] {name}"
 
@@ -4166,7 +4216,8 @@ def _render_dashboard_table(states: list,
                                       tl_local.completion_pct)
 
         rows.append(_grid_row(
-            name, entry.path, focus_head, focus_text, progress, last))
+            name, entry.path, focus_head, focus_text, progress, last,
+            palette=p))
 
     # The SAME engine the spaces table uses, with the SAME width
     # policy — see :func:`_render_standard_grid`.
@@ -4343,14 +4394,16 @@ def _render_space_manager_list(project_name: Optional[str],
         # The active project is marked by ACCENT ONLY — a bold/cyan
         # name and nothing else. A literal `[PROJECT]` tag used to
         # widen the Space column and wrap long project names; colour
-        # costs no columns, so the grid keeps its layout. The row is
-        # built by the shared builder and THEN painted, so the accent
-        # can never change how the cell is measured.
+        # costs no columns, so the grid keeps its layout. It is painted
+        # bold+cyan (stronger than the plain bold used for ordinary
+        # space names) so it still reads as THE active context.
+        active = _grid_row(
+            project_name, project_path, "n/a", "",
+            (p.muted("n/a"),), p.muted("n/a"),
+            palette=None, accent_name=False)
         rows.append({
             k: (p.bold_cyan(v[0]), p.muted(v[1])) if k == "name" else v
-            for k, v in _grid_row(
-                project_name, project_path, "n/a", "",
-                (p.muted("n/a"),), p.muted("n/a")).items()
+            for k, v in active.items()
         })
     for space in _space_order():
         snap = spaces.space_snapshot(space)
@@ -4364,7 +4417,8 @@ def _render_space_manager_list(project_name: Optional[str],
         rows.append(_grid_row(
             snap["name"], snap["path"], focus_head, focus_text,
             _progress_cell(snap["done"], snap["total"], snap["pct"]),
-            last))
+            last,
+            palette=p))
     out = _render_standard_grid(
         "SPACES (GLOBAL CONTEXTS)",
         _SPACES_FIRST_HEADER,
@@ -4439,7 +4493,8 @@ def _render_spaces_table(
         rows.append(_grid_row(
             snap["name"], snap["path"], focus_head, focus_text,
             _progress_cell(snap["done"], snap["total"], snap["pct"]),
-            last))
+            last,
+            palette=palette if palette is not None else _chrome_palette()))
     # Literally the SAME engine and the SAME width policy as
     # ``GLOBAL DASHBOARD`` — see :func:`_render_standard_grid`.
     return _render_standard_grid(

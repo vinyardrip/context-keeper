@@ -297,8 +297,10 @@ class TestDashboardTable(_IsolatedRegistry, unittest.TestCase):
             target.rmdir()  # remove the folder
             out = self._render(ck)
             self.assertIn("missing", out)
-            self.assertIn("ghost", out)
-            self.assertIn("[MISSING] ghost", out)
+            # The first column is the project DIRECTORY name
+            # ("soon-gone"), not the registry label "ghost".
+            self.assertIn("[MISSING] soon-gone", out)
+            self.assertNotIn("ghost", out)
             self.assertIn(
                 "[i] Found 1 missing project(s). Run 'ck prune' to cleanup.",
                 out,
@@ -308,6 +310,8 @@ class TestDashboardTable(_IsolatedRegistry, unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             target = Path(td) / "gone"
             target.mkdir()
+            # Registry LABEL deliberately differs from the folder name:
+            # the dashboard's first column must show the DIRECTORY.
             ckregistry.register_project(target, name="gone-project")
             target.rmdir()
 
@@ -316,7 +320,8 @@ class TestDashboardTable(_IsolatedRegistry, unittest.TestCase):
                 code = main(["dashboard"])
 
             self.assertEqual(code, 0)
-            self.assertIn("[MISSING] gone-project", output.getvalue())
+            self.assertIn("[MISSING] gone", output.getvalue())
+            self.assertNotIn("[MISSING] gone-project", output.getvalue())
             self.assertIn(
                 "[i] Found 1 missing project(s). Run 'ck prune' to cleanup.",
                 output.getvalue(),

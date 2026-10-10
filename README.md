@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.8.4-blue)]()
+[![version](https://img.shields.io/badge/version-0.8.6-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -103,7 +103,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.8.4
+ck -v    # → ck version 0.8.6
 ```
 
 ---
@@ -200,7 +200,14 @@ content-derived one. The two tables therefore differ only in their title
 and in the label of the first column, no matter what they contain. Each
 row is two lines: `Space` name + contracted path, `[N] [>]` + task
 title, `<done>/<total>` + `(<pct>%)`. Content wider than its column is
-cut with a trailing `...` rather than widening the grid. With
+cut with a trailing `...` rather than widening the grid.
+
+In `GLOBAL DASHBOARD` the first column is the project's **directory
+name**, with the contracted path beneath it as a secondary line — a
+label passed to `ck register -n` never replaces the folder name, so a
+generic container entry such as `.../.sandbox/projects` cannot be
+mistaken for a project called `projects`. Names render bold for visual
+hierarchy; the active project in `ck space list` is bold cyan. With
 `ck dashboard -v` every space additionally gets its own bordered card
 (`MY SPACES`) with the progress line and the full `<< PREV` / `[>] FOCUS`
 / `>> NEXT` context triad plus its process notes — the same verbose
