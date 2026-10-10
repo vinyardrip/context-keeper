@@ -948,5 +948,415 @@ class TestInstallShPrerequisites(_InstallShHarness):
         self.assertFalse(self.install_dir.exists())
 
 
+# ---------------------------------------------------------------------------
+# Standalone environment detection (install.sh deployments)
+# ---------------------------------------------------------------------------
+
+
+class TestStandaloneEnvironmentDetection(unittest.TestCase):
+    """``is_standalone_install`` classifies installation trees.
+
+    Standalone == the one-line installer layout: ``ck`` launcher +
+    ``cklib`` package side by side, NO ``.git`` metadata. Dev
+    checkouts and pip installs (site-packages) must never match —
+    they take other update paths (or none).
+    """
+
+    def _tmp(self) -> Path:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        return Path(tmp.name)
+
+    def _tree(self, td: Path, *, launcher=True, cklib=True, git=False):
+        if cklib:
+            (td / "cklib").mkdir()
+            (td / "cklib" / "__init__.py").write_text("", encoding="utf-8")
+        if launcher:
+            (td / "ck").write_text("#!/usr/bin/env python3\n",
+                                    encoding="utf-8")
+        if git:
+            (td / ".git").mkdir()
+        return td
+
+    def test_launcher_plus_cklib_without_git_is_standalone(self):
+        from cklib.core import is_standalone_install
+        self.assertTrue(
+            is_standalone_install(self._tree(self._tmp())))
+
+    def test_git_dir_disqualifies(self):
+        from cklib.core import is_standalone_install
+        self.assertFalse(
+            is_standalone_install(self._tree(self._tmp(), git=True)))
+
+    def test_missing_launcher_disqualifies(self):
+        # pip-style site-packages: cklib without an adjacent launcher.
+        from cklib.core import is_standalone_install
+        self.assertFalse(is_standalone_install(
+            self._tree(self._tmp(), launcher=False)))
+
+    def test_missing_cklib_disqualifies(self):
+        from cklib.core import is_standalone_install
+        self.assertFalse(is_standalone_install(
+            self._tree(self._tmp(), cklib=False)))
+
+
+# ---------------------------------------------------------------------------
+# ck update — standalone in-place refresh (end-to-end via install.sh)
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateStandaloneInPlace(unittest.TestCase):
+    """``ck update`` on an install.sh deployment refreshes the install
+    tree IN PLACE — the bundled installer is re-run against the
+    existing directory (``curl | tar`` source), user runtime data in
+    ``.ck/`` survives, and the launcher symlink is re-pointed. No
+    manual removal / re-installation via ``curl | bash`` is needed.
+    """
+
+    def setUp(self):
+        if not _INSTALL_SH.exists():
+            self.skipTest(f"install.sh not present at {_INSTALL_SH}")
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.base = Path(self._tmp.name)
+        self.home = self.base / "home"
+        self.home.mkdir()
+        self.stand = self.base / "context-keeper"
+
+        # Standalone tree: launcher + cklib + bundled installer,
+        # plus a stale file and user runtime data under .ck/.
+        (self.stand / "cklib").mkdir(parents=True)
+        (self.stand / "cklib" / "__init__.py").write_text(
+            "STALE = True\n", encoding="utf-8")
+        (self.stand / "ck").write_text("#!/usr/bin/env python3\n",
+                                        encoding="utf-8")
+        shutil.copy2(_INSTALL_SH, self.stand / "install.sh")
+        (self.stand / ".ck").mkdir()
+        (self.stand / ".ck" / "HISTORY.md").write_text(
+            "user runtime data\n", encoding="utf-8")
+        (self.stand / "obsolete-module.py").write_text(
+            "stale\n", encoding="utf-8")
+
+        # "Latest remote source" the fake curl streams (top-level
+        # archive component stripped by the installer).
+        self.tarball = self.base / "src.tar.gz"
+        with tarfile.open(self.tarball, "w:gz") as tf:
+            for rel in ("ck", "cklib/__init__.py"):
+                tf.add(_REPO_ROOT / rel,
+                       arcname=f"context-keeper-main/{rel}")
+
+        fakebin = self.base / "fakebin"
+        fakebin.mkdir()
+        curl = fakebin / "curl"
+        curl.write_text(
+            "#!/usr/bin/env bash\n"
+            'cat "${CK_TEST_TARBALL:?missing CK_TEST_TARBALL}"\n',
+            encoding="utf-8",
+        )
+        curl.chmod(0o755)
+
+        # Global state writes land in the temp dir.
+        self._orig_cfg = ckconfig.GLOBAL_STATE_FILE
+        self._orig_core = ckcore.GLOBAL_STATE_FILE
+        fake_state = self.base / "state.json"
+        ckconfig.GLOBAL_STATE_FILE = fake_state
+        ckcore.GLOBAL_STATE_FILE = fake_state
+        self.addCleanup(self._restore_state)
+
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CK_SANDBOX", "CK_SANDBOX_ROOT", "CK_DEV",
+                            "CK_DEBUG", "CK_PROJECT_ROOT", "PYTHONPATH",
+                            "CK_INSTALL_DIR", "CK_BIN_DIR",
+                            "CK_TARBALL_URL", "CK_DISABLE_UPDATE_CHECK")}
+        env["HOME"] = str(self.home)
+        env["CK_TEST_TARBALL"] = str(self.tarball)
+        env["CK_TARBALL_URL"] = (
+            "https://example.invalid/context-keeper/main.tar.gz")
+        env["PATH"] = os.pathsep.join(
+            [str(fakebin), os.environ.get("PATH", "")])
+        env_patch = mock.patch.dict(os.environ, env, clear=True)
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
+
+    def _restore_state(self):
+        ckconfig.GLOBAL_STATE_FILE = self._orig_cfg
+        ckcore.GLOBAL_STATE_FILE = self._orig_core
+
+    def _run_update(self) -> UpdateResult:
+        ck = _StubCk(self.stand)
+        with redirect_stdout(io.StringIO()):
+            return ck.update()
+
+    def test_inplace_update_refreshes_code_and_preserves_ck_data(self):
+        result = self._run_update()
+        self.assertTrue(result.ok, result.message)
+        self.assertEqual(result.action, "updated-standalone")
+
+        # Fresh codebase; stale files gone; no .git metadata appears.
+        snap = (self.stand / "cklib" / "__init__.py").read_text(
+            encoding="utf-8")
+        self.assertNotIn("STALE", snap)
+        self.assertFalse((self.stand / "obsolete-module.py").exists())
+        self.assertFalse((self.stand / ".git").exists())
+
+        # User runtime data in .ck/ survives the refresh.
+        self.assertEqual(
+            (self.stand / ".ck" / "HISTORY.md").read_text(
+                encoding="utf-8"),
+            "user runtime data\n",
+        )
+
+        # The launcher symlink is (re-)pointed at the install tree.
+        link = self.home / ".local" / "bin" / "ck"
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(os.path.realpath(link),
+                         os.path.realpath(self.stand / "ck"))
+
+    def test_update_persists_global_state_timestamps(self):
+        result = self._run_update()
+        self.assertTrue(result.ok, result.message)
+        state = json.loads(
+            (self.base / "state.json").read_text(encoding="utf-8"))
+        self.assertIn("last_update_check", state)
+        self.assertIn("last_update_success", state)
+
+
+# ---------------------------------------------------------------------------
+# Standalone startup notifier (GitHub releases API)
+# ---------------------------------------------------------------------------
+
+
+class TestStandaloneReleaseNotifier(unittest.TestCase):
+    """GitHub-release-based notifier for standalone installations.
+
+    Standalone installs carry no ``.git`` metadata, so the notifier
+    probes the releases API and compares SemVer tags against the
+    running ``VERSION`` — same throttle, same guards, same
+    non-intrusive one-line notice as the git-mode probe.
+    """
+
+    def setUp(self):
+        self._tmp_state = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp_state.cleanup)
+        self.base = Path(self._tmp_state.name)
+        self.fake_state = self.base / "state.json"
+        self._orig_cfg = ckconfig.GLOBAL_STATE_FILE
+        self._orig_core = ckcore.GLOBAL_STATE_FILE
+        ckconfig.GLOBAL_STATE_FILE = self.fake_state
+        ckcore.GLOBAL_STATE_FILE = self.fake_state
+        self.addCleanup(self._restore)
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("CK_SANDBOX", "CK_DISABLE_UPDATE_CHECK")}
+        env_patch = mock.patch.dict(os.environ, env, clear=True)
+        env_patch.start()
+        self.addCleanup(env_patch.stop)
+
+    def _restore(self):
+        ckconfig.GLOBAL_STATE_FILE = self._orig_cfg
+        ckcore.GLOBAL_STATE_FILE = self._orig_core
+
+    def _standalone_dir(self) -> Path:
+        stand = self.base / "context-keeper"
+        (stand / "cklib").mkdir(parents=True)
+        (stand / "cklib" / "__init__.py").write_text("", encoding="utf-8")
+        (stand / "ck").write_text("#!/usr/bin/env python3\n",
+                                    encoding="utf-8")
+        return stand
+
+    def _expired_state(self) -> None:
+        old = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
+        _write_global_state({"last_update_check": old})
+
+    def test_notice_when_newer_release(self):
+        self._expired_state()
+        stand = self._standalone_dir()
+        with _StderrCapture() as err:
+            emitted = ckcore.maybe_notify_update_for(
+                stand, release_fn=lambda: "9.9.9")
+        self.assertTrue(emitted)
+        self.assertIn(
+            "Notice: A new version of ck is available (v9.9.9).",
+            err.value)
+        self.assertIn("ck update", err.value)
+
+    def test_no_notice_when_running_latest(self):
+        self._expired_state()
+        stand = self._standalone_dir()
+        with _StderrCapture() as err:
+            emitted = ckcore.maybe_notify_update_for(
+                stand, release_fn=lambda: ckconfig.VERSION)
+        self.assertFalse(emitted)
+        self.assertEqual(err.value, "")
+
+    def test_no_notice_when_api_fails_but_timestamp_refreshed(self):
+        self._expired_state()
+        stand = self._standalone_dir()
+        with _StderrCapture() as err:
+            emitted = ckcore.maybe_notify_update_for(
+                stand, release_fn=lambda: None)
+        self.assertFalse(emitted)
+        self.assertEqual(err.value, "")
+        self.assertIn("last_update_check", _read_global_state())
+
+    def test_release_fn_error_never_raises(self):
+        self._expired_state()
+        stand = self._standalone_dir()
+
+        def boom():
+            raise RuntimeError("api boom")
+
+        with _StderrCapture():
+            emitted = ckcore.maybe_notify_update_for(
+                stand, release_fn=boom)
+        self.assertFalse(emitted)
+
+    def test_throttled_within_window(self):
+        recent = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        _write_global_state({"last_update_check": recent})
+        stand = self._standalone_dir()
+        calls: list = []
+
+        def spy():
+            calls.append(1)
+            return "9.9.9"
+
+        with _StderrCapture():
+            emitted = ckcore.maybe_notify_update_for(
+                stand, release_fn=spy)
+        self.assertFalse(emitted)
+        self.assertEqual(calls, [], "release_fn must not run in-window")
+
+    def test_disable_update_check_env_aborts_instantly(self):
+        self._expired_state()
+        stand = self._standalone_dir()
+        calls: list = []
+
+        def spy():
+            calls.append(1)
+            return "9.9.9"
+
+        with mock.patch.dict(os.environ, {"CK_DISABLE_UPDATE_CHECK": "1"}), \
+                _StderrCapture():
+            emitted = ckcore.maybe_notify_update_for(
+                stand, release_fn=spy)
+        self.assertFalse(emitted)
+        self.assertEqual(calls, [])
+
+
+# ---------------------------------------------------------------------------
+# GitHub release version check (API parsing)
+# ---------------------------------------------------------------------------
+
+
+class _FakeHttpResponse:
+    def __init__(self, payload: bytes):
+        self._payload = payload
+
+    def read(self) -> bytes:
+        return self._payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class TestGitHubReleaseVersionCheck(unittest.TestCase):
+    """``_default_release_version_check`` — GitHub API contract."""
+
+    def test_strips_v_prefix_from_tag(self):
+        resp = _FakeHttpResponse(b'{"tag_name": "v0.9.0"}')
+        with mock.patch("urllib.request.urlopen", return_value=resp):
+            self.assertEqual(
+                ckcore._default_release_version_check(), "0.9.0")
+
+    def test_queries_releases_endpoint_with_hard_timeout(self):
+        seen: dict = {}
+        resp = _FakeHttpResponse(b'{"tag_name": "v1.2.3"}')
+
+        def fake_urlopen(request, timeout=None):
+            seen["url"] = request.full_url
+            seen["timeout"] = timeout
+            return resp
+
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=fake_urlopen):
+            self.assertEqual(
+                ckcore._default_release_version_check(), "1.2.3")
+        self.assertEqual(seen["url"], ckconfig.RELEASE_API_URL)
+        self.assertIn("/repos/vinyardrip/context-keeper/"
+                      "releases/latest", seen["url"])
+        self.assertEqual(seen["timeout"],
+                         ckconfig.RELEASE_CHECK_TIMEOUT)
+
+    def test_non_semver_tag_returns_none(self):
+        resp = _FakeHttpResponse(b'{"tag_name": "nightly"}')
+        with mock.patch("urllib.request.urlopen", return_value=resp):
+            self.assertIsNone(ckcore._default_release_version_check())
+
+    def test_network_error_returns_none(self):
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=OSError("offline")):
+            self.assertIsNone(ckcore._default_release_version_check())
+
+    def test_malformed_payload_returns_none(self):
+        resp = _FakeHttpResponse(b"not json at all")
+        with mock.patch("urllib.request.urlopen", return_value=resp):
+            self.assertIsNone(ckcore._default_release_version_check())
+
+
+# ---------------------------------------------------------------------------
+# Startup version check gating (cli)
+# ---------------------------------------------------------------------------
+
+
+class TestStartupVersionCheck(unittest.TestCase):
+    """``cli._startup_version_check`` — gating and delegation.
+
+    The startup check is standalone-only: git checkouts keep the
+    latency-free contract for read-only commands (the post-mutation
+    notifier covers them), and update/install flows never race the
+    updater itself.
+    """
+
+    def _patch_dev_mode_off(self):
+        from cklib import cli as ckcli
+        return mock.patch.object(ckcli, "is_dev_mode", return_value=False)
+
+    def test_excluded_commands_skip(self):
+        from cklib import cli as ckcli
+        with self._patch_dev_mode_off(), \
+                mock.patch.object(ckcli, "maybe_notify_update_for") as notify:
+            for cmd in ("update", "install", "uninstall", "dev"):
+                ckcli._startup_version_check(cmd)
+        notify.assert_not_called()
+
+    def test_git_checkout_skips(self):
+        # The suite runs from the repository checkout: .git exists,
+        # so the startup check is a pure no-op there.
+        from cklib import cli as ckcli
+        with self._patch_dev_mode_off(), \
+                mock.patch.object(ckcli, "maybe_notify_update_for") as notify:
+            ckcli._startup_version_check("st")
+        notify.assert_not_called()
+
+    def test_standalone_install_delegates(self):
+        from cklib import cli as ckcli
+        with self._patch_dev_mode_off(), \
+                mock.patch.object(ckcli, "is_standalone_install",
+                                  return_value=True), \
+                mock.patch.object(ckcli, "maybe_notify_update_for") as notify:
+            ckcli._startup_version_check("st")
+        notify.assert_called_once()
+
+    def test_never_raises(self):
+        from cklib import cli as ckcli
+        with self._patch_dev_mode_off(), \
+                mock.patch.object(ckcli, "is_standalone_install",
+                                  side_effect=RuntimeError("boom")):
+            ckcli._startup_version_check("st")  # must not raise
+
+
 if __name__ == "__main__":
     unittest.main()

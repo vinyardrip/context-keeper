@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.8.10-blue)]()
+[![version](https://img.shields.io/badge/version-0.8.11-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -44,7 +44,7 @@ Context Keeper (ck) acts as a bridge between your brain, AI agents, and Git, per
 - AI-Ready: Optimized context preservation for AI workflows
 - Self-Contained: Templates embedded in the package
 - Self-Installer: ck install / ck uninstall (user-level physical copy — a regular executable file, never a symlink; no sudo)
-- Self-Updater: ck update (git fetch + `pull --ff-only`, refuses on dirty work tree)
+- Self-Updater: ck update (git fetch + `pull --ff-only` for checkouts; in-place `install.sh` refresh for standalone installs, preserving `.ck/`; refuses on dirty work tree)
 - CLI Task Management: ck add <text>, ck start <ID>, ck done <ID|range|list>
 - Process Notes: `ck note <text>` attaches a scratchpad to the active task — shown in `ck st`, archived to HISTORY.md on `ck done`, and carried through focus switches via the Unfocused / Paused Context block
 - Global Registry: Cross-project dashboard (ck dashboard) backed by `~/.config/ck/projects.json`; registration is explicit
@@ -98,12 +98,12 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 `ROADMAP.md` (repo root) is the real file; `.ck/PLAN.md` is a symlink to it. If only a real `.ck/PLAN.md` exists, it is promoted (renamed, content preserved) to `ROADMAP.md` once and the link is created back. Nothing is moved on session exit and a divergent real `.ck/PLAN.md` is never overwritten.
 
 > Production isolation: `ck install` writes a **physical copy** of the launcher to `~/.local/bin/ck` (regular executable file, 0755 — never a symlink) and snapshots the `cklib/` package to `~/.local/share/ck/cklib`. The installed command is a static snapshot: editing this checkout does not change `~/.local/bin/ck` until you explicitly re-run `ck install` (or `ck update`).
-> The one-line installer instead symlinks `~/.local/bin/ck` at the launcher under `~/.local/share/context-keeper` — re-run the installer to update it.
+> The one-line installer instead symlinks `~/.local/bin/ck` at the launcher under `~/.local/share/context-keeper` — `ck update` refreshes that tree in place (re-running `install.sh`, `.ck/` preserved), no manual re-installation needed.
 > Note: `ck` is a thin wrapper over the `cklib/` package — install from the repository (or via `pip install .`), not as a standalone single file.
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.8.10
+ck -v    # → ck version 0.8.11
 ```
 
 ---
@@ -216,7 +216,7 @@ above the cards.
 | ck info | Installation diagnostics (version, branch, paths) |
 | ck install | Copy ck to ~/.local/bin/ck (physical executable file, no symlink) + cklib snapshot to ~/.local/share/ck; no sudo |
 | ck uninstall | Remove ~/.local/bin/ck, the cklib snapshot and any legacy ~/.local/bin/ck-dev |
-| ck update | Self-update via git fetch + pull --ff-only (refuses if dirty) |
+| ck update | Self-update via git fetch + pull --ff-only (refuses if dirty); standalone installs refresh in place via `install.sh` (`.ck/` preserved) |
 | ck-dev \<command\> | Run any command in isolated sandbox mode (writes → `.sandbox/`) |
 | ck-dev (bare) | Enter sandbox mode: warning banner (dynamically sized, with the resolved active binary), Global Dashboard, then an interactive session subshell |
 | ck dev setup | Build an isolated mock environment in `.sandbox/` (bulk test data) |
@@ -678,7 +678,7 @@ When `HISTORY.md` reaches `HISTORY_LIMIT` entries it is rotated into a timestamp
 - The renderer never overwrites non-task lines (headers/prose are preserved on every mutation)
 
 ### VCS Integration
-Local commits only. `ck save` commits if you confirm; `ck` never pushes. `ck update` fast-forwards the installation itself only when the work tree is clean, then refreshes an installed copy (`~/.local/bin/ck`) so production stays in sync with the checkout.
+Local commits only. `ck save` commits if you confirm; `ck` never pushes. `ck update` fast-forwards the installation itself only when the work tree is clean, then refreshes an installed copy (`~/.local/bin/ck`) so production stays in sync with the checkout. Standalone (one-line installer) deployments have no `.git` metadata: there `ck update` re-runs the remote installer in place (`curl | tar`), preserving `.ck/`. Standalone installs also get a throttled startup version check against the GitHub releases API — a single stderr line prompting `ck update` when a newer release exists (opt out: `CK_DISABLE_UPDATE_CHECK=1`).
 
 ---
 

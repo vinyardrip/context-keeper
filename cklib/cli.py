@@ -16,7 +16,12 @@ from .config import (
     VERSION,
     find_project_root,
 )
-from .core import ContextKeeper, UpdateResult
+from .core import (
+    ContextKeeper,
+    UpdateResult,
+    is_standalone_install,
+    maybe_notify_update_for,
+)
 from .models import CompletedTaskError
 from .registry import RegistryCorruptError
 from .sandbox import (
@@ -405,7 +410,10 @@ def build_parser() -> "argparse.ArgumentParser":
     sub.add_parser(
         "uninstall",
         help="Remove the installed ck copy and legacy dev entrypoint")
-    sub.add_parser("update", help="Self-update via git pull --ff-only")
+    sub.add_parser(
+        "update",
+        help="Self-update: git pull --ff-only for checkouts, "
+             "in-place install.sh refresh for standalone installs")
     sub.add_parser("help", help="Show this help")
     sub.add_parser(
         "exit",
@@ -765,6 +773,11 @@ def _dispatch(argv: Optional[List[str]] = None) -> int:
     if raw[0] == "-v" or raw[0] == "--version":
         print(f"ck version {VERSION}")
         return 0
+    # LIGHTWEIGHT STARTUP VERSION CHECK (standalone installs only):
+    # one throttled GitHub API probe per day, a single stderr line
+    # when a newer release exists; a no-op for dev checkouts, pip
+    # installs and update/install flows themselves.
+    _startup_version_check(raw[0])
     if not is_dev_call and dev_context_active():
         emit_interceptor_banner_if_needed(
             argv=[Path(argv0).name if argv0 else "ck", *raw])
@@ -981,6 +994,45 @@ def _maybe_notify(ck: ContextKeeper) -> None:
     """
     try:
         ck.maybe_notify_update()
+    except Exception:
+        pass
+
+
+# Commands that must never trigger the STARTUP version check: the
+# updater / installer either IS the newer version or would race it.
+_NO_STARTUP_CHECK_COMMANDS = frozenset({
+    "update", "install", "uninstall", "dev", "sandbox", "ck-clean",
+})
+
+
+def _startup_version_check(cmd: str) -> None:
+    """Lightweight startup version check for STANDALONE installs.
+
+    ``install.sh`` deployments carry no ``.git`` metadata, so the
+    post-mutation git notifier never fires for them. This check —
+    throttled to once per ``UPDATE_CHECK_INTERVAL_HOURS`` and
+    hard-capped by ``RELEASE_CHECK_TIMEOUT`` — queries the GitHub
+    releases API (``/repos/vinyardrip/context-keeper/releases/latest``)
+    and prints ONE non-intrusive stderr line when a newer version
+    exists, prompting ``ck update``.
+
+    Dev checkouts and pip installs are skipped: git checkouts are
+    already covered by the post-mutation notifier (``done`` /
+    ``save``), and read-only commands there stay latency-free. Never
+    raises; failures are swallowed.
+    """
+    if cmd in _NO_STARTUP_CHECK_COMMANDS:
+        return
+    try:
+        if is_dev_mode():
+            return
+        # Same symlink-resolved root the launcher pins as sys.path[0]:
+        # a standalone install's cklib lives in the install dir, a
+        # dev checkout's inside the repository (with ``.git``).
+        root = Path(__file__).resolve().parent.parent
+        if not is_standalone_install(root):
+            return
+        maybe_notify_update_for(root)
     except Exception:
         pass
 
@@ -1869,7 +1921,11 @@ def _do_update(ck: ContextKeeper) -> int:
     result = ck.update()
     if result.ok:
         _notice(ui.OK, f"{result.message}")
-        _refresh_installed_copy()
+        # Static-snapshot refresh applies to the GIT flow only: a
+        # standalone install was just refreshed (and re-linked) in
+        # place by its own installer.
+        if result.action == "updated":
+            _refresh_installed_copy()
         return 0
     # Non-ok: the message is the user-facing diagnostic.
     _print_error(f"ERROR: {result.message}")

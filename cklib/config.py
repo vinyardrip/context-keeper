@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-VERSION = "0.8.10"
+VERSION = "0.8.11"
 CK_DIR_NAME = ".ck"
 # Traversal-boundary markers. Kept in sync with
 # ``cklib.sandbox.SANDBOX_DIR_NAME`` (".sandbox") and Git's ".git".
@@ -107,6 +107,22 @@ DEFAULT_TASK_TITLES: tuple[str, ...] = (
 
 # Update notifier throttle window.
 UPDATE_CHECK_INTERVAL_HOURS = 24
+# GitHub releases API endpoint used by the STANDALONE startup
+# version check: install.sh deployments carry no ``.git`` metadata
+# to probe, so the latest release tag is the remote version source.
+RELEASE_API_URL = (
+    "https://api.github.com/repos/"
+    "vinyardrip/context-keeper/releases/latest"
+)
+# Hard cap for the release-API probe — same reasoning as
+# ``git.NETWORK_CHECK_TIMEOUT``: a slow API must never stall the CLI.
+RELEASE_CHECK_TIMEOUT = 2.0
+# Canonical remote installer used for standalone in-place updates
+# when no bundled ``install.sh`` sits inside the install directory.
+INSTALL_SH_REMOTE_URL = (
+    "https://raw.githubusercontent.com/"
+    "vinyardrip/context-keeper/main/install.sh"
+)
 
 INSTALL_PATH = "/usr/local/bin/ck"
 USER_INSTALL_PATH = Path.home() / ".local" / "bin" / "ck"

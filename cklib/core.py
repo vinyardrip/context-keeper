@@ -44,8 +44,12 @@ from .config import (
     GLOBAL_REGISTRY_FILE,
     GLOBAL_STATE_FILE,
     HISTORY_FILENAME,
+    INSTALL_PATH,
+    INSTALL_SH_REMOTE_URL,
     LEGACY_GLOBAL_CONFIG_FILE,
     PLACEHOLDER_MARKER,
+    RELEASE_API_URL,
+    RELEASE_CHECK_TIMEOUT,
     SANDBOX_BOUNDARY_NAME,
     SPACE_NAMES,
     compress_archives_enabled,
@@ -65,6 +69,7 @@ from .config import (
     file_lock,
     find_project_root,
     get_editor,
+    parse_version,
     read_color_config,
     warn_if_sensitive_root,
 )
@@ -2696,18 +2701,36 @@ class ContextKeeper:
         return "\n".join(parts)
 
     # ------------------------------------------------------------------ #
-    # COMMAND: update (git pull --ff-only)                                #
+    # COMMAND: update (git pull --ff-only / standalone in-place refresh)  #
     # ------------------------------------------------------------------ #
 
     @property
     def install_dir(self) -> Path:
-        """Directory containing the ``cklib`` package — the one to ``git pull``."""
+        """Directory containing the ``cklib`` package — the one to ``git pull``.
+
+        ``Path(__file__).resolve()`` follows symlinks, so an install
+        reached through a symlinked launcher (e.g.
+        ``~/.local/bin/ck`` -> ``~/.local/share/context-keeper/ck``)
+        pins the REAL installation directory, never the link path.
+        """
         return Path(__file__).resolve().parent.parent
 
     def update(self, *, remote: str = "origin",
                branch: str = DEFAULT_REPO_BRANCH,
                timeout: float = 30.0) -> "UpdateResult":
-        """Self-update via ``git fetch`` + ``git pull --ff-only``.
+        """Self-update with environment detection (v0.8.11).
+
+        The installation path is resolved through symlinks
+        (``install_dir``), then classified:
+
+        - **Git checkout** (``.git`` present): ``git fetch`` +
+          ``git pull --ff-only`` — refuses on a dirty work tree.
+        - **Standalone install** (``install.sh`` deployment: launcher
+          + ``cklib`` side by side, no ``.git``): in-place refresh by
+          (re-)running the remote installer against the EXISTING
+          install directory, preserving the user runtime data in
+          ``.ck/``.
+        - Anything else: clean abort (no installation is guessed).
 
         Returns an :class:`UpdateResult` describing what happened.
         Never raises for routine update outcomes; only for programmer
@@ -2725,6 +2748,10 @@ class ContextKeeper:
             )
         repo_dir = self.install_dir
         if not gith.is_git_repo(repo_dir):
+            if is_standalone_install(repo_dir):
+                # NOTE: the git-oriented ``timeout`` is NOT forwarded —
+                # the standalone download gets its own generous cap.
+                return self._update_standalone(repo_dir)
             return UpdateResult(
                 ok=False,
                 message="Error: ContextKeeper was not installed via Git. "
@@ -2769,92 +2796,189 @@ class ContextKeeper:
             action="updated",
         )
 
+    def _update_standalone(self, repo_dir: Path, *,
+                           timeout: float = 180.0) -> "UpdateResult":
+        """In-place update for ``install.sh`` (standalone) deployments.
+
+        Environment detection resolved the install as STANDALONE: a
+        ``ck`` launcher + ``cklib`` package with no ``.git`` metadata
+        (the one-line installer layout under
+        ``~/.local/share/context-keeper``). The installer is re-run
+        against the EXISTING directory (``CK_INSTALL_DIR``), which
+        refreshes the codebase in place via ``curl | tar`` while
+        PRESERVING the user runtime data in ``.ck/`` — the installer
+        keeps ``.ck/`` out of both its cleanup and its extraction.
+
+        The bundled ``install.sh`` inside the install dir is
+        preferred; when missing, the canonical remote installer is
+        downloaded with ``curl`` to a temporary file and executed.
+        The existing launcher symlink (``~/.local/bin/ck`` or a
+        custom ``CK_BIN_DIR`` install) is re-detected and re-pointed
+        in place — never a fresh install elsewhere.
+
+        Never raises for routine outcomes; failures translate to a
+        non-ok :class:`UpdateResult` with a user-facing message.
+        """
+        bash = shutil.which("bash")
+        if not bash:
+            return UpdateResult(
+                ok=False,
+                message="Standalone update requires 'bash' on PATH.",
+                action="abort",
+            )
+
+        installer = repo_dir / "install.sh"
+        tmp_installer: Optional[str] = None
+        if not installer.is_file():
+            curl = shutil.which("curl")
+            if not curl:
+                return UpdateResult(
+                    ok=False,
+                    message="Standalone update requires 'curl' on PATH "
+                            "to download the installer.",
+                    action="abort",
+                )
+            fd, tmp_installer = tempfile.mkstemp(
+                prefix="ck-install-", suffix=".sh")
+            os.close(fd)
+            dl = subprocess.run(
+                [curl, "-fsSL", INSTALL_SH_REMOTE_URL,
+                 "-o", tmp_installer],
+                capture_output=True, text=True, timeout=timeout,
+                check=False,
+            )
+            if dl.returncode != 0:
+                try:
+                    os.unlink(tmp_installer)
+                except OSError:
+                    pass
+                return UpdateResult(
+                    ok=False,
+                    message="Failed to download the remote installer "
+                            f"({INSTALL_SH_REMOTE_URL}).",
+                    action="fetch-failed",
+                )
+            installer = Path(tmp_installer)
+
+        env = dict(os.environ)
+        # In-place refresh: the installer cleans + extracts into the
+        # CURRENT install dir (never a new location).
+        env["CK_INSTALL_DIR"] = str(repo_dir)
+        bin_dir = self._standalone_bin_dir(repo_dir)
+        if bin_dir is not None:
+            env["CK_BIN_DIR"] = str(bin_dir)
+
+        try:
+            proc = subprocess.run(
+                [bash, str(installer), "install"],
+                capture_output=True, text=True, timeout=timeout, env=env,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            proc = None
+        finally:
+            if tmp_installer is not None:
+                try:
+                    os.unlink(tmp_installer)
+                except OSError:
+                    pass
+
+        if proc is None or proc.returncode != 0:
+            detail = ""
+            if proc is not None and proc.stderr.strip():
+                detail = ": " + proc.stderr.strip().splitlines()[-1]
+            return UpdateResult(
+                ok=False,
+                message="Standalone in-place update failed" + detail,
+                action="pull-failed",
+            )
+
+        # The installer's progress IS user-facing — replay it.
+        if proc.stdout:
+            try:
+                print(proc.stdout, end="")
+            except OSError:
+                pass
+
+        try:
+            _write_global_state_timestamp("last_update_check")
+            _write_global_state_timestamp("last_update_success")
+        except OSError:
+            pass
+
+        return UpdateResult(
+            ok=True,
+            message=f"Updated in place ({repo_dir}); user runtime data "
+                    "in .ck/ preserved.",
+            action="updated-standalone",
+        )
+
+    @staticmethod
+    def _standalone_bin_dir(repo_dir: Path) -> Optional[Path]:
+        """Bin dir whose ``ck`` symlink points at ``repo_dir/ck``.
+
+        The launcher symlink is RESOLVED to its real target so the
+        installer re-points the link the user actually invokes
+        (standard ``~/.local/bin`` or a custom ``CK_BIN_DIR``
+        deployment). Returns None when no such symlink exists — the
+        installer then falls back to its own default.
+        """
+        try:
+            launcher = (repo_dir / "ck").resolve()
+        except OSError:
+            return None
+        candidates = {
+            USER_INSTALL_PATH.parent,
+            Path(INSTALL_PATH).parent,
+        }
+        for candidate in candidates:
+            link = candidate / "ck"
+            try:
+                if link.is_symlink() and link.resolve() == launcher:
+                    return candidate
+            except OSError:
+                continue
+        return None
+
     # ------------------------------------------------------------------ #
     # Non-blocking daily update notifier                                   #
     # ------------------------------------------------------------------ #
 
     def maybe_notify_update(self, *, now: Optional[datetime] = None,
-                            fetch_fn=None,
+                            fetch_fn=None, release_fn=None,
                             stderr=None) -> bool:
         """Print a one-line notice to ``stderr`` when an update is
         available, at most once every ``UPDATE_CHECK_INTERVAL_HOURS``.
+
+        Thin delegate to :func:`maybe_notify_update_for` (kept as a
+        method so callers holding a ``ContextKeeper`` can inject
+        ``fetch_fn`` / ``release_fn`` in tests). The check probes the
+        INSTALLATION environment first:
+
+        - **Git checkout** (``.git`` present): fast non-blocking
+          ``ls-remote`` of the tracked upstream;
+        - **Standalone install** (``install.sh`` deployment): the
+          GitHub releases API (``RELEASE_API_URL``) compared against
+          the running ``VERSION``;
+        - anything else: instant abort (no network, no state change).
 
         Strict guard clauses (each aborts instantly — no subprocess,
         no network, no state mutation):
 
         - ``CK_SANDBOX=1`` (dev/sandbox mode);
         - ``CK_DISABLE_UPDATE_CHECK=1`` (explicit opt-out);
-        - ``install_dir`` is not a Git repository root (no ``.git``);
+        - an environment that is neither a Git checkout nor a
+          standalone install;
         - the last check is younger than the 24h throttle window.
-
-        - Reads ``~/.config/ck/state.json`` to find the previous
-          check timestamp.
-        - If the interval has elapsed, performs a fast non-blocking
-          ``ls-remote`` to find ``origin/main``'s tip.
-        - Always refreshes ``last_update_check`` regardless of
-          network outcome.
-        - Returns True if a notice was emitted.
 
         The function never raises; failures are swallowed and the
         timestamp is still updated. ``stderr`` defaults to the
         current ``sys.stderr`` at call time (lazy).
         """
-        # --- Early mandatory guards (must precede ALL network logic).
-        if os.environ.get("CK_SANDBOX") == "1":
-            return False
-        if os.environ.get("CK_DISABLE_UPDATE_CHECK") == "1":
-            return False
-        try:
-            if not (self.install_dir / ".git").exists():
-                return False
-        except OSError:
-            return False
-
-        if now is None:
-            now = datetime.now(timezone.utc)
-        if stderr is None:
-            stderr = sys.stderr
-        state = _read_global_state()
-        last_iso = state.get("last_update_check", "")
-        due = True
-        if last_iso:
-            try:
-                last_dt = datetime.fromisoformat(last_iso)
-                if last_dt.tzinfo is None:
-                    last_dt = last_dt.replace(tzinfo=timezone.utc)
-                due = (now - last_dt) > timedelta(
-                    hours=UPDATE_CHECK_INTERVAL_HOURS
-                )
-            except (ValueError, TypeError):
-                due = True
-
-        if not due:
-            return False
-
-        # Refresh timestamp regardless of network outcome.
-        _write_global_state_timestamp("last_update_check", now=now)
-
-        # Lazy import of fetch_fn to keep tests easy.
-        check = fetch_fn or _default_remote_head_check
-        try:
-            result = check(self.install_dir)
-        except Exception:
-            return False
-
-        if result is None:
-            return False
-        local_sha, remote_sha = result
-        if local_sha and remote_sha and local_sha != remote_sha:
-            try:
-                print(
-                    "Notice: A new version of ck is available. "
-                    "Run 'ck update' to upgrade.",
-                    file=stderr,
-                )
-            except OSError:
-                pass
-            return True
-        return False
+        return maybe_notify_update_for(
+            self.install_dir, now=now, fetch_fn=fetch_fn,
+            release_fn=release_fn, stderr=stderr,
+        )
 
     def info(self) -> str:
         """Diagnostic information about the installation."""
@@ -3000,13 +3124,171 @@ def _default_remote_head_check(repo_dir: Path
     return (local, remote)
 
 
+def _default_release_version_check() -> Optional[str]:
+    """Latest RELEASE tag from the GitHub API (standalone installs).
+
+    Standalone (``install.sh``) deployments carry no ``.git``
+    metadata, so the GitHub releases endpoint is their remote version
+    source. Returns the NORMALIZED version string (``"0.8.11"`` —
+    leading ``v`` stripped) or None on ANY failure: network error,
+    timeout, malformed payload, non-SemVer tag. The request is capped
+    by ``RELEASE_CHECK_TIMEOUT`` so a slow API can never stall the
+    CLI.
+    """
+    try:
+        import urllib.request
+
+        request = urllib.request.Request(
+            RELEASE_API_URL,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "ck-update-check",
+            },
+        )
+        with urllib.request.urlopen(
+                request, timeout=RELEASE_CHECK_TIMEOUT) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        tag = str(payload.get("tag_name") or "").strip().lstrip("vV")
+    except Exception:
+        return None
+    if not tag or not all(part.isdigit() for part in tag.split(".")):
+        return None
+    return tag
+
+
+def is_standalone_install(directory: Path) -> bool:
+    """True when ``directory`` is a STANDALONE install tree.
+
+    A standalone tree is the one-line installer (``install.sh``)
+    layout: the ``ck`` launcher and the ``cklib`` package sit side by
+    side, with NO ``.git`` metadata anywhere in the directory. Dev
+    checkouts (``.git`` present) and pip installs (no adjacent
+    launcher) both fail these checks. Never raises.
+    """
+    try:
+        directory = Path(directory)
+        if (directory / ".git").exists():
+            return False
+        return ((directory / "ck").is_file()
+                and (directory / "cklib" / "__init__.py").is_file())
+    except OSError:
+        return False
+
+
+def maybe_notify_update_for(install_dir: Path, *,
+                            now: Optional[datetime] = None,
+                            fetch_fn=None, release_fn=None,
+                            stderr=None) -> bool:
+    """Non-blocking update notifier over an installation directory.
+
+    Environment-aware probe (v0.8.11), throttled to at most one
+    network call every ``UPDATE_CHECK_INTERVAL_HOURS``:
+
+    - **Git checkout** (``install_dir/.git`` exists): fast
+      ``ls-remote`` of the tracked upstream (``fetch_fn`` hook);
+    - **Standalone install** (launcher + ``cklib``, no ``.git``):
+      the GitHub releases API (``release_fn`` hook) compared against
+      the running ``VERSION``;
+    - anything else: instant abort — no subprocess, no network, no
+      state mutation.
+
+    Strict guard clauses (each aborts instantly):
+
+    - ``CK_SANDBOX=1`` (dev/sandbox mode);
+    - ``CK_DISABLE_UPDATE_CHECK=1`` (explicit opt-out);
+    - neither a Git checkout nor a standalone install;
+    - the last check is younger than the throttle window.
+
+    ``last_update_check`` is refreshed regardless of network outcome
+    once the check actually ran. Returns True when a notice was
+    emitted (stderr, one line, prompting ``ck update``). The function
+    never raises; ``stderr`` defaults to ``sys.stderr`` at call time.
+    """
+    # --- Early mandatory guards (must precede ALL network logic).
+    if os.environ.get("CK_SANDBOX") == "1":
+        return False
+    if os.environ.get("CK_DISABLE_UPDATE_CHECK") == "1":
+        return False
+    try:
+        install_dir = Path(install_dir)
+        git_mode = (install_dir / ".git").exists()
+        standalone = (not git_mode
+                      and is_standalone_install(install_dir))
+    except OSError:
+        return False
+    if not git_mode and not standalone:
+        return False
+
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if stderr is None:
+        stderr = sys.stderr
+    state = _read_global_state()
+    last_iso = state.get("last_update_check", "")
+    due = True
+    if last_iso:
+        try:
+            last_dt = datetime.fromisoformat(last_iso)
+            if last_dt.tzinfo is None:
+                last_dt = last_dt.replace(tzinfo=timezone.utc)
+            due = (now - last_dt) > timedelta(
+                hours=UPDATE_CHECK_INTERVAL_HOURS
+            )
+        except (ValueError, TypeError):
+            due = True
+
+    if not due:
+        return False
+
+    # Refresh timestamp regardless of network outcome.
+    _write_global_state_timestamp("last_update_check", now=now)
+
+    version_note = ""
+    if git_mode:
+        # Lazy import of fetch_fn to keep tests easy.
+        check = fetch_fn or _default_remote_head_check
+        try:
+            result = check(install_dir)
+        except Exception:
+            return False
+        if result is None:
+            return False
+        local_sha, remote_sha = result
+        newer = bool(local_sha and remote_sha and local_sha != remote_sha)
+    else:
+        release = release_fn or _default_release_version_check
+        try:
+            remote_ver = release()
+        except Exception:
+            return False
+        newer = bool(
+            remote_ver
+            and parse_version(remote_ver) > parse_version(VERSION)
+        )
+        if newer:
+            version_note = f" (v{remote_ver})"
+
+    if not newer:
+        return False
+    try:
+        print(
+            f"Notice: A new version of ck is available{version_note}. "
+            "Run 'ck update' to upgrade.",
+            file=stderr,
+        )
+    except OSError:
+        pass
+    return True
+
+
 @dataclass
 class UpdateResult:
     """Outcome of a :meth:`ContextKeeper.update` invocation."""
 
     ok: bool
     message: str
-    action: str  # "abort" | "fetch-failed" | "pull-failed" | "updated"
+    action: str  # "abort" | "fetch-failed" | "pull-failed"
+    #             | "updated" (git) | "updated-standalone" (install.sh)
 
     def __str__(self) -> str:
         return self.message
