@@ -1395,13 +1395,47 @@ class ContextKeeper:
         return f"Swapped task #{id_a} <-> task #{id_b}"
 
     def reorder_tasks(self, ordered_ids: list[int]) -> str:
-        """Apply ``ordered_ids`` as the new relative task order."""
+        """Apply ``ordered_ids`` as the new relative task order.
+
+        Returns a MULTI-LINE summary (since v0.8.10): the first line
+        echoes the ids that were applied, the block underneath lists
+        the order that is now in the file. The old single generic
+        ``Reordered active tasks.`` line never said WHAT moved, which
+        made a three-id shuffle impossible to confirm at a glance.
+
+        The message is printed verbatim through ``ui.notice()``, so
+        every line keeps the ``[ok]`` colour (the badge prefix is
+        five columns, hence the matching indent).
+        """
         tl = self._materialized_plan()
         self._reorder_guard(tl, ordered_ids)
         tl.reorder_tasks(ordered_ids)
         self._commit_plan(tl)
         self._sync_active_task(tl)
-        return "Reordered active tasks."
+        return self._reorder_summary(ordered_ids)
+
+    def _reorder_summary(self, requested: list[int]) -> str:
+        """Build the multi-line ``ck reorder`` confirmation.
+
+        Layout (``[ok] `` = 5 columns, added by ``ui.notice``)::
+
+            [ok] Reordered active tasks: 3, 2, 1
+                 New order:
+                   1. gamma
+                   2. beta
+                   3. alpha
+
+        The resulting sequence is re-read from disk AFTER the commit:
+        task IDs are positional, so the reorder renumbered them — the
+        in-memory ``tl`` still carries pre-reorder ids that would name
+        the wrong rows. Only reorderable (pending/active) tasks are
+        listed, because they are the only ones a reorder may touch.
+        """
+        active = self._load_plan().reorderable_tasks()
+        applied = ", ".join(str(tid) for tid in requested)
+        lines = [f"Reordered active tasks: {applied}", "     New order:"]
+        lines += [f"       {t.id}. {t.title}" for t in active]
+        return "\n".join(lines)
 
     def _sync_active_task(self, tl: TaskList) -> None:
         """Reconcile the registry's active-task pointer with the AST.

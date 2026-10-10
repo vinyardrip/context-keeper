@@ -12,6 +12,10 @@ here:
 - **The structural document survives.** Headers, prose, the
   ``## Completed`` block and line order outside the active list are
   all preserved, so a reorder can never corrupt PLAN.md.
+- **The feedback is actionable (v0.8.10).** ``ck reorder`` prints a
+  multi-line summary (applied ids + resulting sequence) and then
+  auto-renders the sprint view (the ``ck list`` equivalent); the
+  single-task ``move`` / ``swap`` keep their one-line confirmation.
 
 AST-level reordering is covered directly against ``TaskList``; the
 CLI contract (messages and exit codes) is covered through ``main()``.
@@ -290,8 +294,83 @@ class TestReorderCli(_ReorderHarness):
     def test_reorder_applies_order(self):
         code, out = self.run_cli(["reorder", "3", "2", "1"])
         self.assertEqual(code, 0, out)
-        self.assertIn("[ok] Reordered active tasks.", ckui.strip_ansi(out))
+        plain = ckui.strip_ansi(out)
+        # v0.8.10: the generic single line is gone — the first line
+        # echoes the applied ids.
+        self.assertIn("[ok] Reordered active tasks: 3, 2, 1\n", plain)
+        self.assertNotIn("Reordered active tasks.\n", plain)
         self.assertEqual(self.titles(), ["gamma", "beta", "alpha"])
+
+    def test_reorder_summary_is_multi_line(self):
+        """The confirmation spells out the resulting sequence."""
+        code, out = self.run_cli(["reorder", "3", "2", "1"])
+        self.assertEqual(code, 0, out)
+        lines = ckui.strip_ansi(out).splitlines()
+        self.assertEqual(lines[0], "[ok] Reordered active tasks: 3, 2, 1")
+        self.assertEqual(lines[1], "     New order:")
+        self.assertEqual(lines[2:5], [
+            "       1. gamma",
+            "       2. beta",
+            "       3. alpha",
+        ])
+
+    def test_reorder_renders_the_sprint_view(self):
+        """A successful reorder immediately shows the `ck list` view."""
+        code, out = self.run_cli(["reorder", "3", "2", "1"])
+        self.assertEqual(code, 0, out)
+        plain = ckui.strip_ansi(out)
+        self.assertIn("[ok] Reordered active tasks: 3, 2, 1", plain)
+        # The sprint view follows the summary (blank separator line).
+        self.assertIn("\n\n## Current Sprint\n", plain)
+        summary_end = plain.index("       3. alpha")
+        sprint_at = plain.index("## Current Sprint")
+        self.assertGreater(sprint_at, summary_end)
+        self.assertIn(
+            "## Current Sprint\n"
+            "[ ] 1. gamma\n"
+            "[ ] 2. beta\n"
+            "[ ] 3. alpha\n",
+            plain)
+
+    def test_reorder_view_is_byte_identical_to_ck_list(self):
+        """The auto-rendered block IS the `ck list` output."""
+        code, out = self.run_cli(["reorder", "3", "1"])
+        self.assertEqual(code, 0, out)
+        _code, list_out = self.run_cli(["list"])
+        self.assertTrue(list_out)
+        self.assertTrue(ckui.strip_ansi(out).endswith(list_out),
+                        (ckui.strip_ansi(out), list_out))
+
+    def test_reorder_summary_uses_post_reorder_ids_and_skips_done(self):
+        """IDs are positional: they are re-read after the commit, and
+        a completed task never appears in the summary."""
+        self.write((1, " ", "alpha"), (2, "x", "beta"), (3, " ", "gamma"))
+        code, out = self.run_cli(["reorder", "3", "1"])
+        self.assertEqual(code, 0, out)
+        lines = ckui.strip_ansi(out).splitlines()
+        self.assertEqual(lines[0], "[ok] Reordered active tasks: 3, 1")
+        self.assertEqual(lines[1], "     New order:")
+        # gamma is now #1 and alpha #3; beta (done) is not listed.
+        self.assertEqual(lines[2:4], ["       1. gamma", "       3. alpha"])
+        self.assertEqual(len(lines[2:4]), 2)
+
+    def test_move_does_not_render_the_sprint_view(self):
+        """Only `reorder` auto-renders; `move` stays single-line."""
+        code, out = self.run_cli(["move", "3", "1"])
+        self.assertEqual(code, 0, out)
+        plain = ckui.strip_ansi(out)
+        self.assertIn("[ok] Moved task #3 -> position 1", plain)
+        self.assertNotIn("## Current Sprint", plain)
+        self.assertEqual(len(plain.splitlines()), 1)
+
+    def test_swap_does_not_render_the_sprint_view(self):
+        """Only `reorder` auto-renders; `swap` stays single-line."""
+        code, out = self.run_cli(["swap", "1", "3"])
+        self.assertEqual(code, 0, out)
+        plain = ckui.strip_ansi(out)
+        self.assertIn("[ok] Swapped task #1 <-> task #3", plain)
+        self.assertNotIn("## Current Sprint", plain)
+        self.assertEqual(len(plain.splitlines()), 1)
 
     def test_reorder_requires_at_least_one_id(self):
         code, out = self.run_cli(["reorder"])
@@ -333,6 +412,12 @@ class TestReorderCompletedForbidden(_ReorderHarness):
 
     def test_reorder_refuses_even_when_completed_is_last(self):
         self._assert_refused(["reorder", "1", "2"], 2)
+
+    def test_refused_reorder_renders_no_sprint_view(self):
+        """The auto-render fires only after a SUCCESSFUL reorder."""
+        code, out = self.run_cli(["reorder", "3", "2", "1"])
+        self.assertEqual(code, 1, out)
+        self.assertNotIn("## Current Sprint", ckui.strip_ansi(out))
 
     def test_completed_refusal_is_not_a_generic_error(self):
         _code, out = self.run_cli(["move", "2", "1"])

@@ -523,6 +523,16 @@ class TestVersionBump(unittest.TestCase):
             data = tomllib.load(fh)
         self.assertEqual(data["project"]["version"], ckconfig.VERSION)
 
+    def test_docs_carry_the_current_version(self):
+        """README and ROADMAP must state the SAME version as
+        ``cklib.config.VERSION`` — the string lives in several files,
+        so a bump that misses one of them is a documentation bug."""
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn(f"version-{ckconfig.VERSION}-blue", readme)
+        self.assertIn(f"ck version {ckconfig.VERSION}", readme)
+        roadmap = (REPO_ROOT / "ROADMAP.md").read_text(encoding="utf-8")
+        self.assertIn(f"Current version: v{ckconfig.VERSION}", roadmap)
+
 
 class TestSetupSandboxSafeReinit(unittest.TestCase):
     """Safe re-initialization (FileNotFoundError regression).
