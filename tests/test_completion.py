@@ -1,0 +1,435 @@
+"""Tests for ``ck completion`` (Bash / Zsh shell completion).
+
+Coverage:
+
+- ``ck completion bash`` / ``ck completion zsh`` print a script to
+  STDOUT (never a traceback) that the respective shell accepts
+  syntactically (``bash -n`` / ``zsh -n``).
+- The registry helper (``ck completion --list-projects``) emits the
+  registered project names, one per line, newest first, with the
+  folder name as a fallback for entries lacking a display name.
+- A missing, empty, unreadable, corrupt or lock-contended registry
+  degrades to an empty result with exit code 0 and no traceback — and
+  a missing registry is not materialized (no ``~/.config/ck/`` or
+  lock file is created by a completion probe).
+- The generated Bash script really parses names out of the registry
+  mock and completes them for ``ck <TAB>``, ``ck st <TAB>`` and
+  ``ck list <TAB>``.
+- The Zsh helper (``_ck_projects``) feeds the parsed names into the
+  completion system (``compadd``).
+"""
+
+from __future__ import annotations
+
+import io
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
+
+from cklib import completion
+from cklib import config as ckconfig
+from cklib import registry as ckregistry
+from cklib.cli import main
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+BASH = shutil.which("bash")
+ZSH = shutil.which("zsh")
+
+
+class IsolatedRegistry(unittest.TestCase):
+    """Pin the global registry into a per-test temporary HOME."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name)
+
+        self._orig = (
+            ckconfig.GLOBAL_CONFIG_DIR,
+            ckconfig.GLOBAL_REGISTRY_FILE,
+            ckconfig.LEGACY_GLOBAL_CONFIG_FILE,
+            ckregistry.GLOBAL_CONFIG_DIR,
+            ckregistry.GLOBAL_REGISTRY_FILE,
+            ckregistry.LEGACY_GLOBAL_CONFIG_FILE,
+        )
+        new_dir = self.home / ".config" / "ck"
+        new_file = new_dir / "projects.json"
+        new_legacy = self.home / ".ckrc"
+        ckconfig.GLOBAL_CONFIG_DIR = new_dir
+        ckconfig.GLOBAL_REGISTRY_FILE = new_file
+        ckconfig.LEGACY_GLOBAL_CONFIG_FILE = new_legacy
+        ckregistry.GLOBAL_CONFIG_DIR = new_dir
+        ckregistry.GLOBAL_REGISTRY_FILE = new_file
+        ckregistry.LEGACY_GLOBAL_CONFIG_FILE = new_legacy
+
+        def _restore() -> None:
+            (ckconfig.GLOBAL_CONFIG_DIR,
+             ckconfig.GLOBAL_REGISTRY_FILE,
+             ckconfig.LEGACY_GLOBAL_CONFIG_FILE,
+             ckregistry.GLOBAL_CONFIG_DIR,
+             ckregistry.GLOBAL_REGISTRY_FILE,
+             ckregistry.LEGACY_GLOBAL_CONFIG_FILE) = self._orig
+        self.addCleanup(_restore)
+
+    @property
+    def registry_file(self) -> Path:
+        return ckconfig.GLOBAL_REGISTRY_FILE
+
+    def write_registry(self, projects: list) -> None:
+        self.registry_file.parent.mkdir(parents=True, exist_ok=True)
+        self.registry_file.write_text(
+            json.dumps({"projects": projects}), encoding="utf-8")
+
+
+def _run_main(argv):
+    """Run the CLI in-process, capturing stdout/stderr and the code."""
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        rc = main(argv)
+    return rc, out.getvalue(), err.getvalue()
+
+
+def _entry(name: str, path: str, last_seen: str) -> dict:
+    return {
+        "name": name,
+        "path": path,
+        "registered_at": "2026-01-01T00:00:00+00:00",
+        "last_seen": last_seen,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Script output and syntax
+# ---------------------------------------------------------------------------
+
+
+class TestCompletionScripts(unittest.TestCase):
+
+    def test_bash_script_goes_to_stdout(self):
+        rc, out, err = _run_main(["completion", "bash"])
+        self.assertEqual(rc, 0, err)
+        self.assertIn("complete -F _ck_completion ck", out)
+        self.assertIn("ck completion --list-projects", out)
+        for cmd in ("st", "list", "dashboard", "add", "done", "completion"):
+            self.assertIn(cmd, out)
+        self.assertNotIn("Traceback", out)
+
+    def test_zsh_script_goes_to_stdout(self):
+        rc, out, err = _run_main(["completion", "zsh"])
+        self.assertEqual(rc, 0, err)
+        self.assertIn("#compdef ck", out)
+        self.assertIn("compdef _ck ck", out)
+        self.assertIn("_ck_projects", out)
+        self.assertIn("ck completion --list-projects", out)
+        self.assertNotIn("Traceback", out)
+
+    @unittest.skipUnless(BASH, "bash is not installed")
+    def test_bash_script_is_valid_syntax(self):
+        rc, out, _ = _run_main(["completion", "bash"])
+        self.assertEqual(rc, 0)
+        with tempfile.NamedTemporaryFile(
+                "w", suffix=".bash", delete=False) as fh:
+            fh.write(out)
+            path = fh.name
+        self.addCleanup(os.unlink, path)
+        result = subprocess.run([BASH, "-n", path],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(ZSH, "zsh is not installed")
+    def test_zsh_script_is_valid_syntax(self):
+        rc, out, _ = _run_main(["completion", "zsh"])
+        self.assertEqual(rc, 0)
+        with tempfile.NamedTemporaryFile(
+                "w", suffix=".zsh", delete=False) as fh:
+            fh.write(out)
+            path = fh.name
+        self.addCleanup(os.unlink, path)
+        result = subprocess.run([ZSH, "-n", path],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_completion_stays_navigation_focused(self):
+        """Supported shells and commands are a curated set — no
+        internal dev/install commands spammed at the user."""
+        self.assertEqual(completion.SUPPORTED_SHELLS, ("bash", "zsh"))
+        offered = {name for name, _ in completion.COMPLETION_COMMANDS}
+        self.assertIn("st", offered)
+        self.assertIn("list", offered)
+        self.assertIn("completion", offered)
+        self.assertNotIn("ck-clean", offered)
+        self.assertNotIn("uninstall", offered)
+
+    def test_script_generation_rejects_unsupported_shell(self):
+        with self.assertRaises(ValueError):
+            completion.script_for("fish")
+
+    def test_missing_shell_prints_usage(self):
+        rc, out, _ = _run_main(["completion"])
+        self.assertEqual(rc, 2)
+        self.assertIn("Usage: ck completion <bash|zsh>", out)
+
+    def test_unknown_shell_is_a_clean_error(self):
+        rc, out, _ = _run_main(["completion", "fish"])
+        self.assertEqual(rc, 2)
+        self.assertIn("Unsupported shell", out)
+        self.assertNotIn("Traceback", out)
+
+    def test_unknown_flag_is_a_clean_error(self):
+        rc, out, _ = _run_main(["completion", "--shout"])
+        self.assertEqual(rc, 2)
+        self.assertIn("Unknown flag", out)
+
+
+# ---------------------------------------------------------------------------
+# Registry -> project names
+# ---------------------------------------------------------------------------
+
+
+class TestProjectNameListing(IsolatedRegistry):
+
+    def test_registered_names_newest_first(self):
+        self.write_registry([
+            _entry("alpha", "/tmp/alpha", "2026-10-01T00:00:00+00:00"),
+            _entry("beta", "/tmp/beta", "2026-10-02T00:00:00+00:00"),
+        ])
+        rc, out, _ = _run_main(["completion", "--list-projects"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.splitlines(), ["beta", "alpha"])
+
+    def test_names_are_deduplicated_and_namespace_clean(self):
+        self.write_registry([
+            _entry("alpha", "/tmp/alpha-one", "2026-10-02T00:00:00+00:00"),
+            _entry("alpha", "/tmp/alpha-two", "2026-10-01T00:00:00+00:00"),
+            _entry("", "/tmp/gamma", "2026-09-01T00:00:00+00:00"),
+        ])
+        rc, out, _ = _run_main(["completion", "--list-projects"])
+        self.assertEqual(rc, 0)
+        # Deduplicated; an empty display name falls back to the folder.
+        self.assertEqual(out.splitlines(), ["alpha", "gamma"])
+
+    def test_empty_registry_yields_nothing(self):
+        self.write_registry([])
+        rc, out, _ = _run_main(["completion", "--list-projects"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "")
+
+    def test_missing_registry_is_silent_and_unmaterialized(self):
+        self.assertFalse(self.registry_file.exists())
+        rc, out, err = _run_main(["completion", "--list-projects"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "")
+        self.assertNotIn("Traceback", err)
+        # A completion probe must not create ~/.config/ck/ or a lock.
+        self.assertFalse(self.registry_file.exists())
+        self.assertFalse(self.registry_file.parent.exists())
+
+    def test_corrupt_registry_degrades_without_traceback(self):
+        self.registry_file.parent.mkdir(parents=True, exist_ok=True)
+        self.registry_file.write_text("not json", encoding="utf-8")
+        rc, out, err = _run_main(["completion", "--list-projects"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "")
+        self.assertNotIn("Traceback", out)
+        self.assertNotIn("Traceback", err)
+
+    def test_unreadable_registry_path_degrades(self):
+        # A directory where the registry file is expected: every read
+        # raises OSError, which completion must swallow.
+        self.registry_file.mkdir(parents=True)
+        rc, out, err = _run_main(["completion", "--list-projects"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "")
+        self.assertNotIn("Traceback", err)
+
+    def test_lock_contention_degrades(self):
+        """A fail-closed lock timeout is reported as "no names"."""
+        from cklib.config import LockTimeoutError
+
+        self.write_registry([
+            _entry("alpha", "/tmp/alpha", "2026-10-01T00:00:00+00:00")])
+        from unittest import mock
+        with mock.patch.object(ckregistry, "file_lock",
+                               side_effect=LockTimeoutError("busy")):
+            rc, out, err = _run_main(["completion", "--list-projects"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "")
+        self.assertNotIn("Traceback", err)
+
+    def test_list_project_names_never_raises(self):
+        """The module-level helper (used by the scripts) is total."""
+        from unittest import mock
+        with mock.patch.object(ckregistry, "list_projects",
+                               side_effect=RuntimeError("boom")):
+            self.assertEqual(completion.list_project_names(), [])
+
+
+# ---------------------------------------------------------------------------
+# End-to-end shell behaviour (Bash)
+# ---------------------------------------------------------------------------
+
+
+class _ShellHarness(IsolatedRegistry):
+    """Builds a temporary ``ck`` shim + completion script for a shell."""
+
+    def _env(self) -> dict:
+        bin_dir = self.home / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        shim = bin_dir / "ck"
+        shim.write_text(
+            "#!/bin/sh\n"
+            f'exec "{sys.executable}" "{REPO_ROOT / "ck"}" "$@"\n',
+            encoding="utf-8",
+        )
+        shim.chmod(0o755)
+        env = {
+            key: value for key, value in os.environ.items()
+            if key not in ("CK_SANDBOX", "CK_DEV", "CK_SANDBOX_ACTIVE",
+                           "CK_SANDBOX_SHELL")
+        }
+        env.update({
+            "HOME": str(self.home),
+            "PATH": f"{bin_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+            "NO_COLOR": "1",
+            "CK_SANDBOX_ROOT": str(self.home / ".sandbox"),
+        })
+        return env
+
+    def _script(self, shell: str) -> Path:
+        rc, out, _ = _run_main(["completion", shell])
+        self.assertEqual(rc, 0)
+        path = self.home / f"ck.{shell}"
+        path.write_text(out, encoding="utf-8")
+        return path
+
+
+class TestBashCompletionBehaviour(_ShellHarness):
+
+    def _complete(self, words: list) -> list:
+        driver = self.home / "drive.bash"
+        driver.write_text(
+            'source "$1"\n'
+            'shift\n'
+            'COMP_WORDS=("$@")\n'
+            'COMP_CWORD=$(( ${#COMP_WORDS[@]} - 1 ))\n'
+            '_ck_completion\n'
+            'printf "%s\\n" "${COMPREPLY[@]}"\n',
+            encoding="utf-8",
+        )
+        script = self._script("bash")
+        result = subprocess.run(
+            [BASH, str(driver), str(script), *words],
+            capture_output=True, text=True, env=self._env(),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        return result.stdout.splitlines()
+
+    @unittest.skipUnless(BASH, "bash is not installed")
+    def test_completes_commands_and_project_names(self):
+        self.write_registry([
+            _entry("alpha", "/tmp/alpha", "2026-10-01T00:00:00+00:00"),
+            _entry("beta", "/tmp/beta", "2026-10-02T00:00:00+00:00"),
+        ])
+        replies = self._complete(["ck", ""])
+        self.assertIn("st", replies)
+        self.assertIn("list", replies)
+        self.assertIn("completion", replies)
+        self.assertIn("alpha", replies)
+        self.assertIn("beta", replies)
+
+    @unittest.skipUnless(BASH, "bash is not installed")
+    def test_completes_project_target_prefix(self):
+        self.write_registry([
+            _entry("alpha", "/tmp/alpha", "2026-10-01T00:00:00+00:00"),
+            _entry("beta", "/tmp/beta", "2026-10-02T00:00:00+00:00"),
+        ])
+        self.assertEqual(self._complete(["ck", "st", "al"]), ["alpha"])
+        self.assertEqual(
+            sorted(self._complete(["ck", "list", ""])), ["alpha", "beta"])
+
+    @unittest.skipUnless(BASH, "bash is not installed")
+    def test_space_names_with_spaces_survive(self):
+        self.write_registry([
+            _entry("beta project", "/tmp/beta", "2026-10-02T00:00:00+00:00"),
+        ])
+        self.assertEqual(
+            self._complete(["ck", "st", "beta"]), ["beta project"])
+
+    @unittest.skipUnless(BASH, "bash is not installed")
+    def test_missing_registry_still_completes_commands(self):
+        self.assertFalse(self.registry_file.exists())
+        replies = self._complete(["ck", ""])
+        self.assertIn("dashboard", replies)
+
+
+# ---------------------------------------------------------------------------
+# End-to-end shell behaviour (Zsh)
+# ---------------------------------------------------------------------------
+
+
+class TestZshCompletionBehaviour(_ShellHarness):
+
+    @unittest.skipUnless(ZSH, "zsh is not installed")
+    def test_projects_are_parsed_from_registry_mock(self):
+        self.write_registry([
+            _entry("alpha", "/tmp/alpha", "2026-10-01T00:00:00+00:00"),
+            _entry("beta project", "/tmp/beta", "2026-10-02T00:00:00+00:00"),
+        ])
+        driver = self.home / "drive.zsh"
+        # Minimal compsys stand-ins: route `_wanted ... compadd -a arr`
+        # to the real array and print its elements.
+        driver.write_text(
+            'compadd() {\n'
+            '    local -a arr\n'
+            '    while (( $# )); do\n'
+            '        case $1 in\n'
+            '            -a) arr=("${(@P)2}"); shift 2 ;;\n'
+            '            *) shift ;;\n'
+            '        esac\n'
+            '    done\n'
+            '    print -l -- "${arr[@]}"\n'
+            '}\n'
+            '_wanted() { shift 3; "$@" }\n'
+            'source "$1"\n'
+            '_ck_projects\n',
+            encoding="utf-8",
+        )
+        script = self._script("zsh")
+        result = subprocess.run(
+            [ZSH, str(driver), str(script)],
+            capture_output=True, text=True, env=self._env(),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(), ["beta project", "alpha"])
+        self.assertNotIn("Traceback", result.stderr)
+
+    @unittest.skipUnless(ZSH, "zsh is not installed")
+    def test_missing_registry_is_quiet(self):
+        self.assertFalse(self.registry_file.exists())
+        driver = self.home / "quiet.zsh"
+        driver.write_text(
+            '_wanted() { shift 3; "$@" }\n'
+            'compadd() { print -l -- "called" }\n'
+            'source "$1"\n'
+            '_ck_projects\n',
+            encoding="utf-8",
+        )
+        script = self._script("zsh")
+        result = subprocess.run(
+            [ZSH, str(driver), str(script)],
+            capture_output=True, text=True, env=self._env(),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "")
+
+
+if __name__ == "__main__":
+    unittest.main()

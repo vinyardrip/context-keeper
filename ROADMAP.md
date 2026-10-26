@@ -1,6 +1,6 @@
 # ROADMAP / PLAN
 
-Current version: v0.8.12
+Current version: v0.8.15
 
 ## Backlog
 - [x] Инициализировать базовую структуру проекта (.ck/)
@@ -45,7 +45,7 @@ Current version: v0.8.12
 - [x] Seamless ck update mechanism: environment detection (symlink-resolved install path, `.git` vs standalone) — safe `git pull` for checkouts, in-place `install.sh` refresh preserving `.ck/` for standalone installs (`v0.8.11`)
 - [x] Startup version check для standalone-установок: GitHub releases API + non-intrusive `ck update` notice, throttle 24h (`v0.8.11`)
 - [x] Global default spaces (local/remote): Automatic initialization of default global task spaces regardless of the current working directory, with strict preservation of existing space files (`v0.8.12`)
-- [ ] Shell Completion: автодополнение команд, флагов, проектов и пространств в Bash / Zsh
+- [x] Shell Completion: автодополнение команд, флагов и проектов в Bash / Zsh (`ck completion bash|zsh`) (`v0.8.13`)
 - [ ] Подготовка клиентского модуля синхронизации состояний (`.ck/state.json`)
 - [ ] Дополнительные шаблоны `prompt.md` для ролей ИИ
 - [ ] Экспорт и инжекция контекста в сторонние инструменты
@@ -54,3 +54,11 @@ Current version: v0.8.12
 - [ ] AI-summary (`ck suggest` / `ck summarize`)
 - [ ] Interactive Plan: управление задачами прямо из TUI
 - [ ] Базовое покрытие тестами через pytest (`cklib/core.py`, `cklib/history.py`)
+- [ ] добавить возможность нескольких заметок, 1 не перетирает 2
+- [ ] сделать справку такой как в dpx
+- [ ] пространство today - создается автоматически, туду на каждый день. задача выполнена - удаляется автоматически(возможно на его шаблоне пространства на каждый день)
+- [ ] добавить notification для пространств todo(выставление таймера работа по крон - продумать)
+- [x] добавить возможность удаления задач с подтверждением (`ck delete <ID>` / `ck rm`, `-f`) (`v0.8.14`)
+- [x] для пространств добавить move, swap, reorder(удаление задач) - функционал должен быть идентичен (`spaces_order`, `ck space move|swap|reorder|delete -f`) (`v0.8.15`)
+- [ ] добавить link между проектами(один хостинг - space remote), между пространством и проектами(space today задача общая, срочная починка уязвимости) может еще что
+- [ ] сделать линкованные задачи(одинаковые для link projects/spaces) при связи - пишем в одном проекте, дописываются в связанные(хостингом, пример закрыть уязвимость, действия одинаковые, задачи тоже)

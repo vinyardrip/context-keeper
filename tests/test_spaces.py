@@ -2745,7 +2745,7 @@ class TestSpaceManagement(_IsolatedHome):
         code, out = self._run(["space", "delete"])
 
         self.assertEqual(code, 2)
-        self.assertIn("Usage: ck space delete <name> [-y]", out)
+        self.assertIn("Usage: ck space delete <name> [-f]", out)
 
     def test_delete_has_no_short_alias(self):
         """Deliberately no `rm`/`del` alias — the verb is spelled out."""

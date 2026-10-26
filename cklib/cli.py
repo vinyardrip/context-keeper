@@ -69,6 +69,15 @@ Local (current project):
   done <ID|Range>            Mark task(s) as done ([x]). Bare `ck done`
                              completes the CURRENT FOCUS; without a
                              focus it prints the usage line instead
+  delete <ID>                Permanently remove a TASK from PLAN.md,
+                             then re-index the remaining task IDs so
+                             the sprint keeps a gapless 1..N sequence.
+                             Prints `Task #<ID>: <title>` and asks
+                             `[y/N]`; -f / --force skips the prompt
+                             for automation. Alias: `ck rm <ID>`.
+                             (Not to be confused with `ck space
+                             delete <name>`, which removes a whole
+                             global SPACE and its notes.)
   move <ID> <pos|top|bottom> Move a PENDING/ACTIVE task ([ ] or [>])
                              to position N among the active tasks, or
                              to the first/last slot. Completed ([x])
@@ -92,6 +101,16 @@ Local (current project):
   log                        Open HISTORY.md in your editor
   info                       Diagnostic information about this installation
 
+Shell completion:
+  completion bash            Print the Bash completion script to STDOUT:
+                             eval "$(ck completion bash)"
+  completion zsh             Print the Zsh completion script to STDOUT:
+                             eval "$(ck completion zsh)"
+                             Scripts complete the core commands plus the
+                             registered project names (from
+                             ~/.config/ck/projects.json); a missing or
+                             unreadable registry degrades to no names
+
 Global (all registered projects):
   dashboard                  Cross-project dashboard (compact table)
   dashboard -v               Detailed block view: full PREV/FOCUS/NEXT
@@ -109,11 +128,19 @@ Space Management (manage global spaces):
                              template
   space rename <old> <new>   Rename a space, carrying its notes
                              along (alias: mv)
-  space delete <name>        Permanently delete a space and its
+  space move <name> <pos>    Move a space to a 1-based position in
+                             the persisted space order (the virtual
+                             `project` space included)
+  space swap <a> <b>         Exchange two spaces' positions
+  space reorder              Normalize/re-index the space sequence
+                             against the spaces that currently exist
+  space delete <name> [-f]   Permanently delete a space and its
                              process notes; the target is checked
-                             first, then `-y` skips the [y/N]
-                             confirmation. Built-in `local` /
-                             `remote` cannot be deleted
+                             first, then `[y/N]` confirmation
+                             (`-y` / `-f` / `--force` skip it). The
+                             default `project` space and the
+                             built-in `local` / `remote` cannot be
+                             deleted
 
 Spaces (out-of-project task lists, ~/.config/ck/spaces/):
   local add <text>          Add a task to the workstation space
@@ -229,7 +256,7 @@ _NOTIFIER_COMMANDS = frozenset({"done", "save"})
 # dangling (the keeper is rootless there, not broken).
 _LOCAL_ONLY_COMMANDS = frozenset({
     "init", "start", "done", "add", "note", "notes", "save", "edit",
-    "log",
+    "log", "delete", "rm",
 })
 # `ck space …` is GLOBAL (it operates purely on ~/.config/ck/spaces/),
 # so it is deliberately NOT in _LOCAL_ONLY_COMMANDS — the management
@@ -333,6 +360,18 @@ def build_parser() -> "argparse.ArgumentParser":
         help="Task ID, range, or list (e.g. 3, 2-4); omitted = the "
              "currently focused task")
 
+    p_delete = sub.add_parser(
+        "delete", aliases=["rm"],
+        help="Permanently remove a task from PLAN.md (re-indexes the "
+             "remaining IDs)")
+    p_delete.add_argument(
+        "task_id", nargs="?", default=None,
+        help="Task ID to delete (numbers only; spaces are deleted "
+             "with `ck space delete <name>`)")
+    p_delete.add_argument(
+        "-f", "--force", dest="force", action="store_true",
+        help="Skip the [y/N] confirmation prompt (automation)")
+
     p_add = sub.add_parser("add", help="Add a new task")
     p_add.add_argument("text", nargs="+", help="Task text")
 
@@ -367,6 +406,17 @@ def build_parser() -> "argparse.ArgumentParser":
              "the current HISTORY.md",
     )
     sub.add_parser("info", help="Show installation diagnostics")
+
+    p_completion = sub.add_parser(
+        "completion",
+        help="Print a shell completion script (bash|zsh) to STDOUT")
+    p_completion.add_argument(
+        "shell", nargs="?", choices=["bash", "zsh"],
+        help="Shell to generate completion for")
+    p_completion.add_argument(
+        "--list-projects", dest="list_projects", action="store_true",
+        help="Internal: print registered project names one per line "
+             "(used by the generated completion scripts)")
 
     p_space = sub.add_parser(
         "space", help="Manage global spaces (list/create/rename/delete)")
@@ -459,7 +509,9 @@ _LEGACY_CHOICES = (
     "save", "edit", "log", "install", "uninstall", "update", "help",
     "list", "register", "unregister", "prune", "info",
     "move", "swap", "reorder",
+    "delete", "rm",
     "local", "remote", "space",
+    "completion",
     "dev", "sandbox", "ck-clean",
 )
 
@@ -491,7 +543,7 @@ _SPACE_ACTION_FLAGS: dict[str, frozenset] = {
 # Only the irreversible ``delete`` takes a bypass flag; the others
 # reject every flag so a typo can never be swallowed silently.
 _SPACE_MGMT_FLAGS: dict[str, frozenset] = {
-    "delete": frozenset({"-y", "--yes", "--force"}),
+    "delete": frozenset({"-y", "--yes", "--force", "-f"}),
 }
 
 # Head tokens that are real commands. The built-in space names are
@@ -523,6 +575,8 @@ _LEGACY_FLAGS: dict[str, frozenset] = {
     "move": frozenset(),
     "swap": frozenset(),
     "reorder": frozenset(),
+    "delete": frozenset({"-f", "--force"}),
+    "rm": frozenset({"-f", "--force"}),
     "note": frozenset(),
     "notes": frozenset(),
     "save": frozenset(),
@@ -534,6 +588,7 @@ _LEGACY_FLAGS: dict[str, frozenset] = {
     "prune": frozenset(),
     "local": frozenset(),
     "remote": frozenset(),
+    "completion": frozenset({"--list-projects"}),
     "install": frozenset({"--dev"}),
     "uninstall": frozenset(),
     "update": frozenset(),
@@ -773,6 +828,12 @@ def _dispatch(argv: Optional[List[str]] = None) -> int:
     if raw[0] == "-v" or raw[0] == "--version":
         print(f"ck version {VERSION}")
         return 0
+    # SHELL COMPLETION: handled BEFORE any startup side effect (space
+    # auto-init, update probe, sandbox banner). The generated scripts
+    # call `ck completion --list-projects` on every TAB, so this path
+    # must stay fast AND silent — its STDOUT is parsed by the shell.
+    if raw[0] == "completion":
+        return _run_completion(raw[1:])
     # AUTO-INIT: default global spaces (local/remote) materialize on
     # the first CLI use, from any working directory; existing space
     # files are strictly preserved and dev-mode sessions are skipped.
@@ -910,6 +971,15 @@ def _dispatch(argv: Optional[List[str]] = None) -> int:
             ids = ck.done(spec)
             _notice(ui.OK, f"Marked done: {', '.join(map(str, ids))}")
             _maybe_notify(ck)
+        elif args.command in ("delete", "rm"):
+            # argparse spelling of the same runner the legacy
+            # dispatcher uses — one implementation path.
+            rest = []
+            if getattr(args, "task_id", None):
+                rest.append(args.task_id)
+            if getattr(args, "force", False):
+                rest.append("-f")
+            return _run_task_delete(args.command, rest)
         elif args.command == "add":
             text = " ".join(args.text)
             new_id = ck.add_task(text)
@@ -941,6 +1011,11 @@ def _dispatch(argv: Optional[List[str]] = None) -> int:
                 _notice(ui.OK, "Unregistered.")
             else:
                 _notice(ui.INFO, "Not in registry.")
+        elif args.command == "completion":
+            rest = [args.shell] if args.shell else []
+            if getattr(args, "list_projects", False):
+                rest.insert(0, "--list-projects")
+            return _run_completion(rest)
         elif args.command == "prune":
             pruned = ck.prune()
             if pruned:
@@ -1194,21 +1269,116 @@ def _run_reorder(ck, action: str, tokens: List[str]) -> int:
     return 0
 
 
+def _run_task_delete(cmd: str, rest: List[str]) -> int:
+    """``ck delete <ID>`` / ``ck rm <ID>`` — remove a task from PLAN.md.
+
+    TASK deletion, deliberately distinct from space deletion: the
+    target is a positional task ID inside the bound project's
+    PLAN.md. Removing a whole global SPACE is the separate, spelled-out
+    ``ck space delete <name>`` command (which has no short alias).
+
+    Without ``-f`` / ``--force`` the task's ID and title are printed
+    and a ``[y/N]`` confirmation is required on an interactive
+    terminal. A non-interactive run REFUSES rather than deleting blind
+    (the same fail-closed policy as ``ck space delete``); ``-f`` skips
+    the prompt for automation.
+
+    ``ContextKeeper.delete_task`` performs the removal, the sequential
+    ID re-index and the state/note reconciliation; this layer owns
+    argument parsing, the confirmation gate and the exit-code mapping.
+    """
+    force = any(tok in ("-f", "--force") for tok in rest)
+    positional = [tok for tok in rest if tok not in ("-f", "--force")]
+    usage = f"Usage: ck {cmd} <ID> [-f|--force]"
+    if not positional:
+        print(usage)
+        return 2
+    if len(positional) > 1:
+        _print_error(
+            f"ERROR: `ck {cmd}` takes exactly one task ID "
+            f"(got {len(positional)}).")
+        return 2
+
+    raw = positional[0]
+    try:
+        task_id = int(raw)
+    except ValueError:
+        # TASK IDs are numbers. A name here is most likely an attempt
+        # to delete a SPACE — point at the dedicated command instead
+        # of guessing (and never treat it as a path to remove).
+        _print_error(
+            f"ERROR: Invalid task ID: {raw!r}. Task IDs are numbers "
+            f"(see `ck list`); to delete a global space use "
+            f"`ck space delete {raw}`.")
+        return 2
+
+    ck = ContextKeeper()
+    try:
+        info = ck.task_summary(task_id)
+    except KeyError:
+        _print_error(f"ERROR: No task with id {task_id}.")
+        return 2
+    except ValueError as e:
+        _print_error(f"ERROR: {e}")
+        return 2
+
+    print(f"Task #{info['id']}: {info['title']}")
+    if not force:
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            _print_error(
+                f"ERROR: Refusing to delete task #{task_id} without "
+                "confirmation (non-interactive terminal). "
+                "Pass -f to confirm.")
+            return 2
+        try:
+            answer = input(f"Permanently delete task #{task_id}? [y/N]: ")
+        except (EOFError, KeyboardInterrupt):
+            _notice(ui.INFO, "Aborted.")
+            return 2
+        if answer.strip().lower() not in ("y", "yes"):
+            _notice(ui.INFO, "Aborted.")
+            return 2
+
+    try:
+        removed = ck.delete_task(task_id)
+    except KeyError:
+        # The task vanished between the prompt and the write (another
+        # process edited the plan): a clean not-found error.
+        _print_error(f"ERROR: No task with id {task_id}.")
+        return 2
+
+    _notice(
+        ui.OK,
+        f"Deleted task #{removed['id']}: {removed['title']} "
+        f"({removed['remaining']} task(s) remaining, IDs re-indexed).")
+    if removed["notes_archived"]:
+        _notice(
+            ui.INFO,
+            f"Archived {removed['notes_archived']} process note(s) "
+            "to HISTORY.md.")
+    return 0
+
+
 def _run_space_mgmt(rest: List[str]) -> int:
     """Dispatch ``ck space <action> …`` — the space management layer.
 
     Actions (with their explicit aliases):
 
-    - ``list`` (``ls``)   — every global space plus the ACTIVE
-      PROJECT row (``[PROJECT] <name>``) that un-prefixed commands
-      resolve against;
+    - ``list`` (``ls``)   — every global space in the PERSISTED order
+      plus the ACTIVE PROJECT row (the virtual ``project`` space) that
+      un-prefixed commands resolve against;
     - ``create <name>`` (``new``) — scaffold a new space file;
     - ``rename <old> <new>`` (``mv``) — rename it, carrying the note
       sidecar along;
+    - ``move <name> <position>`` — 1-based move in the space sequence
+      (``project`` is a legal target);
+    - ``swap <name1> <name2>`` — exchange two positions;
+    - ``reorder`` — normalize/re-index the persisted sequence;
     - ``delete <name>``   — permanently remove it plus its sidecar.
       NO short alias on purpose: deletion is irreversible, so the verb
       is spelled out and requires an interactive ``[y/N]`` confirmation
-      (or an explicit ``-y`` / ``--yes`` / ``--force``).
+      (or an explicit ``-f`` / ``-y`` / ``--yes`` / ``--force``).
+      TASK deletion is the separate top-level ``ck delete <ID>``.
 
     Validation lives in :mod:`cklib.spaces` (``validate_new_space_name``
     and friends); this layer only maps failures to clean ``ERROR:`` lines
@@ -1217,8 +1387,8 @@ def _run_space_mgmt(rest: List[str]) -> int:
     from . import spaces
 
     usage = (
-        "Usage: ck space "
-        "<list|create <name>|rename <old> <new>|delete <name> [-y]>"
+        "Usage: ck space <list|create <name>|rename <old> <new>|"
+        "move <name> <pos>|swap <a> <b>|reorder|delete <name> [-f]>"
     )
     if not rest:
         print(usage)
@@ -1266,15 +1436,52 @@ def _run_space_mgmt(rest: List[str]) -> int:
                 print("     Process notes (sidecar) carried along.")
             return 0
 
+        if action == "move":
+            if len(args) != 2:
+                print("Usage: ck space move <name> <position>")
+                return 2
+            try:
+                position = int(args[1])
+            except ValueError:
+                _print_error(
+                    f"ERROR: Invalid position: {args[1]!r}. Use a "
+                    "1-based number.")
+                return 2
+            order = spaces.move_space(args[0], position)
+            _notice(ui.OK,
+                    f"Moved space {args[0]!r} -> position {position}")
+            return 0
+
+        if action == "swap":
+            if len(args) != 2:
+                print("Usage: ck space swap <name1> <name2>")
+                return 2
+            spaces.swap_spaces(args[0], args[1])
+            _notice(ui.OK,
+                    f"Swapped spaces {args[0]!r} <-> {args[1]!r}")
+            return 0
+
+        if action == "reorder":
+            if args:
+                _print_error(
+                    "ERROR: `ck space reorder` takes no arguments.")
+                return 2
+            order = spaces.reorder_spaces()
+            lines = "\n".join(
+                f"       {i}. {name}"
+                for i, name in enumerate(order, start=1))
+            _notice(ui.OK, f"Normalized space order:\n{lines}")
+            return 0
+
         if action == "delete":
             # Split the confirmation flags off FIRST: `ck space delete
-            # work -y` is one name plus a bypass, not two names.
+            # work -f` is one name plus a bypass, not two names.
             assume_yes = any(
-                tok in ("-y", "--yes", "--force") for tok in args)
+                tok in ("-f", "-y", "--yes", "--force") for tok in args)
             names = [a for a in args
-                     if a not in ("-y", "--yes", "--force")]
+                     if a not in ("-f", "-y", "--yes", "--force")]
             if not names:
-                print("Usage: ck space delete <name> [-y]")
+                print("Usage: ck space delete <name> [-f]")
                 return 2
             if len(names) > 1:
                 _print_error(
@@ -1297,8 +1504,8 @@ def _run_space_mgmt(rest: List[str]) -> int:
                     _print_error(
                         "ERROR: Refusing to delete space "
                         f"{name!r} without confirmation "
-                        "(non-interactive terminal). Pass -y to "
-                        "confirm.")
+                        "(non-interactive terminal). Pass -y (or -f) "
+                        "to confirm.")
                     return 2
                 try:
                     answer = input(
@@ -1512,6 +1719,8 @@ def _legacy_dispatch(raw: List[str]) -> int:
             _notice(ui.OK, f"Marked done: {', '.join(map(str, ids))}")
             if notifiable:
                 _maybe_notify(ck)
+        elif cmd in ("delete", "rm"):
+            return _run_task_delete(cmd, rest)
         elif cmd == "add":
             if not rest:
                 print("Usage: ck add <text>")
@@ -1851,6 +2060,53 @@ def _run_space_command(space: str, rest: List[str]) -> int:
         f"ERROR: Unknown `ck {space}` action: {action!r}\n   {usage}"
     )
     return 2
+
+
+# ---------------------------------------------------------------------- #
+# Shell completion (ck completion bash|zsh)
+# ---------------------------------------------------------------------- #
+
+def _run_completion(rest: List[str]) -> int:
+    """Print a shell completion script, or the registry's project names.
+
+    ``ck completion bash`` / ``ck completion zsh`` write the script to
+    STDOUT (so ``eval "$(ck completion zsh)"`` just works).
+
+    ``ck completion --list-projects`` is the internal helper the
+    generated scripts call on every TAB: one registered project name
+    per line, an empty output when nothing is registered, and NEVER a
+    traceback or diagnostic — completion must not pollute the prompt.
+    The registry read itself is thread/process-safe (``*.lock``) via
+    :func:`cklib.registry.list_projects`.
+    """
+    from .completion import SUPPORTED_SHELLS, list_project_names, script_for
+
+    positions: List[str] = []
+    for token in rest:
+        if token == "--list-projects":
+            for name in list_project_names():
+                print(name)
+            return 0
+        if token.startswith("-") and token != "-":
+            _print_error(
+                f"ERROR: Unknown flag for `ck completion`: {token}\n"
+                "   Run `ck --help` for usage."
+            )
+            return 2
+        positions.append(token)
+
+    if not positions:
+        print(f"Usage: ck completion <{'|'.join(SUPPORTED_SHELLS)}>")
+        return 2
+    try:
+        script = script_for(positions[0])
+    except ValueError as e:
+        _print_error(f"ERROR: {e}")
+        return 2
+    # sys.stdout.write (not print) so the script ends with exactly one
+    # newline — it is parsed by the shell, not read by a human.
+    sys.stdout.write(script)
+    return 0
 
 
 # ---------------------------------------------------------------------- #

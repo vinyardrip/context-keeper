@@ -47,7 +47,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
 
-from . import config
+from . import config, sequence
 from .config import file_lock
 from .models import TaskList, TaskStatus
 from .parser import (
@@ -207,6 +207,13 @@ def routable_space_name(name: str) -> Optional[str]:
     return name
 
 
+# The DEFAULT, directory-based project space. It is not a file: it
+# stands for the active project row that ``ck space list`` renders, so
+# the ordering sequence can position it like any other space. It is
+# never creatable, renamable or deletable — the ``project`` sentinel
+# always resolves to the current project.
+PROJECT_SPACE = "project"
+
 # Names that must NEVER become a space, even though they are
 # structurally safe filenames:
 #
@@ -220,7 +227,8 @@ def routable_space_name(name: str) -> Optional[str]:
 #   top-level command. A space named after one of them makes
 #   ``ck <name> <verb>`` ambiguous for the reader.
 RESERVED_SPACE_NAMES = frozenset({
-    "local", "remote", "project", "list", "create", "rename", "delete",
+    "local", "remote", PROJECT_SPACE, "list", "create", "rename", "delete",
+    "move", "swap", "reorder",
 })
 
 
@@ -345,6 +353,227 @@ def _space_exists_anywhere(name: str) -> bool:
     )
 
 
+# ---------------------------------------------------------------------- #
+# Space ordering (persisted in the global state.json)
+# ---------------------------------------------------------------------- #
+
+SPACE_ORDER_KEY = "spaces_order"
+
+
+def global_state_path() -> Path:
+    """``<global config>/state.json`` — the space-order store.
+
+    Computed from the CURRENT ``GLOBAL_CONFIG_DIR`` on every call
+    (like :func:`spaces_dir`), so a pinned test config root or a
+    runtime relocation observes it. In production this is exactly
+    ``cklib.config.GLOBAL_STATE_FILE``; space order is GLOBAL state
+    (spaces outlive any one project), never a project's
+    ``.ck/state.json``.
+    """
+    return config.GLOBAL_CONFIG_DIR / "state.json"
+
+
+def _global_state_read_path() -> Path:
+    """Read-side state path, preferring a sandbox copy in dev mode.
+
+    Mirrors the registry / PLAN read-your-writes contract: a sandbox
+    copy written by this session is read back, otherwise the real
+    file is. The probe never materialises ``.sandbox/``.
+    """
+    path = global_state_path()
+    try:
+        from .sandbox import dev_context_active, resolve_write_path
+        if dev_context_active():
+            sandboxed = resolve_write_path(
+                path, create=False, force=True)
+            if sandboxed.exists():
+                return sandboxed
+    except Exception:
+        pass
+    return path
+
+
+def _global_state_write_path() -> Path:
+    """Write-side state path (dev mode redirects into the sandbox)."""
+    path = global_state_path()
+    try:
+        from .sandbox import dev_context_active, resolve_write_path
+        if dev_context_active():
+            path = resolve_write_path(path, force=True)
+    except Exception:
+        pass
+    return path
+
+
+def _read_global_state_dict() -> dict:
+    """Best-effort read of the global state mapping (never raises)."""
+    try:
+        data = json.loads(
+            _global_state_read_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def read_space_order() -> list[str]:
+    """Persisted space order (valid, unique names only).
+
+    Purely a read: a missing, unreadable or corrupt state file yields
+    an empty list (callers fall back to the canonical default order).
+    The ``project`` sentinel is a valid entry.
+    """
+    raw = _read_global_state_dict().get(SPACE_ORDER_KEY)
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    seen: set = set()
+    for item in raw:
+        if not isinstance(item, str) or item in seen:
+            continue
+        if item != PROJECT_SPACE and not _is_safe_space_name(item):
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
+def write_space_order(order: list[str]) -> None:
+    """Persist ``order`` under ``spaces_order``, preserving other keys.
+
+    Read-modify-write under the state file's fail-closed ``*.lock`` +
+    atomic replace, so ordering can never tear the update-notifier
+    timestamps living in the same file. DEV MODE redirects the write
+    into ``.sandbox/config/state.json``.
+    """
+    path = _global_state_write_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with file_lock(path):
+        state = _read_global_state_dict()
+        state[SPACE_ORDER_KEY] = list(order)
+        text = json.dumps(state, indent=2, ensure_ascii=False)
+        _atomic_write_text(path, text)
+
+
+def available_space_names() -> list[str]:
+    """Every real space right now: built-ins first, then discoveries."""
+    return list(config.SPACE_NAMES) + [
+        name for name in existing_space_names()
+        if name not in config.SPACE_NAMES
+    ]
+
+
+def space_order(*, include_project: bool = False) -> list[str]:
+    """The current display/mutation sequence for spaces.
+
+    ``include_project=True`` prepends the default, directory-based
+    ``project`` space: the sentinel for the active project row in
+    ``ck space list`` (which therefore participates in move/swap/
+    reorder like any other space). The dashboard omits it.
+
+    The result reconciles the PERSISTED ``spaces_order`` with what
+    actually exists: stale entries are dropped, safe unknown names
+    are ignored, new spaces are appended in canonical order and
+    duplicates collapse. With no persisted order the canonical
+    default applies (``project``, then ``local``/``remote``, then
+    custom spaces sorted).
+    """
+    available = available_space_names()
+    if include_project:
+        available = [PROJECT_SPACE, *available]
+    stored = read_space_order()
+    if not stored:
+        return available
+    order = sequence.normalize_order(stored, available)
+    if include_project and PROJECT_SPACE not in stored:
+        # Hand-edited/pre-v0.8.15 state: the default project space
+        # belongs FIRST, not appended at the end.
+        order = sequence.without(order, PROJECT_SPACE)
+        order.insert(0, PROJECT_SPACE)
+    return order
+
+
+def _require_ordered_space(name: str) -> None:
+    """Validate a move/swap target (``project`` or an existing space)."""
+    if name == PROJECT_SPACE:
+        return
+    if not _is_safe_space_name(name) or not is_valid_space(name):
+        raise SpaceNotFoundError(
+            f"Space {name!r} not found: {space_path(name)} "
+            f"does not exist."
+        )
+
+
+def move_space(name: str, position: int) -> list[str]:
+    """Move ``name`` to 1-based ``position`` in the space sequence.
+
+    Persists the new order (``spaces_order``) and returns it. Raises
+    :class:`SpaceNotFoundError` for an unknown space and
+    :class:`ValueError` for an out-of-range position — validated
+    BEFORE anything is written, so a bad request never persists a
+    partial order.
+    """
+    _require_ordered_space(name)
+    order = space_order(include_project=True)
+    try:
+        new_order = sequence.move_item(order, name, position)
+    except KeyError:
+        raise SpaceNotFoundError(
+            f"Space {name!r} not found in the space sequence.") from None
+    write_space_order(new_order)
+    return new_order
+
+
+def swap_spaces(name_a: str, name_b: str) -> list[str]:
+    """Exchange the positions of two spaces (persists the order)."""
+    _require_ordered_space(name_a)
+    _require_ordered_space(name_b)
+    order = space_order(include_project=True)
+    try:
+        new_order = sequence.swap_items(order, name_a, name_b)
+    except KeyError:
+        raise SpaceNotFoundError(
+            "Space not found in the space sequence: "
+            f"{name_a!r} / {name_b!r}.") from None
+    if new_order != order:
+        write_space_order(new_order)
+    return new_order
+
+
+def reorder_spaces() -> list[str]:
+    """Normalize the persisted sequence and write it back.
+
+    Re-indexes against the spaces that EXIST right now: stale names
+    disappear, new spaces are appended, duplicates collapse and the
+    ``project`` sentinel keeps its (possibly moved) slot. Returns the
+    resulting sequence, 1-based positions implied by list order.
+    """
+    order = space_order(include_project=True)
+    write_space_order(order)
+    return order
+
+
+def _rename_space_in_order(old_name: str, new_name: str) -> None:
+    """Carry a renamed space's position in the persisted order."""
+    stored = read_space_order()
+    if old_name not in stored:
+        return
+    write_space_order([
+        new_name if name == old_name else name for name in stored
+    ])
+
+
+def _remove_space_from_order(name: str) -> None:
+    """Drop a deleted space from the persisted order (if present).
+
+    Writes only when the name was actually stored, so deleting a
+    space on a machine with a pristine state file never creates one.
+    """
+    stored = read_space_order()
+    if name not in stored:
+        return
+    write_space_order(sequence.without(stored, name))
+
+
 def _write_space_file(name: str) -> Path:
     """Write the default scaffold to ``<name>.md`` (dev-mode aware).
 
@@ -463,6 +692,9 @@ def rename_space(old_name: str, new_name: str) -> dict:
         if src_state.is_file():
             src_state.replace(_state_write_path(new_name))
             notes_moved = True
+    # A renamed space keeps its position in the persisted sequence
+    # instead of dropping to the end as a "new" space.
+    _rename_space_in_order(old_name, new_name)
     return {
         "from": old_name,
         "to": new_name,
@@ -500,6 +732,11 @@ def validate_deletable_space(name: str) -> Path:
     ever showing the confirmation prompt for a space that cannot be
     deleted anyway.
     """
+    if name == PROJECT_SPACE:
+        raise ValueError(
+            "Cannot delete the default project space 'project': it "
+            "represents the active project directory, not a space "
+            "file. Delete project tasks with `ck delete <ID>`.")
     if is_builtin_space(name):
         raise ValueError(
             f"Cannot delete the built-in space {name!r}: it is a "
@@ -526,9 +763,10 @@ def delete_space(name: str, *, confirmed: bool = False) -> dict:
     error wins.
 
     STRICTLY CONFIRMED: the caller MUST then pass ``confirmed=True``
-    (the ``ck space delete`` prompt / ``-y`` flag). Without it nothing
-    is removed and the function refuses — an accidental call can never
-    destroy a space.
+    (the ``ck space delete`` prompt / ``-f`` / ``-y`` flag). Without
+    it nothing is removed and the function refuses — an accidental
+    call can never destroy a space. The name is also dropped from the
+    persisted ``spaces_order`` so the sequence never keeps a hole.
 
     Returns ``{"name", "removed", "notes"}``.
     """
@@ -547,6 +785,10 @@ def delete_space(name: str, *, confirmed: bool = False) -> dict:
         if sidecar.is_file():
             sidecar.unlink()
             notes_removed = True
+    # Keep the persisted sequence in sync: a deleted space must not
+    # leave a hole (normalization would drop it anyway, but the state
+    # file should reflect reality immediately).
+    _remove_space_from_order(name)
     return {"name": name, "removed": removed, "notes": notes_removed}
 
 
@@ -1052,11 +1294,21 @@ __all__ = [
     "spaces_dirs",
     "space_path",
     "state_path",
+    "global_state_path",
+    "PROJECT_SPACE",
+    "SPACE_ORDER_KEY",
     "is_builtin_space",
     "existing_space_names",
+    "available_space_names",
     "is_valid_space",
     "routable_space_name",
     "RESERVED_SPACE_NAMES",
+    "read_space_order",
+    "write_space_order",
+    "space_order",
+    "move_space",
+    "swap_spaces",
+    "reorder_spaces",
     "validate_new_space_name",
     "create_space",
     "ensure_default_spaces",

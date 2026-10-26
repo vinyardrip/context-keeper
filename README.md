@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.8.12-blue)]()
+[![version](https://img.shields.io/badge/version-0.8.15-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -103,7 +103,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.8.12
+ck -v    # → ck version 0.8.15
 ```
 
 ---
@@ -136,6 +136,7 @@ ck -v    # → ck version 0.8.12
 | _(reordering a completed task)_ | **Refused.** A completed (`[x]`) task is history and is never reordered: the entire operation aborts with exit code 1 and `[err] Cannot move completed task #<id>. Only pending/active tasks can be reordered.` |
 | ck start \<ID\> | Focus a task (`- [>]`); `ck start 0` resets focus. A noted task that loses focus moves to Unfocused / Paused Context (note preserved until `ck done` archives it); a noteless one gets a soft attach-a-note hint |
 | ck done \<ID\|range\|list\> | Mark task(s) done (`- [x]`), e.g. `3`, `2-4`, `1,3,5`. Bare `ck done` completes the CURRENT FOCUS (usage error without one); the completed task's process note is archived into HISTORY.md and cleared |
+| ck delete \<ID\> / ck rm \<ID\> | Permanently remove ONE task from `PLAN.md` and re-index the remaining task IDs 1..N. Prints `Task #<ID>: <title>` and asks `[y/N]`; `-f` / `--force` skips the prompt for automation — a non-interactive run without `-f` refuses. Notes bound to the deleted task are archived to `HISTORY.md`. Task deletion only: global spaces are removed with the separate `ck space delete <name>` |
 | ck note \<text\> | Attach/update a process note on the active task (shown in `ck st`; archived to HISTORY.md by `ck done`) |
 | ck edit | Open PLAN.md in your editor (see [Editor Resolution](#editor-resolution)) |
 | ck save | Task completion workflow: optional note + optional **local** commit |
@@ -156,10 +157,13 @@ ck -v    # → ck version 0.8.12
 | ck register [-n NAME] [--path PATH] | Add a project to the global registry |
 | ck unregister [--path PATH \| NAME] | Remove a project from the registry |
 | ck prune | Purge registry entries whose folders no longer exist; reports each purged path and a summary count |
-| ck space list / ls | Space management view: every discovered global space (dynamically scanned from `~/.config/ck/spaces/*.md`, including empty ones) plus the active project as the FIRST row — highlighted with bold/cyan accent on its name (no text tag), i.e. the context un-prefixed commands (`ck st`, `ck list`) resolve against. Rendered as a thin box-drawing table (`┌─┬┐ │ ├─┼┤ └─┴┘`) with quiet hairline borders |
+| ck space list / ls | Space management view: every discovered global space (dynamically scanned from `~/.config/ck/spaces/*.md`, including empty ones) plus the active project — the virtual `project` space, highlighted with bold accent on its name (no text tag), i.e. the context un-prefixed commands (`ck st`, `ck list`) resolve against. Rows follow the persisted `spaces_order` sequence (default: `project` first). Rendered as a thin box-drawing table (`┌─┬┐ │ ├─┼┤ └─┴┘`) with quiet hairline borders |
 | ck space create \<name\> / new | Create a new space from the default template (`## Current Sprint` / `## Completed`); rejects unsafe, reserved (`list`/`create`/`rename`/`delete`/`project`/`local`/`remote`) and taken names |
-| ck space rename \<old\> \<new\> / mv | Rename a space, carrying its `.json` note sidecar along so no process notes are lost |
-| ck space delete \<name\> [-y] | Permanently delete a space **and** its note sidecar. The target is validated **first** (a missing space reports `ERROR:` with exit 1 immediately — no stdin read, no prompt; invalid input exits 2), and an existing space asks `Are you sure …? [y/N]` on a terminal and refuses without confirmation when non-interactive. Built-in `local` / `remote` can never be deleted. No `rm` alias — the verb is spelled out |
+| ck space rename \<old\> \<new\> / mv | Rename a space, carrying its `.json` note sidecar along so no process notes are lost; a persisted position is carried over to the new name |
+| ck space move \<name\> \<position\> | Move a space to a 1-based position in the persisted `spaces_order` sequence (the virtual `project` space is a valid target). The order is stored in `~/.config/ck/state.json` and drives both `ck space list` and the dashboard's `SPACES` table |
+| ck space swap \<name1\> \<name2\> | Exchange the positions of two spaces (any two entries of the sequence, including `project`) |
+| ck space reorder | Normalize/re-index the persisted sequence against the spaces that currently exist: stale names are dropped, new spaces appended, duplicates collapsed, and the `project` sentinel keeps its slot. Prints the numbered result |
+| ck space delete \<name\> [-f] | Permanently delete a space **and** its note sidecar, then drop it from the persisted order. The target is validated **first** (a missing space reports `ERROR:` with exit 1 immediately — no stdin read, no prompt; invalid input exits 2), and an existing space asks `Permanently delete …? [y/N]` on a terminal and refuses without confirmation when non-interactive; `-f` / `--force` (or `-y` / `--yes`) skips the prompt. The virtual `project` space and the built-in `local` / `remote` can never be deleted. No `rm` alias — the verb is spelled out, and task deletion stays the separate top-level `ck delete <ID>` |
 | ck local add \<text\> | Add a task to the workstation space (`~/.config/ck/spaces/local.md`; `local`/`remote` are auto-initialized at startup — an existing space file is never overwritten) |
 | ck local list | List workstation space tasks in the project `ck list` layout (`##` section headers, `[ ]`/`[>]`/`[x]` markers), with attached process notes rendered as `* Note:` lines under their tasks |
 | ck local st / ck local status | Detailed workstation space status view — same layout as `ck st` (header bar, progress, CURRENT FOCUS with its process note, WORK CONTEXT: Done / Skipped / Focus / Next / Upcoming / Unfocused-Paused / Backlog) |
@@ -213,6 +217,7 @@ hierarchy; the active project in `ck space list` is bold cyan. With
 / `>> NEXT` context triad plus its process notes — the same verbose
 treatment registered projects get, and the compact table is not repeated
 above the cards.
+| ck completion bash\|zsh | Print the matching shell completion script to STDOUT: `eval "$(ck completion zsh)"`. Completions cover the core commands plus the registered project names read from `~/.config/ck/projects.json`; a missing, empty or unreadable registry simply yields no project names (never a traceback) |
 | ck info | Installation diagnostics (version, branch, paths) |
 | ck install | Copy ck to ~/.local/bin/ck (physical executable file, no symlink) + cklib snapshot to ~/.local/share/ck; no sudo |
 | ck uninstall | Remove ~/.local/bin/ck, the cklib snapshot and any legacy ~/.local/bin/ck-dev |
@@ -227,6 +232,69 @@ above the cards.
 | ck-clean / ck dev clean / ck sandbox clean | Purge the `.sandbox/` dev environment |
 | ck -h | Help |
 | ck -v | Version |
+
+### Space Ordering
+
+Space order is a **global** sequence — spaces exist outside any one project —
+persisted in `~/.config/ck/state.json` under `spaces_order` (atomic write under
+a fail-closed lock). It drives both `ck space list` and the dashboard's
+`SPACES (GLOBAL CONTEXTS)` table, so the two can never disagree.
+
+The sequence always contains the virtual **`project`** space: the active
+project row ("the default directory-based space"), which un-prefixed commands
+resolve against. It is listed first by default, can be moved/swapped like any
+other entry, and can never be created, renamed or deleted.
+
+```text
+$ ck space move work 1
+[ok] Moved space 'work' -> position 1
+
+$ ck space swap local remote
+[ok] Swapped spaces 'local' <-> 'remote'
+
+$ ck space reorder
+[ok] Normalized space order:
+       1. work
+       2. project
+       3. remote
+       4. local
+       5. blog
+```
+
+`ck space reorder` reconciles the stored sequence with reality: names whose
+files are gone are dropped, newly discovered spaces are appended, duplicates
+collapse, and the `project` sentinel keeps its slot (or is restored to the
+front if a hand-edited state file omitted it). Positions are 1-based and
+include the `project` row. Invalid positions and missing spaces are clean
+errors (exit 2 / exit 1 respectively) and never persist a partial order.
+
+> **Task vs. space mutation.** `ck move` / `swap` / `reorder` reorder **tasks**
+> inside the current `PLAN.md`; `ck space move` / `swap` / `reorder` reorder the
+> **global spaces** and never touch a plan. Likewise `ck delete <ID>` deletes a
+> task, while `ck space delete <name>` deletes a whole space and its notes.
+
+### Shell Completion
+
+`ck completion bash` / `ck completion zsh` print a completion script to
+STDOUT — nothing is written to disk — so it can be loaded per session or
+added to your shell config:
+
+```bash
+# Bash (~/.bashrc)
+eval "$(ck completion bash)"
+
+# Zsh (~/.zshrc, after `autoload -Uz compinit && compinit`)
+eval "$(ck completion zsh)"
+```
+
+The scripts complete the core navigation commands and, most importantly, the
+**registered project names**: `ck <TAB>`, `ck st <TAB>` and `ck list <TAB>`
+suggest projects from `~/.config/ck/projects.json` immediately, with no second
+lookup. The registry read is lock-guarded like every other `ck` registry
+access, and a missing, empty or unreadable registry degrades to plain command
+completion — no traceback, no noise in the prompt. After `ck update`
+re-installs the launcher, re-source the line (or open a new shell) to pick up
+the latest script.
 
 ### Initialization & Registration
 
@@ -410,6 +478,40 @@ $ echo $?
 
 Exit codes: `0` success · `1` attempted to reorder a completed task · `2` usage
 error (unknown task ID, out-of-range position, non-numeric ID, missing argument).
+
+---
+
+## Task Deletion
+
+`ck delete <ID>` (alias: `ck rm <ID>`) permanently removes one task from
+`PLAN.md`. Headers, prose and every other task are preserved.
+
+```text
+$ ck delete 2
+Task #2: review the PR
+Permanently delete task #2? [y/N]: y
+[ok] Deleted task #2: review the PR (2 task(s) remaining, IDs re-indexed).
+```
+
+Task IDs are **positional**, so deleting one closes the numeric gap
+immediately: the remaining tasks are renumbered 1..N in document order — no
+broken sequences, no duplicate IDs. Process notes bound to the deleted task
+(the active note or a paused one) are archived into `HISTORY.md` instead of
+being dropped, and the note IDs in `.ck/state.json` shift with the re-index so
+remaining notes stay bound to the right tasks.
+
+- `-f` / `--force` skips the confirmation prompt for automation.
+- Without `-f`, a non-interactive session (piped stdin/stdout) **refuses**
+rather than deleting blind.
+- Task IDs are numbers: `ck delete work` is a clean error that points at
+`ck space delete work` instead of guessing.
+
+Exit codes: `0` deleted · `2` aborted, unknown/invalid ID, missing argument.
+
+> **Task vs. space deletion.** `ck delete <ID>` touches only the current
+> project's `PLAN.md`; it never removes a global space. Deleting a whole
+> space and its note sidecar is the deliberately spelled-out
+> `ck space delete <name> [-f]` command (no short alias).
 
 ---
 

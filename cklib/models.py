@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
+from . import sequence
+
 
 # ---------------------------------------------------------------------------
 # Status
@@ -150,6 +152,12 @@ class TaskList:
     sections: list[Section] = field(default_factory=list)
     source_text: str = ""
     newline: str = ""
+    # ORIGINAL 1-based source line numbers that a user-facing deletion
+    # removed. The renderer's substitution pass only rewrites lines
+    # that still OWN a task node; without this set a removed bullet's
+    # original line would be preserved verbatim. Empty for parsed or
+    # add-only ASTs, so existing rendering stays byte-identical.
+    removed_lines: set[int] = field(default_factory=set)
 
     # ---- lookup ----
 
@@ -291,10 +299,48 @@ class TaskList:
         return t
 
     def remove(self, task_id: int) -> Optional[Task]:
+        """Drop the task from the AST (IDs of the others are untouched).
+
+        Raw removal deliberately leaves the remaining IDs as they
+        were, which is what lossless byte-level tests rely on. A
+        user-facing deletion must close the numeric gap afterwards —
+        see :meth:`reindex`.
+        """
         for i, t in enumerate(self.tasks):
             if t.id == task_id:
                 return self.tasks.pop(i)
         return None
+
+    def delete(self, task_id: int) -> Task:
+        """Remove a task for a USER-FACING deletion and re-index.
+
+        Unlike :meth:`remove` (a raw AST pop used by read-only gap
+        analyses, which leaves the source line untouched), this also
+        records the task's source line so the renderer DROPS it, then
+        renumbers the remaining nodes 1..N in document order. Raises
+        ``KeyError`` for an unknown ID.
+        """
+        task = self.remove(task_id)
+        if task is None:
+            raise KeyError(f"No task with id {task_id}")
+        self.removed_lines.add(task.line_number)
+        self.reindex()
+        return task
+
+    def reindex(self) -> None:
+        """Renumber task IDs sequentially (1..N) in DOCUMENT order.
+
+        Task IDs are positional — the parser assigns them 1..N while
+        walking the file — so removing a task shifts every ID after
+        it. Re-indexing keeps the AST in agreement with what a fresh
+        parse of the written document would produce: no broken
+        sequences, no duplicate IDs. Ordering is by ``line_number``
+        (the rendered position), which is also the parser's order;
+        sorting is stable for degenerate equal-line nodes.
+        """
+        for new_id, task in enumerate(
+                sorted(self.tasks, key=lambda t: t.line_number), start=1):
+            task.id = new_id
 
     # ---- reordering (active / pending tasks only) ----
 
@@ -356,14 +402,12 @@ class TaskList:
         active = self.reorderable_tasks()
         if not active:
             raise ValueError("No pending tasks to reorder")
-        if position < 1 or position > len(active):
-            raise ValueError(
-                f"Position {position} is out of range (1..{len(active)})")
         if position == active.index(task) + 1:
             return position  # already there: a no-op, not an error
-        others = [t for t in active if t.id != task_id]
-        others.insert(position - 1, task)
-        self._assign(others, self._slots())
+        # Shared sequence engine (also powers `ck space move`): stable
+        # extraction/reinsertion + range validation in ONE place.
+        self._assign(sequence.move_item(active, task, position),
+                     self._slots())
         return position
 
     def move_task_to_edge(self, task_id: int, *, top: bool) -> int:
@@ -386,10 +430,9 @@ class TaskList:
         active = self.reorderable_tasks()
         idx_a = active.index(task_a)
         idx_b = active.index(task_b)
-        if idx_a == idx_b:
-            return (idx_a + 1, idx_b + 1)
-        active[idx_a], active[idx_b] = active[idx_b], active[idx_a]
-        self._assign(active, self._slots())
+        # Shared sequence engine (also powers `ck space swap`).
+        self._assign(sequence.swap_items(active, task_a, task_b),
+                     self._slots())
         return (idx_a + 1, idx_b + 1)
 
     def reorder_tasks(self, ordered_ids: list[int]) -> list[int]:
@@ -419,10 +462,12 @@ class TaskList:
 
         active = self.reorderable_tasks()
         by_id = {t.id: t for t in active}
-        listed = [by_id[tid] for tid in ordered_ids]
-        rest = [t for t in active if t.id not in seen]
-        self._assign(listed + rest, self._slots())
-        return [t.id for t in listed + rest]
+        # Shared normalization primitive (also powers `ck space
+        # reorder`): listed IDs first, unlisted keep their order.
+        final_ids = sequence.normalize_order(
+            ordered_ids, [t.id for t in active])
+        self._assign([by_id[tid] for tid in final_ids], self._slots())
+        return final_ids
 
 
 # ---------------------------------------------------------------------------

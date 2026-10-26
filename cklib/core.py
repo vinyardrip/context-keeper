@@ -51,7 +51,6 @@ from .config import (
     RELEASE_API_URL,
     RELEASE_CHECK_TIMEOUT,
     SANDBOX_BOUNDARY_NAME,
-    SPACE_NAMES,
     compress_archives_enabled,
     history_limit,
     sandbox_search_boundary_active,
@@ -1320,6 +1319,148 @@ class ContextKeeper:
             self._sync_active_task(tl)
             self._purge_note_if_completed(completed)
         return transitioned
+
+    # ------------------------------------------------------------------ #
+    # COMMAND: delete / rm (remove a task from PLAN.md)
+    # ------------------------------------------------------------------ #
+
+    def task_summary(self, task_id: int) -> dict:
+        """Read-only snapshot of a task for the deletion confirmation.
+
+        Returns ``{"id", "title", "status"}``. Raises ``KeyError``
+        for an unknown ID and ``ValueError`` when no project plan is
+        bound, exactly like the other task mutations — nothing is
+        written, so the CLI can show WHAT is about to be deleted
+        before asking.
+        """
+        self._require_bound_plan()
+        tl = self._load_plan()
+        task = tl.by_id(task_id)
+        if task is None:
+            raise KeyError(f"No task with id {task_id}")
+        return {
+            "id": task.id,
+            "title": task.title,
+            "status": task.status.canonical_marker,
+        }
+
+    def delete_task(self, task_id: int) -> dict:
+        """Permanently remove task ``task_id`` from PLAN.md.
+
+        TASK deletion — this is deliberately separate from
+        ``ck space delete`` (which removes a whole global space file
+        and its note sidecar). Here only the targeted task line is
+        removed from the bound project plan; headers, prose and every
+        other task are preserved.
+
+        After removal the remaining task nodes are RE-INDEXED 1..N in
+        document order, because task IDs are positional: without the
+        renumbering a later ``ck done 3`` would point at a different
+        line than the user sees. Process notes bound to the deleted
+        task (the active note and any paused-task note) are archived
+        into ``HISTORY.md`` instead of being silently dropped, and the
+        IDs in ``.ck/state.json`` are shifted to follow the same
+        positional re-indexing.
+
+        Returns ``{"id", "title", "remaining", "notes_archived"}``:
+        the DELETED task's ID/title, the new task count, and how many
+        notes graduated into history.
+        """
+        self._require_bound_plan()
+        tl = self._load_plan()
+        target = tl.by_id(task_id)
+        if target is None:
+            raise KeyError(f"No task with id {task_id}")
+
+        # Notes are user data: archive the ones bound to this task
+        # BEFORE the plan (and its task list) stops resolving them.
+        notes = self._notes_bound_to_task(task_id)
+        for note in notes:
+            self._archive_note_to_history(target, note)
+
+        # AST deletion drops the source bullet (TaskList.delete) and
+        # renumbers the remaining nodes 1..N in document order.
+        tl.delete(task_id)
+        self._commit_plan(tl)
+        self._remap_state_after_delete(task_id)
+        self._sync_active_task(tl)
+        return {
+            "id": task_id,
+            "title": target.title,
+            "remaining": tl.total,
+            "notes_archived": len(notes),
+        }
+
+    def _notes_bound_to_task(self, task_id: int) -> list[str]:
+        """Every non-empty process note attached to ``task_id``.
+
+        Covers both the active-task note and the paused-task
+        registry entries. Read-only; used by :meth:`delete_task` to
+        archive the notes before the task disappears.
+        """
+        notes: list[str] = []
+        active = self.get_note()
+        if active is not None and active.get("id") == task_id:
+            notes.append(active["note"])
+        for entry in self._paused_tasks():
+            if entry["id"] == task_id and entry["note"]:
+                notes.append(entry["note"])
+        return notes
+
+    def _remap_state_after_delete(self, deleted_id: int) -> None:
+        """Shift ``state.json`` IDs to follow a positional deletion.
+
+        IDs are positional, so every note stored for a task AFTER the
+        deleted one now belongs to the task one slot earlier:
+
+        - ``active_task.id`` > deleted  -> decrement (title unchanged,
+          it is the same task at its new position);
+        - ``active_task.id`` == deleted -> the note was archived by
+          :meth:`delete_task`, so the stale entry is dropped;
+        - ``paused_tasks`` entries follow the same rules (the
+          matching entry is removed, later IDs shift down).
+
+        Writes only when something actually changed (a read-only
+        project never gains a state file), all under the standard
+        ``state.json`` lock via :meth:`_write_state`.
+        """
+        state = self._read_state()
+        if not state:
+            return
+        changed = False
+
+        active = state.get("active_task")
+        if isinstance(active, dict):
+            aid = active.get("id")
+            if isinstance(aid, int) and not isinstance(aid, bool):
+                if aid == deleted_id:
+                    state.pop("active_task", None)
+                    changed = True
+                elif aid > deleted_id:
+                    active["id"] = aid - 1
+                    changed = True
+
+        paused = state.get("paused_tasks")
+        if isinstance(paused, list):
+            kept: list = []
+            for entry in paused:
+                if not isinstance(entry, dict):
+                    kept.append(entry)
+                    continue
+                eid = entry.get("id")
+                if isinstance(eid, int) and not isinstance(eid, bool):
+                    if eid == deleted_id:
+                        changed = True
+                        continue
+                    if eid > deleted_id:
+                        entry["id"] = eid - 1
+                        changed = True
+                kept.append(entry)
+            if changed:
+                state["paused_tasks"] = kept
+
+        if changed:
+            self._write_state(state)
 
     # ------------------------------------------------------------------ #
     # COMMAND: move / swap / reorder (active tasks only)
@@ -4875,26 +5016,36 @@ def _render_space_manager_list(project_name: Optional[str],
     """
     p = palette if palette is not None else ui.get_chrome_palette()
     rows: list[dict] = []
-    if project_name is not None and project_path is not None:
-        # The active project is marked by ACCENT ONLY — a bold magenta
-        # name and nothing else. A literal `[PROJECT]` tag used to
-        # widen the Space column and wrap long project names; colour
-        # costs no columns, so the grid keeps its layout.
-        #
-        # It is painted through the SHARED ``_grid_row`` /
-        # ``_paint_name`` dispatch — the same path every other name cell
-        # takes — rather than by wrapping the finished cell in a local
-        # escape sequence, which is how the views drifted apart in the
-        # first place.
-        active = _grid_row(
-            project_name, project_path, "n/a", "",
-            (p.muted("n/a"),), p.muted("n/a"),
-            palette=p, name_style=_NAME_STYLE_MAGENTA)
-        rows.append({
-            k: (v[0], p.muted(v[1])) if k == "name" else v
-            for k, v in active.items()
-        })
-    for space in _space_order():
+    # The sequence INCLUDES the virtual ``project`` space, so a user
+    # can move/swap the active project row like any other space
+    # (``spaces_order`` is the single persisted source of truth).
+    for entry in spaces.space_order(include_project=True):
+        if entry == spaces.PROJECT_SPACE:
+            if project_name is None or project_path is None:
+                # No resolvable project: the sentinel stays in the
+                # ordering sequence but has no row to render.
+                continue
+            # The active project is marked by ACCENT ONLY — a bold
+            # magenta name and nothing else. A literal `[PROJECT]` tag
+            # used to widen the Space column and wrap long project
+            # names; colour costs no columns, so the grid keeps its
+            # layout.
+            #
+            # It is painted through the SHARED ``_grid_row`` /
+            # ``_paint_name`` dispatch — the same path every other name
+            # cell takes — rather than by wrapping the finished cell in
+            # a local escape sequence, which is how the views drifted
+            # apart in the first place.
+            active = _grid_row(
+                project_name, project_path, "n/a", "",
+                (p.muted("n/a"),), p.muted("n/a"),
+                palette=p, name_style=_NAME_STYLE_MAGENTA)
+            rows.append({
+                k: (v[0], p.muted(v[1])) if k == "name" else v
+                for k, v in active.items()
+            })
+            continue
+        space = entry
         snap = spaces.space_snapshot(space)
         if snap["focus_id"] is not None:
             focus_head = f"[{snap['focus_id']}] [>]"
@@ -4928,17 +5079,17 @@ def _render_space_manager_list(project_name: Optional[str],
 
 
 def _space_order() -> list[str]:
-    """Dashboard space ordering: built-ins first, then discovered.
+    """Dashboard space ordering — the persisted sequence, minus project.
 
     The single source of truth for WHICH spaces the dashboard shows
-    and in WHAT order — shared by the compact spaces table and the
-    verbose per-space blocks so both views always cover exactly the
-    same set.
+    and in WHAT order, shared by the compact spaces table and the
+    verbose per-space blocks. It delegates to
+    :func:`cklib.spaces.space_order`, the same engine ``ck space
+    move`` / ``swap`` / ``reorder`` mutate, so the dashboard can never
+    disagree with ``ck space list``. The virtual ``project`` space is
+    omitted: the dashboard has no active-project row in this table.
     """
-    return list(SPACE_NAMES) + [
-        name for name in spaces.existing_space_names()
-        if name not in SPACE_NAMES
-    ]
+    return spaces.space_order(include_project=False)
 
 
 def _render_spaces_table(

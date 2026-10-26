@@ -404,6 +404,20 @@ def _emit_with_source(tl: TaskList) -> str:
     max_src_line = len(src_lines)
     nl = getattr(tl, "newline", "\n") or "\n"
 
+    # DELETED source lines (user-facing `ck delete`): drop them from
+    # the document. ``pos_map`` translates an ORIGINAL 1-based line
+    # number to its position in the surviving list, so substitution
+    # and insertion hints keep working on the reduced document.
+    removed = {ln for ln in getattr(tl, "removed_lines", ()) or ()
+               if isinstance(ln, int)}
+    out: list[str] = []
+    pos_map: dict[int, int] = {}
+    for old_pos, raw in enumerate(src_lines, start=1):
+        if old_pos in removed:
+            continue
+        out.append(raw)
+        pos_map[old_pos] = len(out)
+
     # Collision guard: two AST nodes sharing a source line_number
     # would silently overwrite each other during substitution.
     # This is a structural invariant violation — refuse to render a
@@ -411,14 +425,24 @@ def _emit_with_source(tl: TaskList) -> str:
     seen_lines: set[int] = set()
     for t in tl.tasks:
         if t.line_number <= max_src_line and t.insert_line is None:
-            if t.line_number in seen_lines:
+            if t.line_number in removed:
+                raise ValueError(
+                    f"Task {t.id!r} claims deleted line {t.line_number}; "
+                    "refusing to render (would resurrect removed content)"
+                )
+            mapped = pos_map.get(t.line_number)
+            if mapped is None:
+                raise ValueError(
+                    f"Task {t.id!r} claims line {t.line_number}, which "
+                    "is not in the source document"
+                )
+            if mapped in seen_lines:
                 raise ValueError(
                     f"Two tasks share line_number {t.line_number}; "
                     "refusing to render (would silently drop one)"
                 )
-            seen_lines.add(t.line_number)
+            seen_lines.add(mapped)
 
-    out: list[str] = list(src_lines)
     pending_append: list[Task] = []
     for t in tl.tasks:
         if t.line_number > max_src_line:
@@ -432,14 +456,15 @@ def _emit_with_source(tl: TaskList) -> str:
     # whitespace) so the render never reflows the user's document.
     for t in tl.tasks:
         if 1 <= t.line_number <= max_src_line and t.insert_line is None:
-            original = out[t.line_number - 1]
+            target = pos_map[t.line_number] - 1
+            original = out[target]
             if not _is_task_line(original):
                 raise ValueError(
                     f"Task {t.id!r} claims line {t.line_number} but the "
                     f"source line is not a task ({original!r}); refusing "
                     "to overwrite non-task content"
                 )
-            out[t.line_number - 1] = t.to_line()
+            out[target] = t.to_line()
 
     # Second pass: NEW tasks. Tasks carrying an explicit ``insert_line``
     # hint are inserted at that 1-based source position (the end of
@@ -448,7 +473,8 @@ def _emit_with_source(tl: TaskList) -> str:
     # before the ``## Completed`` header (or at EOF), never
     # replacing content.
     if pending_append:
-        insert_at = _insert_position_for(pending_append[0], out, max_src_line)
+        insert_at = _insert_position_for(
+            pending_append[0], out, max_src_line, pos_map=pos_map)
         for t in pending_append:
             out.insert(insert_at, t.to_line())
             insert_at += 1
@@ -460,17 +486,25 @@ def _emit_with_source(tl: TaskList) -> str:
 
 
 def _insert_position_for(task: Task, out: list[str],
-                         max_src_line: int) -> int:
+                         max_src_line: int,
+                         *, pos_map: dict | None = None) -> int:
     """0-based insertion index for the first new (past-EOF) task.
 
     A new task with an ``insert_line`` hint (end of ``## Current
     Sprint``) is inserted at its hinted position. When the hint is
     missing, stale, or points outside the document, fall back to just
     before ``## Completed`` (or EOF) so insertion is always safe.
+
+    ``pos_map`` (original line -> surviving line) keeps the hint
+    correct on a document shortened by ``ck delete``.
     """
     hint = task.insert_line
     if hint is not None and 1 <= hint <= max_src_line + 1:
-        return hint - 1
+        if pos_map is None:
+            return hint - 1
+        # Insert before the hint: count the surviving source lines
+        # that precede it (removed lines never occupy a slot).
+        return sum(1 for old in pos_map if old < hint)
     completed = _find_completed_line(out)
     if completed is not None:
         return completed
