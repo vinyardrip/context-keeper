@@ -49,7 +49,7 @@ from typing import Optional
 
 from . import config, sequence
 from .config import file_lock
-from .models import TaskList, TaskStatus
+from .models import Notes, TaskList, TaskStatus
 from .parser import (
     _atomic_write_text,
     normalize_plan,
@@ -98,14 +98,51 @@ def state_path(space: str) -> Path:
     return spaces_dir() / f"{space}.json"
 
 
+# Space history lives NEXT TO the space file, not inside the project's
+# ``.ck/`` tree: a space is global and must keep its audit trail even
+# when no project is bound. The ``.HISTORY.md`` suffix is deliberately
+# distinct from a discoverable space file (``work.md`` -> ``work``);
+# every discovery/validation probe excludes this suffix so a history
+# file can never masquerade as a routable space.
+SPACE_HISTORY_SUFFIX = ".HISTORY.md"
+
+
+def is_space_history_name(name: str) -> bool:
+    """True for names reserved by the ``<space>.HISTORY.md`` convention.
+
+    Accepts either a bare stem (``work.HISTORY``) or a file name
+    (``work.HISTORY.md``), case-insensitively. The check is structural:
+    it does not touch the filesystem.
+    """
+    key = (name or "").strip().lower()
+    return (key.endswith(SPACE_HISTORY_SUFFIX.lower())
+            or key.endswith(".history"))
+
+
+def history_path(space: str) -> Path:
+    """Path of a space's durable note history (``<space>.HISTORY.md``).
+
+    Notes archived by ``ck delete <ID> -s <space>`` land here, in the
+    same flat directory as ``<space>.md`` and ``<space>.json``. The
+    file is created lazily on the first archive; a space without
+    archived notes has no history file.
+    """
+    return spaces_dir() / f"{space}{SPACE_HISTORY_SUFFIX}"
+
+
 def is_builtin_space(space: str) -> bool:
     """True for the built-in default spaces (``local``/``remote``)."""
     return space in config.SPACE_NAMES
 
 
 def _is_safe_space_name(name: str) -> bool:
-    """True when ``name`` is safe to use as a space-file name."""
-    if not name or name in (".", ".."):
+    """True when ``name`` is safe to use as a space-file name.
+
+    The ``.HISTORY`` suffix is structurally reserved for a space's
+    archived note history (``<space>.HISTORY.md``), so it can never
+    become a routable space name.
+    """
+    if not name or name in (".", "..") or is_space_history_name(name):
         return False
     return bool(_SAFE_SPACE_NAME_RE.match(name))
 
@@ -164,6 +201,7 @@ def existing_space_names() -> list[str]:
             names.update(
                 p.stem for p in directory.glob("*.md")
                 if _is_safe_space_name(p.stem)
+                and not is_space_history_name(p.stem)
             )
         except OSError:
             continue
@@ -179,6 +217,8 @@ def is_valid_space(space: str) -> bool:
     """
     if is_builtin_space(space):
         return True
+    if is_space_history_name(space):
+        return False
     return any(
         (directory / f"{space}.md").is_file()
         for directory in spaces_dirs()
@@ -202,7 +242,7 @@ def routable_space_name(name: str) -> Optional[str]:
     Returns None for unsafe names (path separators, traversal
     attempts, empty) so they can never become filenames.
     """
-    if not _is_safe_space_name(name):
+    if not _is_safe_space_name(name) or is_space_history_name(name):
         return None
     return name
 
@@ -248,6 +288,11 @@ def validate_new_space_name(name: str) -> str:
     """
     if not name:
         raise ValueError("Space name is empty.")
+    if is_space_history_name(name):
+        raise ValueError(
+            f"Invalid space name: {name!r}. The '.HISTORY' suffix is "
+            "reserved for a space's archived note history."
+        )
     if not _is_safe_space_name(name):
         raise ValueError(
             f"Invalid space name: {name!r}. Use letters, digits, "
@@ -333,6 +378,43 @@ def _state_write_path(space: str) -> Path:
         pass
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def _history_write_path(space: str) -> Path:
+    """Write-side path of the space's history file (dev-mode aware)."""
+    path = history_path(space)
+    try:
+        from .sandbox import dev_context_active, resolve_write_path
+        if dev_context_active():
+            path = resolve_write_path(path, force=True)
+    except Exception:
+        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _append_space_history(space: str, entry: Notes) -> None:
+    """Append a rendered ``Notes`` entry to the space's HISTORY.md.
+
+    The write is serialised on the history file's ``*.lock`` and uses
+    the same dev-mode redirect as every other space write. On the
+    first dev-mode append the real history is copied into the sandbox
+    first, so entering a sandbox never presents an empty audit trail
+    and the real file stays untouched.
+    """
+    path = _history_write_path(space)
+    with file_lock(path):
+        if not path.exists():
+            real = history_path(space)
+            if path != real and real.is_file():
+                try:
+                    path.write_text(
+                        real.read_text(encoding="utf-8"),
+                        encoding="utf-8")
+                except OSError:
+                    pass
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(entry.render())
 
 
 # ---------------------------------------------------------------------- #
@@ -692,6 +774,13 @@ def rename_space(old_name: str, new_name: str) -> dict:
         if src_state.is_file():
             src_state.replace(_state_write_path(new_name))
             notes_moved = True
+        # The archived note history belongs to the space, not to its
+        # old name: carry it along so a rename never orphans it.
+        history_moved = False
+        src_history = _history_write_path(old_name)
+        if src_history.is_file():
+            src_history.replace(_history_write_path(new_name))
+            history_moved = True
     # A renamed space keeps its position in the persisted sequence
     # instead of dropping to the end as a "new" space.
     _rename_space_in_order(old_name, new_name)
@@ -700,6 +789,7 @@ def rename_space(old_name: str, new_name: str) -> dict:
         "to": new_name,
         "moved": str(dst),
         "notes_moved": notes_moved,
+        "history_moved": history_moved,
     }
 
 
@@ -741,6 +831,10 @@ def validate_deletable_space(name: str) -> Path:
         raise ValueError(
             f"Cannot delete the built-in space {name!r}: it is a "
             "default context. Create a custom space instead.")
+    if is_space_history_name(name):
+        raise ValueError(
+            f"Invalid space name: {name!r}. The '.HISTORY' suffix is "
+            "reserved for a space's archived note history.")
     if not _is_safe_space_name(name):
         raise ValueError(
             f"Invalid space name: {name!r}. Use letters, digits, "
@@ -785,11 +879,24 @@ def delete_space(name: str, *, confirmed: bool = False) -> dict:
         if sidecar.is_file():
             sidecar.unlink()
             notes_removed = True
+        # The space's audit trail is part of the space, so deleting
+        # the space removes it as well (the file is lazy: most spaces
+        # have no history until a task is deleted).
+        history_removed = False
+        history = _history_write_path(name)
+        if history.is_file():
+            history.unlink()
+            history_removed = True
     # Keep the persisted sequence in sync: a deleted space must not
     # leave a hole (normalization would drop it anyway, but the state
     # file should reflect reality immediately).
     _remove_space_from_order(name)
-    return {"name": name, "removed": removed, "notes": notes_removed}
+    return {
+        "name": name,
+        "removed": removed,
+        "notes": notes_removed,
+        "history": history_removed,
+    }
 
 
 # ---------------------------------------------------------------------- #
@@ -820,6 +927,11 @@ class SpaceManager:
                 f"not exist. Create it with `ck {space} add <text>`."
             )
         self.space = space
+
+    @property
+    def history_file(self) -> Path:
+        """This space's durable note history (``<space>.HISTORY.md``)."""
+        return history_path(self.space)
 
     # ------------------------------------------------------------------ #
     # Internal helpers
@@ -898,6 +1010,124 @@ class SpaceManager:
         new_task = tl.add(title, status=TaskStatus.OPEN, section=section)
         self._commit(tl)
         return new_task.id
+
+    def task_summary(self, task_id: int) -> dict:
+        """Read-only snapshot of a task for a deletion confirmation.
+
+        Mirrors :meth:`cklib.core.ContextKeeper.task_summary`, but reads
+        THIS space's Markdown file instead of a project ``PLAN.md``.
+        Returns ``{"id", "title", "status", "space"}`` and raises
+        ``KeyError`` for an unknown ID. Nothing is written.
+        """
+        tl = self.load()
+        target = tl.by_id(task_id)
+        if target is None:
+            raise KeyError(f"No task with id {task_id}")
+        return {
+            "id": target.id,
+            "title": target.title,
+            "status": target.status.canonical_marker,
+            "space": self.space,
+        }
+
+    def delete_task(self, task_id: int) -> dict:
+        """Permanently remove task ``task_id`` from this space.
+
+        The space analogue of :meth:`ContextKeeper.delete_task`:
+
+        - process notes bound to the task are archived into the
+          space's sibling ``<space>.HISTORY.md`` BEFORE the task
+          disappears;
+        - the task line is removed and the remaining IDs are
+          re-indexed 1..N;
+        - the note sidecar's IDs are shifted to follow the same
+          positional reindexing, and the deleted task's note entry is
+          dropped after archiving;
+        - the active project's ``.ck/state.json`` and ``PLAN.md`` are
+          never touched — this method only reads/writes the target
+          space file, its sidecar and its history.
+
+        Returns ``{"id", "title", "space", "remaining",
+        "notes_archived"}``.
+        """
+        tl = self.load()
+        target = tl.by_id(task_id)
+        if target is None:
+            raise KeyError(f"No task with id {task_id}")
+
+        notes = self._notes_bound_to_task(task_id)
+        for note in notes:
+            self._archive_note_to_history(target, note)
+
+        tl.delete(task_id)
+        self._commit(tl)
+        self._remap_notes_after_delete(task_id)
+        return {
+            "id": task_id,
+            "title": target.title,
+            "space": self.space,
+            "remaining": tl.total,
+            "notes_archived": len(notes),
+        }
+
+    def _notes_bound_to_task(self, task_id: int) -> list[str]:
+        """Every non-empty process note attached to ``task_id``."""
+        note = self._all_notes().get(task_id)
+        return [note] if note else []
+
+    def _archive_note_to_history(self, task, note: str) -> None:
+        """Append ``note`` to this space's ``<space>.HISTORY.md``.
+
+        Reuses the project history entry format (``Notes.render()``)
+        so space and project audit trails look identical. The task ID
+        is the ID the user asked to delete (before re-indexing).
+        """
+        entry = Notes(
+            task_id=task.id,
+            task_title=task.title,
+            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M"),
+            comment=note,
+        )
+        _append_space_history(self.space, entry)
+
+    def _remap_notes_after_delete(self, deleted_id: int) -> None:
+        """Shift sidecar note IDs after a positional task deletion.
+
+        Notes for tasks AFTER the deleted one now belong to the task
+        one slot earlier. The deleted task's entry was archived by
+        :meth:`delete_task`, so it is dropped. Writes only when
+        something changed, preserving unrelated sidecar keys.
+        """
+        state = self._read_state()
+        notes = state.get("notes")
+        if not isinstance(notes, dict):
+            return
+
+        updated: dict = {}
+        changed = False
+        for key, value in notes.items():
+            try:
+                tid = int(key)
+            except (TypeError, ValueError):
+                updated[key] = value
+                continue
+            if tid == deleted_id:
+                changed = True
+                continue
+            if tid > deleted_id:
+                updated[str(tid - 1)] = value
+                changed = True
+            else:
+                updated[key] = value
+
+        if not changed:
+            return
+        if updated:
+            state["notes"] = updated
+        else:
+            state.pop("notes", None)
+        state["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        self._write_state(state)
 
     def _all_notes(self) -> dict[int, str]:
         """All task notes in the space's sidecar (valid entries).
@@ -1294,6 +1524,9 @@ __all__ = [
     "spaces_dirs",
     "space_path",
     "state_path",
+    "history_path",
+    "SPACE_HISTORY_SUFFIX",
+    "is_space_history_name",
     "global_state_path",
     "PROJECT_SPACE",
     "SPACE_ORDER_KEY",

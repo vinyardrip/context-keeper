@@ -69,15 +69,18 @@ Local (current project):
   done <ID|Range>            Mark task(s) as done ([x]). Bare `ck done`
                              completes the CURRENT FOCUS; without a
                              focus it prints the usage line instead
-  delete <ID>                Permanently remove a TASK from PLAN.md,
-                             then re-index the remaining task IDs so
-                             the sprint keeps a gapless 1..N sequence.
-                             Prints `Task #<ID>: <title>` and asks
-                             `[y/N]`; -f / --force skips the prompt
-                             for automation. Alias: `ck rm <ID>`.
-                             (Not to be confused with `ck space
-                             delete <name>`, which removes a whole
-                             global SPACE and its notes.)
+  delete <ID> [-s <space>]   Permanently remove a TASK, then re-index
+                             the remaining task IDs so the sequence
+                             keeps a gapless 1..N. Without -s the
+                             active project (`project`) is targeted;
+                             -s / --space <name> targets a global
+                             space and leaves the active project and
+                             its .ck/state.json untouched. Prints
+                             `Task #<ID>: <title>` and asks `[y/N]`;
+                             -f / --force skips the prompt. Alias:
+                             `ck rm <ID>`. (Not to be confused with
+                             `ck space delete <name>`, which removes
+                             a whole global SPACE and its notes.)
   move <ID> <pos|top|bottom> Move a PENDING/ACTIVE task ([ ] or [>])
                              to position N among the active tasks, or
                              to the first/last slot. Completed ([x])
@@ -256,8 +259,12 @@ _NOTIFIER_COMMANDS = frozenset({"done", "save"})
 # dangling (the keeper is rootless there, not broken).
 _LOCAL_ONLY_COMMANDS = frozenset({
     "init", "start", "done", "add", "note", "notes", "save", "edit",
-    "log", "delete", "rm",
+    "log",
 })
+# ``delete`` / ``rm`` are deliberately NOT local-only: with
+# ``-s <space>`` they mutate a GLOBAL space and must work even when
+# no project is bound. The default (project) path still reports the
+# standard "No active project found" error from the core guard.
 # `ck space …` is GLOBAL (it operates purely on ~/.config/ck/spaces/),
 # so it is deliberately NOT in _LOCAL_ONLY_COMMANDS — the management
 # layer must work from any directory, including a dangling one.
@@ -366,8 +373,12 @@ def build_parser() -> "argparse.ArgumentParser":
              "remaining IDs)")
     p_delete.add_argument(
         "task_id", nargs="?", default=None,
-        help="Task ID to delete (numbers only; spaces are deleted "
-             "with `ck space delete <name>`)")
+        help="Task ID to delete (numbers only; whole spaces are "
+             "deleted with `ck space delete <name>`)")
+    p_delete.add_argument(
+        "-s", "--space", dest="space", default=None, metavar="SPACE",
+        help="Delete the task from this global space instead of the "
+             "active project (`project` targets the project explicitly)")
     p_delete.add_argument(
         "-f", "--force", dest="force", action="store_true",
         help="Skip the [y/N] confirmation prompt (automation)")
@@ -575,8 +586,8 @@ _LEGACY_FLAGS: dict[str, frozenset] = {
     "move": frozenset(),
     "swap": frozenset(),
     "reorder": frozenset(),
-    "delete": frozenset({"-f", "--force"}),
-    "rm": frozenset({"-f", "--force"}),
+    "delete": frozenset({"-f", "--force", "-s", "--space"}),
+    "rm": frozenset({"-f", "--force", "-s", "--space"}),
     "note": frozenset(),
     "notes": frozenset(),
     "save": frozenset(),
@@ -629,7 +640,11 @@ def _reject_unknown_flags(cmd: str, rest: List[str],
             positional_only = True
             continue
         if tok.startswith("-") and tok != "-":
-            if tok not in allowed:
+            # Long options with an inline value (`--space=work`) are
+            # validated against the flag name, exactly like the
+            # separated form (`--space work`).
+            flag_name = tok.split("=", 1)[0] if tok.startswith("--") else tok
+            if flag_name not in allowed:
                 _print_error(
                     f"ERROR: Unknown flag for `ck {cmd}`: {tok}\n"
                     f"   Run `ck --help` for usage."
@@ -977,6 +992,8 @@ def _dispatch(argv: Optional[List[str]] = None) -> int:
             rest = []
             if getattr(args, "task_id", None):
                 rest.append(args.task_id)
+            if getattr(args, "space", None):
+                rest.extend(["-s", args.space])
             if getattr(args, "force", False):
                 rest.append("-f")
             return _run_task_delete(args.command, rest)
@@ -1270,12 +1287,20 @@ def _run_reorder(ck, action: str, tokens: List[str]) -> int:
 
 
 def _run_task_delete(cmd: str, rest: List[str]) -> int:
-    """``ck delete <ID>`` / ``ck rm <ID>`` — remove a task from PLAN.md.
+    """``ck delete <ID> [-s <space>]`` / ``ck rm <ID>``.
 
     TASK deletion, deliberately distinct from space deletion: the
-    target is a positional task ID inside the bound project's
-    PLAN.md. Removing a whole global SPACE is the separate, spelled-out
-    ``ck space delete <name>`` command (which has no short alias).
+    target is one task inside either the bound project's ``PLAN.md``
+    (the default ``project`` space) or an explicitly named global
+    space file. Removing a whole global SPACE remains the separate,
+    spelled-out ``ck space delete <name>`` command.
+
+    ``-s`` / ``--space`` selects a GLOBAL space. Without it, the
+    active project context (the virtual ``project`` space) is used
+    — never an arbitrary space and never a silently switched project.
+    Cross-space deletion operates only on the target space, its note
+    sidecar and its ``<space>.HISTORY.md``; the active project's
+    ``.ck/state.json`` / ``PLAN.md`` are not touched.
 
     Without ``-f`` / ``--force`` the task's ID and title are printed
     and a ``[y/N]`` confirmation is required on an interactive
@@ -1283,13 +1308,59 @@ def _run_task_delete(cmd: str, rest: List[str]) -> int:
     (the same fail-closed policy as ``ck space delete``); ``-f`` skips
     the prompt for automation.
 
-    ``ContextKeeper.delete_task`` performs the removal, the sequential
-    ID re-index and the state/note reconciliation; this layer owns
-    argument parsing, the confirmation gate and the exit-code mapping.
+    :meth:`ContextKeeper.delete_task` / :meth:`SpaceManager.delete_task`
+    perform the removal, sequential ID re-index and note/state
+    reconciliation; this layer owns argument parsing, target
+    validation, the confirmation gate and exit-code mapping.
     """
-    force = any(tok in ("-f", "--force") for tok in rest)
-    positional = [tok for tok in rest if tok not in ("-f", "--force")]
-    usage = f"Usage: ck {cmd} <ID> [-f|--force]"
+    from . import spaces
+
+    force = False
+    space_name = None
+    positional: List[str] = []
+    index = 0
+    while index < len(rest):
+        token = rest[index]
+        if token in ("-f", "--force"):
+            force = True
+        elif token in ("-s", "--space"):
+            if space_name is not None:
+                _print_error(
+                    f"ERROR: `--space` was given more than once.")
+                return 2
+            if index + 1 >= len(rest):
+                _print_error(
+                    f"ERROR: `{token}` requires a space name.")
+                return 2
+            value = rest[index + 1]
+            if not value or value.startswith("-"):
+                _print_error(
+                    f"ERROR: `{token}` requires a space name.")
+                return 2
+            space_name = value
+            index += 1
+        elif token.startswith("--space="):
+            if space_name is not None:
+                _print_error(
+                    f"ERROR: `--space` was given more than once.")
+                return 2
+            value = token.split("=", 1)[1]
+            if not value:
+                _print_error("ERROR: `--space` requires a space name.")
+                return 2
+            space_name = value
+        elif token.startswith("-") and token != "-":
+            # Defensive: the legacy validator/argparse normally catches
+            # this first, but a direct caller must still get a clean
+            # error instead of a silently swallowed flag.
+            _print_error(
+                f"ERROR: Unknown flag for `ck {cmd}`: {token}")
+            return 2
+        else:
+            positional.append(token)
+        index += 1
+
+    usage = f"Usage: ck {cmd} <ID> [-f|--force] [-s <space>]"
     if not positional:
         print(usage)
         return 2
@@ -1312,9 +1383,33 @@ def _run_task_delete(cmd: str, rest: List[str]) -> int:
             f"`ck space delete {raw}`.")
         return 2
 
-    ck = ContextKeeper()
+    target_space = space_name or spaces.PROJECT_SPACE
+    ck = None
+    manager = None
+    if target_space == spaces.PROJECT_SPACE:
+        ck = ContextKeeper()
+        summary_owner = ck
+    else:
+        safe_name = spaces.routable_space_name(target_space)
+        if safe_name is None:
+            _print_error(
+                f"ERROR: Invalid space name: {target_space!r}.")
+            return 2
+        if not spaces.is_valid_space(safe_name):
+            _print_error(
+                f"ERROR: Space {target_space!r} not found: "
+                f"{spaces.space_path(safe_name)} does not exist.")
+            return 1
+        target_space = safe_name
+        try:
+            manager = spaces.SpaceManager(target_space)
+        except ValueError as e:
+            _print_error(f"ERROR: {e}")
+            return 1
+        summary_owner = manager
+
     try:
-        info = ck.task_summary(task_id)
+        info = summary_owner.task_summary(task_id)
     except KeyError:
         _print_error(f"ERROR: No task with id {task_id}.")
         return 2
@@ -1326,12 +1421,14 @@ def _run_task_delete(cmd: str, rest: List[str]) -> int:
     if not force:
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             _print_error(
-                f"ERROR: Refusing to delete task #{task_id} without "
-                "confirmation (non-interactive terminal). "
-                "Pass -f to confirm.")
+                f"ERROR: Refusing to delete task #{task_id} from "
+                f"space {target_space!r} without confirmation "
+                "(non-interactive terminal). Pass -f to confirm.")
             return 2
         try:
-            answer = input(f"Permanently delete task #{task_id}? [y/N]: ")
+            answer = input(
+                f"Permanently delete task #{task_id} from space "
+                f"'{target_space}'? [y/N]: ")
         except (EOFError, KeyboardInterrupt):
             _notice(ui.INFO, "Aborted.")
             return 2
@@ -1340,22 +1437,30 @@ def _run_task_delete(cmd: str, rest: List[str]) -> int:
             return 2
 
     try:
-        removed = ck.delete_task(task_id)
+        removed = (ck.delete_task(task_id) if ck is not None
+                   else manager.delete_task(task_id))
     except KeyError:
         # The task vanished between the prompt and the write (another
         # process edited the plan): a clean not-found error.
         _print_error(f"ERROR: No task with id {task_id}.")
         return 2
+    except ValueError as e:
+        _print_error(f"ERROR: {e}")
+        return 2
+    except OSError as e:
+        _print_error(f"ERROR: I/O error: {e}")
+        return 4
 
     _notice(
         ui.OK,
-        f"Deleted task #{removed['id']}: {removed['title']} "
-        f"({removed['remaining']} task(s) remaining, IDs re-indexed).")
+        f"Deleted task #{removed['id']}: {removed['title']} from "
+        f"space '{target_space}' ({removed['remaining']} task(s) "
+        "remaining, IDs re-indexed).")
     if removed["notes_archived"]:
         _notice(
             ui.INFO,
             f"Archived {removed['notes_archived']} process note(s) "
-            "to HISTORY.md.")
+            f"to HISTORY.md of space '{target_space}'.")
     return 0
 
 
