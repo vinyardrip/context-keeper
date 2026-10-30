@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.9.0-blue)]()
+[![version](https://img.shields.io/badge/version-0.9.1-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -104,7 +104,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.9.0
+ck -v    # → ck version 0.9.1
 ```
 
 ---
@@ -867,6 +867,22 @@ When `HISTORY.md` reaches `HISTORY_LIMIT` entries it is rotated into a timestamp
 - A corrupt registry (`projects.json`) is never silently wiped: it is moved to a timestamped `.bak` before a fresh registry is created
 - The renderer never overwrites non-task lines (headers/prose are preserved on every mutation)
 
+### Environment Variables
+
+| Variable | Effect |
+|----------|--------|
+| `CK_SANDBOX` | `1` activates sandbox routing (`ck-dev` sets it for the session; `CK_DEV=1` and `--sandbox` are equivalents) |
+| `CK_CONFIG_DIR` | Override `~/.config/ck/` (useful for tests, CI) |
+| `CK_BIN` | Absolute path to the `ck` binary used by shell completion (set by `ck-dev`) |
+| `CK_HISTORY_LIMIT` / `CK_MAX_BAK_FILES` / `CK_COMPRESS_ARCHIVES` | Runtime overrides for the history-rotation parameters above |
+| `CK_DISABLE_UPDATE_CHECK` | `1` disables the startup update probe |
+| `CK_DEBUG` | `1` writes the debug log to `.sandbox/dev.log` |
+| `NO_COLOR` | Disables ANSI styling |
+
+`CK_CONFIG_DIR` has the highest precedence: the registry (`projects.json`), `state.json` and the whole spaces tree move with it. The test suite points it at a throwaway directory for every test, so `pytest` never reads or writes your real `~/.config/ck/`.
+
+> **Upgrading from <0.9.1 with stale `[MISSING]` entries?** Run `ck prune` once in production. From 0.9.1 onward, `pytest` no longer writes to `~/.config/ck/projects.json`, so this situation cannot recur. `ck dashboard` never prunes automatically on purpose: a temporarily unavailable folder (network mount, unplugged USB stick) must not silently delete user data.
+
 ### VCS Integration
 Local commits only. `ck save` commits if you confirm; `ck` never pushes. `ck update` fast-forwards the installation itself only when the work tree is clean, then refreshes an installed copy (`~/.local/bin/ck`) so production stays in sync with the checkout. Standalone (one-line installer) deployments have no `.git` metadata: there `ck update` re-runs the remote installer in place (`curl | tar`), preserving `.ck/`. Standalone installs also get a throttled startup version check against the GitHub releases API — a single stderr line prompting `ck update` when a newer release exists (opt out: `CK_DISABLE_UPDATE_CHECK=1`).
 
@@ -1093,8 +1109,9 @@ Logs go **exclusively** to `stderr` and `.sandbox/dev.log` — `stdout` stays co
 - [x] Install and update utilities (`ck install`, `ck update`, `ck uninstall`)
 - [x] Shell Completion for Bash / Zsh: commands, flags, registered projects and spaces (`ck completion bash|zsh`, executable `CK_BIN` fallback)
 - [x] Baseline pytest coverage (`cklib/core.py`, `cklib/history.py` and the full CLI/sandbox suite)
-- [x] Strict sandbox isolation for global spaces (`.sandbox/config/spaces/`) and `ck save` history-vs-Git wording audit (`v0.9.0`)
-- [x] Zsh completion redesign: the menu appears on the FIRST `<TAB>` at every position (flags after `ck st <project>` / `ck st -l`, spaces and projects in `ck <TAB>`), dynamic `ck <space> <TAB>` routing, no prefix-then-menu `-` insertion, and `ck-dev` exports `CK_BIN` (`v0.9.0`)
+- [x] Strict sandbox isolation for global spaces (`.sandbox/config/spaces/`) and `ck save` history-vs-Git wording audit (`v0.9.1`)
+- [x] Zsh completion redesign: the menu appears on the FIRST `<TAB>` at every position (flags after `ck st <project>` / `ck st -l`, spaces and projects in `ck <TAB>`), dynamic `ck <space> <TAB>` routing, no prefix-then-menu `-` insertion, and `ck-dev` exports `CK_BIN` (`v0.9.1`)
+- [x] pytest isolation: every test runs against a throwaway `CK_CONFIG_DIR`, so the real `~/.config/ck/` (registry, `state.json`, spaces, locks) is never written by the suite (`v0.9.1`)
 
 ---
 
@@ -1461,6 +1478,22 @@ export EDITOR="nano"  # используется, если VISUAL не зада�
 - Локальные коммиты Git (без push)
 - Fail-closed блокировка файлов и атомарная запись
 
+### Переменные окружения
+
+| Переменная | Действие |
+|------------|----------|
+| `CK_SANDBOX` | `1` включает маршрутизацию в песочницу (`ck-dev` выставляет её для сессии; `CK_DEV=1` и `--sandbox` — эквиваленты) |
+| `CK_CONFIG_DIR` | Переопределяет `~/.config/ck/` (полезно для тестов и CI) |
+| `CK_BIN` | Абсолютный путь к `ck` для автодополнения shell (выставляет `ck-dev`) |
+| `CK_HISTORY_LIMIT` / `CK_MAX_BAK_FILES` / `CK_COMPRESS_ARCHIVES` | Переопределяют параметры ротации истории (см. выше) |
+| `CK_DISABLE_UPDATE_CHECK` | `1` отключает проверку обновлений при старте |
+| `CK_DEBUG` | `1` пишет отладочный лог в `.sandbox/dev.log` |
+| `NO_COLOR` | Отключает ANSI-оформление |
+
+`CK_CONFIG_DIR` имеет высший приоритет: реестр (`projects.json`), `state.json` и всё дерево пространств переезжают вместе с ним. Набор тестов выставляет переменную на одноразовый каталог для каждого теста, поэтому `pytest` никогда не читает и не изменяет реальный `~/.config/ck/`.
+
+> **Обновляетесь с версии <0.9.1 и видите устаревшие `[MISSING]`?** Один раз выполните `ck prune` в production. Начиная с 0.9.1 `pytest` не пишет в `~/.config/ck/projects.json`, поэтому ситуация не повторится. `ck dashboard` намеренно не запускает автоочистку: временно недоступный каталог (сетевой диск, отключённая USB-флешка) не должен молча удалять данные пользователя.
+
 ---
 
 ## <a name="разработка-и-изолированная-песочница"></a>🧪 Разработка и изолированная песочница
@@ -1649,5 +1682,6 @@ CK_DEBUG=1 ./ck-dev add "traced"    # или: ./ck-dev -v add "traced"
 - [x] Утилиты установки и обновления (`ck install`, `ck update`, `ck uninstall`)
 - [x] Shell Completion (автодополнение) для Bash / Zsh: команды, флаги, зарегистрированные проекты и пространства (`ck completion bash|zsh`, fallback на исполняемый `CK_BIN`)
 - [x] Базовое покрытие pytest (`cklib/core.py`, `cklib/history.py` и полный набор тестов CLI/песочницы)
-- [x] Строгая изоляция глобальных пространств в песочнице (`.sandbox/config/spaces/`) и аудит формулировок `ck save` про историю и Git (`v0.9.0`)
-- [x] Редизайн Zsh-автодополнения: меню появляется на ПЕРВОМ `<TAB>` в каждой позиции (флаги после `ck st <project>` / `ck st -l`, пространства и проекты в `ck <TAB>`), динамическая маршрутизация `ck <space> <TAB>`, без подстановки `-`, и `ck-dev` экспортирует `CK_BIN` (`v0.9.0`)
+- [x] Строгая изоляция глобальных пространств в песочнице (`.sandbox/config/spaces/`) и аудит формулировок `ck save` про историю и Git (`v0.9.1`)
+- [x] Редизайн Zsh-автодополнения: меню появляется на ПЕРВОМ `<TAB>` в каждой позиции (флаги после `ck st <project>` / `ck st -l`, пространства и проекты в `ck <TAB>`), динамическая маршрутизация `ck <space> <TAB>`, без подстановки `-`, и `ck-dev` экспортирует `CK_BIN` (`v0.9.1`)
+- [x] Изоляция pytest: каждый тест работает с одноразовым `CK_CONFIG_DIR`, поэтому реальные `~/.config/ck/` (реестр, `state.json`, пространства, локи) никогда не изменяются набором тестов (`v0.9.1`)

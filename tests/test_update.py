@@ -1266,10 +1266,10 @@ class TestGitHubReleaseVersionCheck(unittest.TestCase):
     """``_default_release_version_check`` — GitHub API contract."""
 
     def test_strips_v_prefix_from_tag(self):
-        resp = _FakeHttpResponse(b'{"tag_name": "v0.9.0"}')
+        resp = _FakeHttpResponse(b'{"tag_name": "v1.2.3"}')
         with mock.patch("urllib.request.urlopen", return_value=resp):
             self.assertEqual(
-                ckcore._default_release_version_check(), "0.9.0")
+                ckcore._default_release_version_check(), "1.2.3")
 
     def test_queries_releases_endpoint_with_hard_timeout(self):
         seen: dict = {}

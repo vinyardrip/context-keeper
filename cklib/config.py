@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-VERSION = "0.9.0"
+VERSION = "0.9.1"
 CK_DIR_NAME = ".ck"
 # Traversal-boundary markers. Kept in sync with
 # ``cklib.sandbox.SANDBOX_DIR_NAME`` (".sandbox") and Git's ".git".
@@ -75,7 +75,25 @@ STATE_FILENAME = "state.json"
 GITIGNORE_FILENAME = ".gitignore"
 README_FILENAME = "README.md"
 
-GLOBAL_CONFIG_DIR = Path.home() / ".config" / "ck"
+
+def config_dir() -> Path:
+    """Resolve the global config directory (default ``~/.config/ck``).
+
+    ``CK_CONFIG_DIR`` overrides the location at the HIGHEST
+    precedence. The test suite, CI jobs and throwaway environments
+    use it to keep every registry / state / spaces write away from
+    the real user config. ``~`` is expanded and the result is
+    normalized to an absolute path, so a relative override cannot
+    drift when the process changes directory. An empty or
+    whitespace-only override is treated as unset.
+    """
+    override = os.environ.get("CK_CONFIG_DIR", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    return Path.home() / ".config" / "ck"
+
+
+GLOBAL_CONFIG_DIR = config_dir()
 GLOBAL_REGISTRY_FILE = GLOBAL_CONFIG_DIR / "projects.json"
 GLOBAL_STATE_FILE = GLOBAL_CONFIG_DIR / "state.json"
 LEGACY_GLOBAL_CONFIG_FILE = Path.home() / ".ckrc"

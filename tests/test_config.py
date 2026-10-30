@@ -23,6 +23,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
+from cklib import config as ckconfig
 from cklib.config import find_project_root
 
 
@@ -349,6 +350,61 @@ class TestDanglingCwdEndToEnd(unittest.TestCase):
                              f"stderr: {err}")
             self.assertIn("GLOBAL DASHBOARD", out)
             self.assertIn("proj", out)
+
+
+class TestConfigDirOverride(unittest.TestCase):
+    """``CK_CONFIG_DIR`` overrides the default ``~/.config/ck``."""
+
+    def test_default_is_the_home_config_dir(self):
+        with mock.patch.dict(os.environ):
+            os.environ.pop("CK_CONFIG_DIR", None)
+            self.assertEqual(
+                ckconfig.config_dir(), Path.home() / ".config" / "ck")
+
+    def test_override_wins(self):
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / "custom-ck"
+            with mock.patch.dict(
+                    os.environ, {"CK_CONFIG_DIR": str(target)}):
+                self.assertEqual(ckconfig.config_dir(), target.resolve())
+
+    def test_override_expands_user_and_resolves_to_absolute(self):
+        with mock.patch.dict(os.environ, {"CK_CONFIG_DIR": "~/ck-ovr"}):
+            self.assertEqual(
+                ckconfig.config_dir(), (Path.home() / "ck-ovr").resolve())
+        with mock.patch.dict(os.environ, {"CK_CONFIG_DIR": "relative-ck"}):
+            resolved = ckconfig.config_dir()
+        self.assertTrue(resolved.is_absolute())
+
+    def test_blank_override_falls_back_to_the_default(self):
+        for blank in ("", "   "):
+            with mock.patch.dict(os.environ, {"CK_CONFIG_DIR": blank}):
+                self.assertEqual(
+                    ckconfig.config_dir(), Path.home() / ".config" / "ck")
+
+    def test_import_time_paths_follow_the_override(self):
+        """A fresh process derives registry/state from the variable —
+        this is what makes the pytest fixture and ``CK_CONFIG_DIR=/x ck``
+        work for subprocesses too."""
+        repo_root = Path(__file__).resolve().parent.parent
+        with tempfile.TemporaryDirectory() as td:
+            env = {**os.environ, "CK_CONFIG_DIR": td}
+            result = subprocess.run(
+                [sys.executable, "-c",
+                 "from cklib import config as c;"
+                 "print(c.GLOBAL_CONFIG_DIR);"
+                 "print(c.GLOBAL_REGISTRY_FILE);"
+                 "print(c.GLOBAL_STATE_FILE)"],
+                capture_output=True, text=True, env=env,
+                cwd=str(repo_root), timeout=60,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        cfg = Path(td).resolve()
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [str(cfg), str(cfg / "projects.json"),
+             str(cfg / "state.json")],
+        )
 
 
 if __name__ == "__main__":

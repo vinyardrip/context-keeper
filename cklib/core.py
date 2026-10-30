@@ -41,6 +41,7 @@ from .config import (
     DEFAULT_REPO_BRANCH,
     DEFAULT_REPO_URL,
     GITIGNORE_FILENAME,
+    GLOBAL_CONFIG_DIR,
     GLOBAL_REGISTRY_FILE,
     GLOBAL_STATE_FILE,
     HISTORY_FILENAME,
@@ -3138,6 +3139,10 @@ class ContextKeeper:
         lines: list[str] = []
         lines.append(f"ck version: {VERSION}")
         lines.append(f"install_dir: {self.install_dir}")
+        # Effective global config root: honours CK_CONFIG_DIR, so a
+        # test/CI override is visible in diagnostics instead of silently
+        # changing which registry is read and written.
+        lines.append(f"config_dir: {GLOBAL_CONFIG_DIR}")
         in_repo = gith.is_git_repo(self.install_dir)
         lines.append(f"in_git_repo: {in_repo}")
         if in_repo:

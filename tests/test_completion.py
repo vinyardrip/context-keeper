@@ -395,13 +395,19 @@ class _ShellHarness(IsolatedRegistry):
         env = {
             key: value for key, value in os.environ.items()
             if key not in ("CK_BIN", "CK_SANDBOX", "CK_DEV",
-                           "CK_SANDBOX_ACTIVE", "CK_SANDBOX_SHELL")
+                           "CK_SANDBOX_ACTIVE", "CK_SANDBOX_SHELL",
+                           "CK_CONFIG_DIR")
         }
         env.update({
             "HOME": str(self.home),
             "PATH": f"{bin_dir}:{os.environ.get('PATH', '/usr/bin:/bin')}",
             "NO_COLOR": "1",
             "CK_SANDBOX_ROOT": str(self.home / ".sandbox"),
+            # The shell harness pins its own throwaway config dir: the
+            # helper binary must read the registry/spaces THIS test
+            # seeded, never the suite's per-test isolation dir and
+            # never the real ``~/.config/ck/``.
+            "CK_CONFIG_DIR": str(ckconfig.GLOBAL_CONFIG_DIR),
         })
         if extra:
             env.update(extra)
