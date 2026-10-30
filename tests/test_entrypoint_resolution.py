@@ -5,6 +5,8 @@ executes — never a stale site-packages / ``PYTHONPATH`` shadow — even
 when ``ck`` runs from nested subdirectories (e.g.
 ``.sandbox/projects/alpha``), and ``ck-dev`` sessions export
 ``PYTHONPATH`` so CHILD processes inherit the checkout's sources.
+``ck-dev`` also exports ``CK_BIN`` pointing at the checkout's ``ck``
+launcher, which the generated completion scripts use.
 """
 
 from __future__ import annotations
@@ -13,11 +15,13 @@ from __future__ import annotations
 import tests  # noqa: F401
 
 import os
+import runpy
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests._isolated_checkout import make_checkout_copy
 
@@ -233,6 +237,36 @@ class TestCkDevPythonPathPropagation(unittest.TestCase):
                          f"stdout: {result.stdout}\nstderr: {result.stderr}")
         self.assertIn("EDITOR-OK", result.stdout)
         self.assertNotIn("EDITOR-MISMATCH", result.stdout)
+
+
+class TestCkDevCompletionBinary(unittest.TestCase):
+    """ck-dev exports CK_BIN for the generated completion scripts."""
+
+    def test_delegated_command_exports_local_launcher(self):
+        module = runpy.run_path(
+            str(REPO_ROOT / "ck-dev"), run_name="ck_dev_under_test")
+        captured = {}
+
+        def fake_cli(argv):
+            captured["argv"] = list(argv)
+            captured["ck_bin"] = os.environ.get("CK_BIN")
+            return 0
+
+        with mock.patch("sys.argv", ["ck-dev", "st"]), \
+                mock.patch("cklib.cli.main", side_effect=fake_cli), \
+                mock.patch("cklib.sandbox.active_sandbox_project",
+                           return_value=None), \
+                mock.patch.dict(module, {
+                    "_ensure_roadmap_symlink": lambda root: None,
+                }), \
+                mock.patch.dict(os.environ, {
+                    "CK_BIN": "",
+                }, clear=False):
+            rc = module["main"]()
+
+        self.assertEqual(rc, 0)
+        self.assertEqual(captured["argv"], ["st"])
+        self.assertEqual(captured["ck_bin"], str(REPO_ROOT / "ck"))
 
 
 if __name__ == "__main__":

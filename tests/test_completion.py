@@ -24,6 +24,10 @@ Coverage:
   Both shells complete those names for ``ck space
   move|swap|rename|delete``, filtering protected names (``project``,
   built-ins) and the already-selected first operand of ``swap``.
+- Both generated scripts invoke the dynamic helpers through
+  ``"${CK_BIN:-ck}"`` (never a bare ``command ck``); with ``CK_BIN``
+  set and no ``ck`` on ``PATH``, project and space completion still
+  works in Bash and Zsh.
 """
 
 from __future__ import annotations
@@ -149,8 +153,9 @@ class TestCompletionScripts(unittest.TestCase):
         rc, out, err = _run_main(["completion", "bash"])
         self.assertEqual(rc, 0, err)
         self.assertIn("complete -F _ck_completion ck", out)
-        self.assertIn("ck completion --list-projects", out)
-        self.assertIn("ck completion --list-spaces", out)
+        self.assertIn('"${CK_BIN:-ck}" completion --list-projects', out)
+        self.assertIn('"${CK_BIN:-ck}" completion --list-spaces', out)
+        self.assertNotIn("command ck", out)
         for cmd in ("st", "list", "dashboard", "add", "done", "completion"):
             self.assertIn(cmd, out)
         self.assertNotIn("Traceback", out)
@@ -162,8 +167,9 @@ class TestCompletionScripts(unittest.TestCase):
         self.assertIn("compdef _ck ck", out)
         self.assertIn("_ck_projects", out)
         self.assertIn("_ck_spaces", out)
-        self.assertIn("ck completion --list-projects", out)
-        self.assertIn("ck completion --list-spaces", out)
+        self.assertIn('"${CK_BIN:-ck}" completion --list-projects', out)
+        self.assertIn('"${CK_BIN:-ck}" completion --list-spaces', out)
+        self.assertNotIn("command ck", out)
         self.assertNotIn("Traceback", out)
 
     @unittest.skipUnless(BASH, "bash is not installed")
@@ -358,7 +364,7 @@ class TestSpaceNameListing(IsolatedRegistry):
 class _ShellHarness(IsolatedRegistry):
     """Builds a temporary ``ck`` shim + completion script for a shell."""
 
-    def _env(self) -> dict:
+    def _env(self, extra: dict | None = None) -> dict:
         bin_dir = self.home / "bin"
         bin_dir.mkdir(exist_ok=True)
         shim = bin_dir / "ck"
@@ -370,8 +376,8 @@ class _ShellHarness(IsolatedRegistry):
         shim.chmod(0o755)
         env = {
             key: value for key, value in os.environ.items()
-            if key not in ("CK_SANDBOX", "CK_DEV", "CK_SANDBOX_ACTIVE",
-                           "CK_SANDBOX_SHELL")
+            if key not in ("CK_BIN", "CK_SANDBOX", "CK_DEV",
+                           "CK_SANDBOX_ACTIVE", "CK_SANDBOX_SHELL")
         }
         env.update({
             "HOME": str(self.home),
@@ -379,6 +385,8 @@ class _ShellHarness(IsolatedRegistry):
             "NO_COLOR": "1",
             "CK_SANDBOX_ROOT": str(self.home / ".sandbox"),
         })
+        if extra:
+            env.update(extra)
         return env
 
     def _script(self, shell: str) -> Path:
@@ -391,7 +399,7 @@ class _ShellHarness(IsolatedRegistry):
 
 class TestBashCompletionBehaviour(_ShellHarness):
 
-    def _complete(self, words: list) -> list:
+    def _complete(self, words: list, env_extra: dict | None = None) -> list:
         driver = self.home / "drive.bash"
         driver.write_text(
             'source "$1"\n'
@@ -405,7 +413,7 @@ class TestBashCompletionBehaviour(_ShellHarness):
         script = self._script("bash")
         result = subprocess.run(
             [BASH, str(driver), str(script), *words],
-            capture_output=True, text=True, env=self._env(),
+            capture_output=True, text=True, env=self._env(env_extra),
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("Traceback", result.stderr)
@@ -500,6 +508,28 @@ class TestBashCompletionBehaviour(_ShellHarness):
             self._complete(["ck", "space", "delete", "o"]), ["office"])
 
     @unittest.skipUnless(BASH, "bash is not installed")
+    def test_ck_bin_resolves_helper_when_path_lacks_ck(self):
+        """The script calls "${CK_BIN:-ck}", not a naked PATH lookup.
+
+        PATH is reduced to an empty directory, so completion can only
+        succeed when CK_BIN points at the dev launcher.
+        """
+        self.write_registry([
+            _entry("alpha", "/tmp/alpha", "2026-10-01T00:00:00+00:00"),
+            _entry("beta", "/tmp/beta", "2026-10-02T00:00:00+00:00"),
+        ])
+        empty_path = self.home / "empty-path"
+        empty_path.mkdir()
+        self.assertEqual(
+            sorted(self._complete(
+                ["ck", "st", ""],
+                {"CK_BIN": str(self.home / "bin" / "ck"),
+                 "PATH": str(empty_path)},
+            )),
+            ["alpha", "beta"],
+        )
+
+    @unittest.skipUnless(BASH, "bash is not installed")
     def test_missing_registry_still_completes_commands(self):
         self.assertFalse(self.registry_file.exists())
         replies = self._complete(["ck", ""])
@@ -563,7 +593,7 @@ class TestZshCompletionBehaviour(_ShellHarness):
         self.assertTrue(
             any("show the global dashboard" in line for line in after_flag))
 
-    def _space_completion(self, *words) -> list:
+    def _space_completion(self, *words, env_extra=None) -> list:
         """Run `_ck` for a `ck space …` line with mocked compsys."""
         driver = self.home / "space-specs.zsh"
         driver.write_text(
@@ -589,11 +619,28 @@ class TestZshCompletionBehaviour(_ShellHarness):
         script = self._script("zsh")
         result = subprocess.run(
             [ZSH, str(driver), str(script), *words],
-            capture_output=True, text=True, env=self._env(),
+            capture_output=True, text=True, env=self._env(env_extra),
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("Traceback", result.stderr)
         return result.stdout.splitlines()
+
+    @unittest.skipUnless(ZSH, "zsh is not installed")
+    def test_ck_bin_resolves_helper_when_path_lacks_ck(self):
+        self.write_spaces(
+            ["work", "office"],
+            order=["project", "office", "local", "remote", "work"],
+        )
+        empty_path = self.home / "empty-path"
+        empty_path.mkdir()
+        self.assertEqual(
+            self._space_completion(
+                "ck", "space", "move", "",
+                env_extra={"CK_BIN": str(self.home / "bin" / "ck"),
+                           "PATH": str(empty_path)},
+            ),
+            ["project", "office", "local", "remote", "work"],
+        )
 
     @unittest.skipUnless(ZSH, "zsh is not installed")
     def test_space_management_completes_ordered_space_names(self):

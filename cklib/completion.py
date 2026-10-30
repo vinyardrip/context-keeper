@@ -31,6 +31,14 @@ the generated scripts filter protected names for ``rename`` / ``delete``
 and exclude the already-chosen space from the second ``swap`` operand.
 Like the project source, the helper degrades to an empty list on any
 failure and never creates config files.
+
+BINARY RESOLUTION: both scripts invoke the helper as
+``"${CK_BIN:-ck}"``, never as a naked ``ck``. ``ck-dev`` exports
+``CK_BIN`` pointing at the checkout's local launcher, so completion
+keeps using the development binary even when a subshell, mise or a
+re-exported ``PATH`` would otherwise resolve a different ``ck``.
+Outside a dev session the variable is unset and the scripts fall back
+to the ``ck`` on ``PATH``.
 """
 
 from __future__ import annotations
@@ -228,9 +236,12 @@ _BASH_SCRIPT = r"""# ck shell completion for Bash
 # Registered project names come from the global registry
 # (~/.config/ck/projects.json), read through `ck completion
 # --list-projects`. Space names come from the persisted `spaces_order`
-# (~/.config/ck/state.json) via `ck completion --list-spaces`. Missing,
-# empty or unreadable sources simply yield no suggestions; stderr is
-# discarded so they can never spray diagnostics into the prompt.
+# (~/.config/ck/state.json) via `ck completion --list-spaces`. The
+# helper runs through "${CK_BIN:-ck}" so a dev session (ck-dev exports
+# CK_BIN) keeps using the checkout's launcher even if PATH points at a
+# global install. Missing, empty or unreadable sources simply yield no
+# suggestions; stderr is discarded so they can never spray diagnostics
+# into the prompt.
 
 _ck_completion() {
     local cur prev cmd
@@ -246,7 +257,7 @@ _ck_completion() {
         if [ -n "$__ck_line" ]; then
             __ck_projects+=("$__ck_line")
         fi
-    done < <(command ck completion --list-projects 2>/dev/null)
+    done < <("${CK_BIN:-ck}" completion --list-projects 2>/dev/null)
 
     if [ "$COMP_CWORD" -eq 1 ]; then
         COMPREPLY=( $(compgen -W "__CK_COMMANDS__" -- "$cur") )
@@ -337,7 +348,7 @@ _ck_completion() {
                     case "$__ck_line" in
                         "$cur"*) COMPREPLY+=("$__ck_line") ;;
                     esac
-                done < <(command ck completion --list-spaces 2>/dev/null)
+                done < <("${CK_BIN:-ck}" completion --list-spaces 2>/dev/null)
             fi
             ;;
         local|remote)
@@ -372,13 +383,16 @@ _ZSH_SCRIPT = r"""#compdef ck
 # Registered project names come from the global registry
 # (~/.config/ck/projects.json), read through `ck completion
 # --list-projects`. Space names come from the persisted `spaces_order`
-# (~/.config/ck/state.json) via `ck completion --list-spaces`. Missing,
-# empty or unreadable sources simply yield no suggestions; stderr is
-# discarded so they can never spray diagnostics into the prompt.
+# (~/.config/ck/state.json) via `ck completion --list-spaces`. The
+# helper runs through "${CK_BIN:-ck}" so a dev session (ck-dev exports
+# CK_BIN) keeps using the checkout's launcher even if PATH points at a
+# global install. Missing, empty or unreadable sources simply yield no
+# suggestions; stderr is discarded so they can never spray diagnostics
+# into the prompt.
 
 _ck_projects() {
     local -a projects
-    projects=(${(f)"$(command ck completion --list-projects 2>/dev/null)"})
+    projects=(${(f)"$("${CK_BIN:-ck}" completion --list-projects 2>/dev/null)"})
     (( ${#projects} )) || return 0
     _wanted projects expl 'registered project' compadd -a projects
 }
@@ -387,7 +401,7 @@ _ck_spaces() {
     local -a spaces kept
     local candidate skip_name
     local -i keep
-    spaces=(${(f)"$(command ck completion --list-spaces 2>/dev/null)"})
+    spaces=(${(f)"$("${CK_BIN:-ck}" completion --list-spaces 2>/dev/null)"})
     for candidate in "${spaces[@]}"; do
         keep=1
         for skip_name in "$@"; do

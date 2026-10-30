@@ -1034,6 +1034,7 @@ class TestCkDevSessionLifecycle(_WrapperBase):
             "#!/bin/sh\n"
             "echo PROBE_CK_SANDBOX=${CK_SANDBOX-unset}\n"
             "echo PROBE_SHELL_FLAG=${CK_SANDBOX_SHELL-unset}\n"
+            "echo PROBE_CK_BIN=${CK_BIN-unset}\n"
             "case $CK_SANDBOX_ACTIVE in */projects/alpha) echo PROBE_ACTIVE=alpha ;; *) echo PROBE_ACTIVE=other ;; esac\n"
             f'case $PYTHONPATH in \"{repo}\"|\"{repo}\":*|*:\"{repo}\") echo PROBE_PYPATH=repo ;; *) echo PROBE_PYPATH=other ;; esac\n'
             "exit 0\n",
@@ -1051,6 +1052,7 @@ class TestCkDevSessionLifecycle(_WrapperBase):
         self.assertIn("PROBE_SHELL_FLAG=1", out)
         self.assertIn("PROBE_ACTIVE=alpha", out)
         self.assertIn("PROBE_PYPATH=repo", out)
+        self.assertIn(f"PROBE_CK_BIN={self.checkout}/ck", out)
         # The wrapper announced the interactive subshell.
         self.assertIn("Starting sandbox subshell", out)
         """Plain `ck` under an active session prints the banner, then
