@@ -616,10 +616,14 @@ class TestZshCompletionBehaviour(_ShellHarness):
             _entry("alpha", "/tmp/alpha", "2026-10-01T00:00:00+00:00"),
             _entry("beta", "/tmp/beta", "2026-10-02T00:00:00+00:00"),
         ])
-        project_spec = "1:registered project:_ck_projects"
+        # `_arguments` counts command arguments: `st` is argument 1,
+        # so the project positional MUST be bound to position 2.
+        project_spec = "2:registered project:_ck_projects"
+        wrong_spec = "1:registered project:_ck_projects"
 
         fresh = self._st_arguments("ck", "st", "")
         self.assertIn(project_spec, fresh)
+        self.assertNotIn(wrong_spec, fresh)
         self.assertTrue(any("print the task list" in line for line in fresh))
 
         after_project = self._st_arguments("ck", "st", "alpha", "")

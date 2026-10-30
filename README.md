@@ -300,7 +300,9 @@ The scripts complete the core navigation commands and, most importantly, the
 suggest projects from `~/.config/ck/projects.json` immediately, with no second
 lookup. `ck st` treats the project as its **first positional**: once a project
 name or a flag is present, completion switches to valid flags/options instead
-of repeating project names.
+of repeating project names. The Zsh generator binds that project slot to
+`_arguments` position **2** — `st` itself is command argument 1 — so
+`ck st <TAB>` suggests projects while `ck st alpha <TAB>` stays flag-only.
 
 | Position | Suggests | Behaviour |
 | --- | --- | --- |

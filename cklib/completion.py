@@ -485,11 +485,13 @@ _ck() {
                 '(-g --global)'{-g,--global}'[show the global dashboard]'
                 '--all[include the full PLAN.md]'
             )
-            # The project is the FIRST (and only) positional. After a
-            # project name or a flag is present, offer options only —
-            # never duplicate the project list.
+            # `_arguments` positions count COMMAND arguments, not
+            # `words`: `st` is argument 1, so the project slot is
+            # argument 2 even though it is completed at CURRENT == 3.
+            # After a project name or a flag is present, offer options
+            # only — never duplicate the project list.
             if (( CURRENT == 3 )); then
-                specs+=('1:registered project:_ck_projects')
+                specs+=('2:registered project:_ck_projects')
             fi
             _arguments "${specs[@]}"
             ;;
