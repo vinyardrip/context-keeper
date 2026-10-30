@@ -1,6 +1,6 @@
 # ROADMAP / PLAN
 
-Current version: v0.8.19
+Current version: v0.8.20
 
 ## Backlog
 - [x] Инициализировать базовую структуру проекта (.ck/)
@@ -45,7 +45,6 @@ Current version: v0.8.19
 - [x] Seamless ck update mechanism: environment detection (symlink-resolved install path, `.git` vs standalone) — safe `git pull` for checkouts, in-place `install.sh` refresh preserving `.ck/` for standalone installs (`v0.8.11`)
 - [x] Startup version check для standalone-установок: GitHub releases API + non-intrusive `ck update` notice, throttle 24h (`v0.8.11`)
 - [x] Global default spaces (local/remote): Automatic initialization of default global task spaces regardless of the current working directory, with strict preservation of existing space files (`v0.8.12`)
-- [x] Shell Completion: автодополнение команд, флагов и проектов в Bash / Zsh (`ck completion bash|zsh`) (`v0.8.13`)
 - [ ] Подготовка клиентского модуля синхронизации состояний (`.ck/state.json`)
 - [ ] Дополнительные шаблоны `prompt.md` для ролей ИИ
 - [ ] Экспорт и инжекция контекста в сторонние инструменты
@@ -61,9 +60,17 @@ Current version: v0.8.19
 - [x] добавить возможность удаления задач с подтверждением (`ck delete <ID>` / `ck rm`, `-f`) (`v0.8.14`)
 - [x] для пространств добавить move, swap, reorder(удаление задач) - функционал должен быть идентичен (`spaces_order`, `ck space move|swap|reorder|delete -f`) (`v0.8.15`)
 - [x] явное удаление задачи из пространства: `ck delete <ID> -s|--space <space>` с подтверждением, `-f`, реиндексацией ID и архивом заметок в `<space>.HISTORY.md` (`v0.8.16`)
-- [x] автодополнение проектов для `ck st <TAB>` в Bash / Zsh: регистр проектов через `--list-projects`, флаги после первого позиционного аргумента, паритет с `ck list <TAB>` (`v0.8.16`)
-- [x] автодополнение пространств для `ck space move|swap|rename|delete` в Bash / Zsh: `--list-spaces` из `spaces_order`, фильтрация `project` и защищённых built-in пространств (`v0.8.17`)
-- [x] поддержка `CK_BIN` в автодополнении Bash / Zsh (`${CK_BIN:-ck}`), экспорт локального launcher-пути из `ck-dev` (`v0.8.18`)
 - [x] точное определение `install_mode` в `ck info`: symlink one-liner, physical copy после `ck install`, standalone/dev launcher; проверка `os.path.islink()` до разрешения пути (`v0.8.19`)
 - [ ] добавить link между проектами(один хостинг - space remote), между пространством и проектами(space today задача общая, срочная починка уязвимости) может еще что
 - [ ] сделать линкованные задачи(одинаковые для link projects/spaces) при связи - пишем в одном проекте, дописываются в связанные(хостингом, пример закрыть уязвимость, действия одинаковые, задачи тоже)
+
+## Completed
+
+### Shell Completion (v0.8.13 → v0.8.20)
+- [x] Базовое автодополнение команд, флагов и проектов в Bash / Zsh (`ck completion bash|zsh`) (`v0.8.13`)
+- [x] Проектные имена для `ck st <TAB>` / `ck list <TAB>`; после проекта или флага — только валидные флаги, без повторов (`v0.8.16`)
+- [x] Имена пространств для `ck space move|swap|rename|delete` из `spaces_order`: фильтрация `project`, built-ins и первого операнда `swap` (`v0.8.17`)
+- [x] Поддержка `CK_BIN` и экспорт локального launcher-пути из `ck-dev` (`v0.8.18`)
+- [x] Надёжное разрешение бинаря на каждый TAB: исполняемый `CK_BIN`, иначе fallback на `ck` из `PATH` — устойчиво к `mise`, subshell и устаревшему dev-пути (`v0.8.20`)
+- [x] `ck <TAB>` без filename-fallback (никакого `-o default` / `-o bashdefault`); таблица примеров автодополнения в README (`v0.8.20`)
+- [x] Sandbox registry safeguard: production-регистрация `.sandbox/`-путей отклоняется, completion скрывает устаревшие fixture-записи (`v0.8.20`)

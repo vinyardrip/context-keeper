@@ -114,9 +114,10 @@ Shell completion:
                              ~/.config/ck/projects.json) and space names
                              for `ck space move|swap|rename|delete`
                              (from the persisted spaces_order); helper
-                             calls use "${{CK_BIN:-ck}}" (ck-dev exports
-                             the checkout's launcher); missing or
-                             unreadable sources degrade to no names
+                             calls resolve CK_BIN (when executable)
+                             or fall back to the ck on PATH (ck-dev
+                             exports the checkout's launcher); missing
+                             or unreadable sources degrade to no names
 
 Global (all registered projects):
   dashboard                  Cross-project dashboard (compact table)
@@ -2190,8 +2191,9 @@ def _run_completion(rest: List[str]) -> int:
     ``ck completion --list-projects`` emits one registered project per
     line; ``--list-spaces`` emits the current space sequence (including
     the virtual ``project`` row) in persisted ``spaces_order``. Both
-    are internal helpers the generated scripts call on TAB through
-    ``"${CK_BIN:-ck}"`` (``ck-dev`` exports its local launcher); empty
+    are internal helpers the generated scripts call on TAB through a
+    per-call ``_ck_bin`` resolver: an executable ``CK_BIN`` (exported
+    by ``ck-dev``) wins, otherwise the ``ck`` on ``PATH`` is used; empty
     output when nothing exists, and NEVER a traceback or diagnostic —
     completion must not pollute the prompt. The project read is
     thread/process-safe (``*.lock``) via

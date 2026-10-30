@@ -15,10 +15,11 @@ subcommand:
 - ``PYTHONPATH=$REPO_ROOT[:…]`` — every CHILD process of the session
   (nested ``ck`` calls, editor subprocesses, spawned tooling) imports
   ``cklib`` from THIS checkout, never a stale site-packages copy;
-- ``CK_BIN=$REPO_ROOT/ck`` — the shell completion scripts invoke
-  ``"${CK_BIN:-ck}"``, so TAB completion keeps using this checkout's
-  launcher even when a subshell, mise or a re-exported ``PATH`` would
-  otherwise resolve another ``ck``;
+- ``CK_BIN=$REPO_ROOT/ck`` — the shell completion scripts prefer an
+  executable ``CK_BIN`` (falling back to the ``ck`` on ``PATH`` when it
+  is stale), so TAB completion keeps using this checkout's launcher
+  even when a subshell, mise or a re-exported ``PATH`` would otherwise
+  resolve another ``ck``;
 - global-config writes are intercepted to
   ``$REPO_ROOT/.sandbox/config/projects.json`` (reads prefer the
   sandbox copy once it exists, mirroring the production registry
@@ -216,10 +217,11 @@ def main() -> int:
             [repo_root_str, *pp_parts])
 
     # COMPLETION BINARY PIN: the generated shell completion scripts
-    # call "${CK_BIN:-ck}". Export the checkout's launcher so a TAB
-    # press inside the dev session resolves THIS binary even when
-    # PATH is re-exported (mise, shell rc files) or a global install
-    # sits earlier in the lookup order.
+    # prefer an executable CK_BIN and fall back to the ck on PATH.
+    # Export the checkout's launcher so a TAB press inside the dev
+    # session resolves THIS binary even when PATH is re-exported
+    # (mise, shell rc files) or a global install sits earlier in the
+    # lookup order.
     os.environ["CK_BIN"] = str(repo_root / "ck")
 
     try:

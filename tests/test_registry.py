@@ -10,13 +10,18 @@ Coverage (per security review):
 
 from __future__ import annotations
 
+import io
 import json
+import os
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 from cklib import config as ckconfig
 from cklib import registry
+from cklib.cli import main
 
 
 class IsolatedHomeMixin:
@@ -99,6 +104,55 @@ class TestRegister(IsolatedHomeMixin, unittest.TestCase):
         self.assertTrue(registry.remove_project(p))
         self.assertEqual(registry.list_projects(), [])
         self.assertFalse(registry.remove_project(p))
+
+
+class TestSandboxPathGuard(IsolatedHomeMixin, unittest.TestCase):
+    """Fixture paths must never enter the production registry."""
+
+    def _fixture(self, name: str = "alpha") -> Path:
+        root = Path(self._tmp.name) / ".sandbox" / "projects" / name
+        root.mkdir(parents=True)
+        return root
+
+    def test_register_rejects_sandbox_tree(self):
+        fixture = self._fixture()
+        with self.assertRaises(registry.SandboxRegistryPathError):
+            registry.register_project(fixture)
+        # Rejected BEFORE any registry file was created.
+        self.assertFalse(ckconfig.GLOBAL_REGISTRY_FILE.exists())
+
+    def test_register_rejects_symlink_into_sandbox(self):
+        fixture = self._fixture()
+        link = Path(self._tmp.name) / "alpha-link"
+        link.symlink_to(fixture)
+        with self.assertRaises(registry.SandboxRegistryPathError):
+            registry.register_project(link)
+        self.assertFalse(ckconfig.GLOBAL_REGISTRY_FILE.exists())
+
+    def test_sandbox_component_detection(self):
+        self.assertTrue(registry.is_sandbox_path(self._fixture()))
+        self.assertFalse(registry.is_sandbox_path(
+            Path(self._tmp.name) / "regular" / "project"))
+
+    def test_cli_register_reports_clean_error(self):
+        fixture = self._fixture()
+        # `ck` reports command errors on STDOUT through _print_error
+        # (the established CLI convention, asserted by test_ui).
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = main(["register", "--path", str(fixture)])
+        self.assertEqual(rc, 2)
+        self.assertIn(
+            "Refusing to register sandbox/fixture path", out.getvalue())
+        self.assertNotIn("Traceback", out.getvalue())
+
+    def test_dev_session_may_register_fixture(self):
+        """Dev writes land in the SANDBOX registry, not production."""
+        fixture = self._fixture()
+        with mock.patch.dict(os.environ, {"CK_SANDBOX": "1"}):
+            entry = registry.register_project(fixture, name="fixture")
+        self.assertEqual(entry.name, "fixture")
+        self.assertFalse(ckconfig.GLOBAL_REGISTRY_FILE.exists())
 
 
 class TestTimestamps(IsolatedHomeMixin, unittest.TestCase):

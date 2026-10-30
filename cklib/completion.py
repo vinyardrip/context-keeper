@@ -32,13 +32,14 @@ and exclude the already-chosen space from the second ``swap`` operand.
 Like the project source, the helper degrades to an empty list on any
 failure and never creates config files.
 
-BINARY RESOLUTION: both scripts invoke the helper as
-``"${CK_BIN:-ck}"``, never as a naked ``ck``. ``ck-dev`` exports
-``CK_BIN`` pointing at the checkout's local launcher, so completion
+BINARY RESOLUTION: both scripts resolve the helper through a small
+``_ck_bin`` function. A non-empty, executable ``CK_BIN`` wins;
+otherwise the function falls back to ``command -v ck``. ``ck-dev``
+exports ``CK_BIN`` with the checkout's local launcher, so completion
 keeps using the development binary even when a subshell, mise or a
-re-exported ``PATH`` would otherwise resolve a different ``ck``.
-Outside a dev session the variable is unset and the scripts fall back
-to the ``ck`` on ``PATH``.
+re-exported ``PATH`` would resolve another ``ck``. A stale ``CK_BIN``
+(removed checkout) degrades to the real ``ck`` on ``PATH`` instead of
+breaking TAB completion.
 """
 
 from __future__ import annotations
@@ -97,7 +98,7 @@ def list_project_names() -> List[str]:
     line-oriented protocol).
     """
     try:
-        from .registry import has_registry, list_projects
+        from .registry import has_registry, is_sandbox_path, list_projects
 
         # Lock-free existence probe first: a machine that never
         # registered anything must not get a lock file (or an empty
@@ -112,10 +113,24 @@ def list_project_names() -> List[str]:
         # "no suggestions".
         return []
 
+    # ROUTING LEAK GUARD: registries polluted before the registration
+    # check existed may still carry ``.sandbox/`` fixture entries.
+    # Never suggest those in production — a TAB press must not route
+    # the user into disposable mock data. A dev session keeps them:
+    # that is the registry it is meant to read.
+    production = True
+    try:
+        from .sandbox import dev_context_active
+        production = not dev_context_active()
+    except Exception:
+        pass
+
     names: List[str] = []
     seen = set()
     for entry in entries:
         try:
+            if production and is_sandbox_path(entry.path):
+                continue
             raw = (entry.name or "").strip()
             if not raw:
                 # Hand-edited registry with no display name: fall
@@ -237,11 +252,21 @@ _BASH_SCRIPT = r"""# ck shell completion for Bash
 # (~/.config/ck/projects.json), read through `ck completion
 # --list-projects`. Space names come from the persisted `spaces_order`
 # (~/.config/ck/state.json) via `ck completion --list-spaces`. The
-# helper runs through "${CK_BIN:-ck}" so a dev session (ck-dev exports
-# CK_BIN) keeps using the checkout's launcher even if PATH points at a
-# global install. Missing, empty or unreadable sources simply yield no
-# suggestions; stderr is discarded so they can never spray diagnostics
-# into the prompt.
+# helper binary is resolved per call by `_ck_bin`: a usable CK_BIN wins
+# (a ck-dev session pins the checkout's launcher), otherwise the `ck`
+# found on PATH is used. Missing, empty or unreadable sources simply
+# yield no suggestions; stderr is discarded so they can never spray
+# diagnostics into the prompt.
+
+# Resolve the helper binary: "${CK_BIN:-ck}" with a stale-path guard.
+# A CK_BIN left over from a removed checkout must not break completion.
+_ck_bin() {
+    if [ -n "${CK_BIN:-}" ] && [ -f "${CK_BIN}" ] && [ -x "${CK_BIN}" ]; then
+        printf '%s\n' "${CK_BIN}"
+        return 0
+    fi
+    command -v ck 2>/dev/null || printf '%s\n' ck
+}
 
 _ck_completion() {
     local cur prev cmd
@@ -257,7 +282,7 @@ _ck_completion() {
         if [ -n "$__ck_line" ]; then
             __ck_projects+=("$__ck_line")
         fi
-    done < <("${CK_BIN:-ck}" completion --list-projects 2>/dev/null)
+    done < <("$(_ck_bin)" completion --list-projects 2>/dev/null)
 
     if [ "$COMP_CWORD" -eq 1 ]; then
         COMPREPLY=( $(compgen -W "__CK_COMMANDS__" -- "$cur") )
@@ -348,7 +373,7 @@ _ck_completion() {
                     case "$__ck_line" in
                         "$cur"*) COMPREPLY+=("$__ck_line") ;;
                     esac
-                done < <("${CK_BIN:-ck}" completion --list-spaces 2>/dev/null)
+                done < <("$(_ck_bin)" completion --list-spaces 2>/dev/null)
             fi
             ;;
         local|remote)
@@ -361,10 +386,17 @@ _ck_completion() {
                 COMPREPLY=( $(compgen -W "bash zsh" -- "$cur") )
             fi
             ;;
+        *)
+            # Unknown subcommand: explicitly empty. Top-level `ck`
+            # completion must never fall back to arbitrary filenames.
+            COMPREPLY=()
+            ;;
     esac
     return 0
 }
 
+# No -o default / -o bashdefault: `ck <TAB>` is command + project
+# completion only; arbitrary files from the cwd must never appear.
 complete -F _ck_completion ck
 """
 
@@ -384,15 +416,25 @@ _ZSH_SCRIPT = r"""#compdef ck
 # (~/.config/ck/projects.json), read through `ck completion
 # --list-projects`. Space names come from the persisted `spaces_order`
 # (~/.config/ck/state.json) via `ck completion --list-spaces`. The
-# helper runs through "${CK_BIN:-ck}" so a dev session (ck-dev exports
-# CK_BIN) keeps using the checkout's launcher even if PATH points at a
-# global install. Missing, empty or unreadable sources simply yield no
-# suggestions; stderr is discarded so they can never spray diagnostics
-# into the prompt.
+# helper binary is resolved per call by `_ck_bin`: a usable CK_BIN wins
+# (a ck-dev session pins the checkout's launcher), otherwise the `ck`
+# found on PATH is used. Missing, empty or unreadable sources simply
+# yield no suggestions; stderr is discarded so they can never spray
+# diagnostics into the prompt.
+
+# Resolve the helper binary: "${CK_BIN:-ck}" with a stale-path guard.
+# A CK_BIN left over from a removed checkout must not break completion.
+_ck_bin() {
+    if [[ -n "${CK_BIN:-}" && -f "${CK_BIN}" && -x "${CK_BIN}" ]]; then
+        print -r -- "${CK_BIN}"
+        return 0
+    fi
+    command -v ck 2>/dev/null || print -r -- ck
+}
 
 _ck_projects() {
     local -a projects
-    projects=(${(f)"$("${CK_BIN:-ck}" completion --list-projects 2>/dev/null)"})
+    projects=(${(f)"$("$(_ck_bin)" completion --list-projects 2>/dev/null)"})
     (( ${#projects} )) || return 0
     _wanted projects expl 'registered project' compadd -a projects
 }
@@ -401,7 +443,7 @@ _ck_spaces() {
     local -a spaces kept
     local candidate skip_name
     local -i keep
-    spaces=(${(f)"$("${CK_BIN:-ck}" completion --list-spaces 2>/dev/null)"})
+    spaces=(${(f)"$("$(_ck_bin)" completion --list-spaces 2>/dev/null)"})
     for candidate in "${spaces[@]}"; do
         keep=1
         for skip_name in "$@"; do
@@ -514,6 +556,11 @@ __CK_SPACE_ACTION_ENTRIES__
             if (( CURRENT == 3 )); then
                 _values 'shell' bash zsh
             fi
+            ;;
+        *)
+            # Unknown subcommand: no completion, and no fallback to
+            # arbitrary files from the working directory.
+            return 0
             ;;
     esac
 }

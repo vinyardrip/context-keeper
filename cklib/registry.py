@@ -49,6 +49,17 @@ class RegistryCorruptError(RuntimeError):
     user data with an empty registry."""
 
 
+class SandboxRegistryPathError(ValueError):
+    """Raised when a production registration targets a sandbox tree.
+
+    Paths under ``.sandbox/`` are disposable dev fixtures. Registering
+    one in the REAL registry would leak fixture names into completion
+    and route later ``ck st`` / ``ck list`` calls to mock data, so the
+    write is rejected. Dev sessions are exempt: their writes already
+    land in the sandbox registry copy, where these paths belong.
+    """
+
+
 def _quarantine_corrupt(target: Path) -> None:
     """Move a corrupt registry file aside (timestamped backup).
 
@@ -347,9 +358,57 @@ def _locked_modify(path: Path, mutator) -> Registry:
         return reg
 
 
+def is_sandbox_path(path: Path | str) -> bool:
+    """True when ``path`` lives under a ``.sandbox/`` directory.
+
+    The check is component-based on the RESOLVED path, so it catches
+    both direct fixture paths (``repo/.sandbox/projects/alpha``) and
+    symlinks pointing into the sandbox. Used to keep disposable dev
+    fixtures out of the production registry and its completion feed.
+    Never raises.
+    """
+    try:
+        parts = Path(path).resolve().parts
+    except (OSError, RuntimeError, ValueError):
+        try:
+            parts = Path(os.path.abspath(str(path))).parts
+        except (OSError, ValueError):
+            return False
+    try:
+        from .sandbox import SANDBOX_DIR_NAME
+    except Exception:
+        SANDBOX_DIR_NAME = ".sandbox"
+    return SANDBOX_DIR_NAME in parts
+
+
+def _production_registration() -> bool:
+    """True when a registration would be written to the REAL registry."""
+    try:
+        from .sandbox import dev_context_active
+        if dev_context_active():
+            return False
+    except Exception:
+        pass
+    return True
+
+
 def register_project(path: Path, name: Optional[str] = None) -> ProjectEntry:
-    """Register (or refresh) ``path`` in the global registry."""
+    """Register (or refresh) ``path`` in the global registry.
+
+    SANDBOX GUARD: a production registration of a ``.sandbox/`` path is
+    rejected with :class:`SandboxRegistryPathError`. Dev sessions are
+    exempt because their registry writes are redirected to the sandbox
+    copy (``.sandbox/config/projects.json``); that is exactly where
+    fixture projects are meant to live.
+    """
     abs_path = str(Path(path).resolve())
+    if _production_registration() and is_sandbox_path(abs_path):
+        raise SandboxRegistryPathError(
+            f"Refusing to register sandbox/fixture path {abs_path!r}: "
+            "paths under .sandbox/ belong to disposable dev fixtures "
+            "and would leak into the real project registry. Register "
+            "the real project path, or run inside ck-dev."
+        )
     project_name = name or Path(abs_path).name
     now = _now_iso()
 

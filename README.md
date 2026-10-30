@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.8.19-blue)]()
+[![version](https://img.shields.io/badge/version-0.8.20-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -103,7 +103,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.8.19
+ck -v    # → ck version 0.8.20
 ```
 
 ---
@@ -217,7 +217,7 @@ hierarchy; the active project in `ck space list` is bold cyan. With
 / `>> NEXT` context triad plus its process notes — the same verbose
 treatment registered projects get, and the compact table is not repeated
 above the cards.
-| ck completion bash\|zsh | Print the matching shell completion script to STDOUT: `eval "$(ck completion zsh)"`. Completions cover the core commands plus registered project names (`~/.config/ck/projects.json`) and space names for `ck space move|swap|rename|delete` (from the persisted `spaces_order`). `ck st <TAB>` / `ck list <TAB>` suggest projects; after the `st` project or a flag, completion switches to valid flags/options. Space completion keeps the sequence order and filters protected contexts (`project` for rename/delete, built-ins for delete) plus the first `swap` operand. Helper calls use `${CK_BIN:-ck}`, so a `ck-dev` session completes through its local launcher. A missing, empty or unreadable source simply yields no names (never a traceback) |
+| ck completion bash\|zsh | Print the matching shell completion script to STDOUT: `eval "$(ck completion zsh)"`. Completions cover the core commands plus registered project names (`~/.config/ck/projects.json`) and space names for `ck space move|swap|rename|delete` (from the persisted `spaces_order`). `ck st <TAB>` / `ck list <TAB>` suggest projects; after the `st` project or a flag, completion switches to valid flags/options. Space completion keeps the sequence order and filters protected contexts (`project` for rename/delete, built-ins for delete) plus the first `swap` operand. A per-call `_ck_bin` resolver prefers an executable `CK_BIN` (a `ck-dev` session exports its local launcher) and falls back to the `ck` on `PATH`; top-level completion never falls back to filenames. A missing, empty or unreadable source simply yields no names (never a traceback) |
 | ck info | Installation diagnostics (version, branch, paths, `launcher_path`) plus an accurate `install_mode`: `symlink (one-liner tree)`, `physical copy` after `ck install`, or `standalone/dev launcher` for a direct checkout |
 | ck install | Copy ck to ~/.local/bin/ck (physical executable file, no symlink) + cklib snapshot to ~/.local/share/ck; no sudo |
 | ck uninstall | Remove ~/.local/bin/ck, the cklib snapshot and any legacy ~/.local/bin/ck-dev |
@@ -294,18 +294,18 @@ lookup. `ck st` treats the project as its **first positional**: once a project
 name or a flag is present, completion switches to valid flags/options instead
 of repeating project names.
 
-```text
-ck <TAB>                 # commands + registered project names
-ck st <TAB>              # registered project names
-ck list <TAB>            # registered project names
-ck st alpha <TAB>        # flags: -l, -e, -g, --all
-ck st -l <TAB>           # flags only, no duplicate project names
-
-ck space move <TAB>      # project, built-ins, custom spaces (spaces_order)
-ck space swap <TAB>      # same sequence; second pick excludes the first
-ck space rename <TAB>    # existing spaces, project filtered out
-ck space delete <TAB>    # custom spaces only; project/local/remote filtered
-```
+| Position | Suggests | Behaviour |
+| --- | --- | --- |
+| `ck <TAB>` | commands + registered project names | command/project completion only — never filenames from the cwd |
+| `ck st <TAB>` | registered project names | the project is the only positional |
+| `ck list <TAB>` | registered project names | same registry source as `ck st` |
+| `ck unregister <TAB>` | registered project names | |
+| `ck st alpha <TAB>` | `-l`, `--list`, `-e`, `--edit`, `-g`, `--global`, `--all` | after a project or flag, projects are not repeated |
+| `ck st -l <TAB>` | valid `st` flags only | |
+| `ck space <TAB>` | `list`, `create`, `rename`, `move`, `swap`, `reorder`, `delete` | |
+| `ck space move\|swap\|rename\|delete <TAB>` | space names in `spaces_order` | `project` filtered from rename/delete, built-ins from delete, first `swap` operand excluded |
+| `ck completion <TAB>` | `bash`, `zsh` | |
+| `ck register --path <TAB>` | directories | the one intentional filesystem completion |
 
 Space completion follows the **persisted `spaces_order`** from
 `~/.config/ck/state.json`, so suggestions match `ck space list` exactly. The
@@ -314,13 +314,20 @@ virtual `project` row is surfaced for `move` / `swap` but filtered from
 (`local` / `remote`). A missing, empty or unreadable state file or registry
 degrades to plain command completion — no traceback, no noise in the prompt.
 
-Both scripts resolve the helper through **`${CK_BIN:-ck}`**. A `ck-dev` session
-exports `CK_BIN` with the checkout's local launcher, so completion keeps using
-the development binary even when a subshell, `mise` or a re-exported `PATH`
-would resolve another `ck`. Outside a dev session the variable is unset and
-the scripts fall back to the `ck` on `PATH`. After `ck update` re-installs the
-launcher, re-source the line (or open a new shell) to pick up the latest
-script.
+Both scripts resolve the helper per TAB press through a small `_ck_bin`
+function: a non-empty **executable `CK_BIN`** wins (a `ck-dev` session exports
+the checkout's local launcher), otherwise the script falls back to the `ck`
+found on `PATH`. A stale `CK_BIN` left by a removed checkout therefore
+degrades to the installed binary instead of breaking completion; this protects
+against `mise` or a re-exported `PATH` resolving a different `ck`. After
+`ck update` re-installs the launcher, re-source the line (or open a new shell)
+to pick up the latest script.
+
+> **Fixture routing guard.** Paths under `.sandbox/` are disposable dev
+> fixtures, so `ck register` rejects them in production (dev sessions still
+> register them into the sandbox registry copy). Project completion also hides
+> any `.sandbox/` entries left in an older registry, so a TAB press can never
+> route `ck st` / `ck list` into mock data.
 
 ### Initialization & Registration
 
@@ -332,6 +339,11 @@ Use `ck init --register` when the project should be initialized and tracked in
 the global registry in one step. An already initialized project can be added
 to the registry at any time with the standalone command `ck register` (use
 `--path PATH` and/or `-n NAME` when needed).
+
+Production registration validates the target: a path under any `.sandbox/`
+tree is rejected with a clean error (exit 2) instead of being written to
+`~/.config/ck/projects.json`. Dev sessions are exempt because their registry
+writes land in the sandbox copy.
 
 ### Global Registry Hygiene
 

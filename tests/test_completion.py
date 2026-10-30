@@ -24,10 +24,14 @@ Coverage:
   Both shells complete those names for ``ck space
   move|swap|rename|delete``, filtering protected names (``project``,
   built-ins) and the already-selected first operand of ``swap``.
-- Both generated scripts invoke the dynamic helpers through
-  ``"${CK_BIN:-ck}"`` (never a bare ``command ck``); with ``CK_BIN``
-  set and no ``ck`` on ``PATH``, project and space completion still
-  works in Bash and Zsh.
+- Both generated scripts resolve the helper through ``_ck_bin``:
+  a non-empty executable ``CK_BIN`` wins (``ck-dev`` exports the
+  checkout's launcher), while a stale/missing ``CK_BIN`` falls back
+  to the ``ck`` on ``PATH``. Top-level completion never registers
+  filename fallback (no ``-o default`` / ``-o bashdefault``).
+- Registry entries under ``.sandbox/`` are never suggested by project
+  completion in production (stale fixture pollution cannot route the
+  user into mock data); a dev session keeps them.
 """
 
 from __future__ import annotations
@@ -153,9 +157,17 @@ class TestCompletionScripts(unittest.TestCase):
         rc, out, err = _run_main(["completion", "bash"])
         self.assertEqual(rc, 0, err)
         self.assertIn("complete -F _ck_completion ck", out)
-        self.assertIn('"${CK_BIN:-ck}" completion --list-projects', out)
-        self.assertIn('"${CK_BIN:-ck}" completion --list-spaces', out)
+        self.assertIn("_ck_bin", out)
+        self.assertIn('"$(_ck_bin)" completion --list-projects', out)
+        self.assertIn('"$(_ck_bin)" completion --list-spaces', out)
         self.assertNotIn("command ck", out)
+        # M1: no readline filename fallback for the top-level command.
+        complete_line = next(
+            line for line in out.splitlines() if line.startswith("complete ")
+        )
+        self.assertIn("complete -F _ck_completion ck", complete_line)
+        self.assertNotIn("-o default", complete_line)
+        self.assertNotIn("-o bashdefault", complete_line)
         for cmd in ("st", "list", "dashboard", "add", "done", "completion"):
             self.assertIn(cmd, out)
         self.assertNotIn("Traceback", out)
@@ -167,8 +179,9 @@ class TestCompletionScripts(unittest.TestCase):
         self.assertIn("compdef _ck ck", out)
         self.assertIn("_ck_projects", out)
         self.assertIn("_ck_spaces", out)
-        self.assertIn('"${CK_BIN:-ck}" completion --list-projects', out)
-        self.assertIn('"${CK_BIN:-ck}" completion --list-spaces', out)
+        self.assertIn("_ck_bin", out)
+        self.assertIn('"$(_ck_bin)" completion --list-projects', out)
+        self.assertIn('"$(_ck_bin)" completion --list-spaces', out)
         self.assertNotIn("command ck", out)
         self.assertNotIn("Traceback", out)
 
@@ -509,7 +522,7 @@ class TestBashCompletionBehaviour(_ShellHarness):
 
     @unittest.skipUnless(BASH, "bash is not installed")
     def test_ck_bin_resolves_helper_when_path_lacks_ck(self):
-        """The script calls "${CK_BIN:-ck}", not a naked PATH lookup.
+        """An executable CK_BIN wins over the PATH lookup.
 
         PATH is reduced to an empty directory, so completion can only
         succeed when CK_BIN points at the dev launcher.
@@ -528,6 +541,32 @@ class TestBashCompletionBehaviour(_ShellHarness):
             )),
             ["alpha", "beta"],
         )
+
+    @unittest.skipUnless(BASH, "bash is not installed")
+    def test_stale_ck_bin_falls_back_to_path(self):
+        """A CK_BIN left by a removed checkout must not break TAB."""
+        self.write_registry([
+            _entry("alpha", "/tmp/alpha", "2026-10-01T00:00:00+00:00"),
+        ])
+        self.assertEqual(
+            self._complete(
+                ["ck", "st", ""],
+                {"CK_BIN": str(self.home / "removed" / "ck")},
+            ),
+            ["alpha"],
+        )
+
+    @unittest.skipUnless(BASH, "bash is not installed")
+    def test_project_completion_hides_sandbox_entries_in_production(self):
+        """Stale .sandbox/ registry pollution never reaches TAB."""
+        self.write_registry([
+            _entry("alpha", "/tmp/alpha", "2026-10-02T00:00:00+00:00"),
+            _entry("fixture",
+                   str(self.home / ".sandbox" / "projects" / "alpha"),
+                   "2026-10-01T00:00:00+00:00"),
+        ])
+        replies = self._complete(["ck", "st", ""])
+        self.assertEqual(replies, ["alpha"])
 
     @unittest.skipUnless(BASH, "bash is not installed")
     def test_missing_registry_still_completes_commands(self):
@@ -640,6 +679,21 @@ class TestZshCompletionBehaviour(_ShellHarness):
                            "PATH": str(empty_path)},
             ),
             ["project", "office", "local", "remote", "work"],
+        )
+
+    @unittest.skipUnless(ZSH, "zsh is not installed")
+    def test_stale_ck_bin_falls_back_to_path(self):
+        """A CK_BIN left by a removed checkout must not break TAB."""
+        self.write_spaces(
+            ["work"],
+            order=["project", "local", "remote", "work"],
+        )
+        self.assertEqual(
+            self._space_completion(
+                "ck", "space", "move", "",
+                env_extra={"CK_BIN": str(self.home / "removed" / "ck")},
+            ),
+            ["project", "local", "remote", "work"],
         )
 
     @unittest.skipUnless(ZSH, "zsh is not installed")
