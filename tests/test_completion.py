@@ -19,6 +19,11 @@ Coverage:
   valid options instead of repeating project names.
 - The Zsh script wires ``_ck_projects`` into the ``st`` positional and
   applies the same first-positional rule (Bash and Zsh symmetry).
+- ``ck completion --list-spaces`` follows the persisted ``spaces_order``
+  and includes the virtual ``project`` row plus built-in/custom spaces.
+  Both shells complete those names for ``ck space
+  move|swap|rename|delete``, filtering protected names (``project``,
+  built-ins) and the already-selected first operand of ``swap``.
 """
 
 from __future__ import annotations
@@ -37,6 +42,7 @@ from pathlib import Path
 from cklib import completion
 from cklib import config as ckconfig
 from cklib import registry as ckregistry
+from cklib import spaces
 from cklib.cli import main
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -55,6 +61,7 @@ class IsolatedRegistry(unittest.TestCase):
         self._orig = (
             ckconfig.GLOBAL_CONFIG_DIR,
             ckconfig.GLOBAL_REGISTRY_FILE,
+            ckconfig.GLOBAL_STATE_FILE,
             ckconfig.LEGACY_GLOBAL_CONFIG_FILE,
             ckregistry.GLOBAL_CONFIG_DIR,
             ckregistry.GLOBAL_REGISTRY_FILE,
@@ -65,6 +72,7 @@ class IsolatedRegistry(unittest.TestCase):
         new_legacy = self.home / ".ckrc"
         ckconfig.GLOBAL_CONFIG_DIR = new_dir
         ckconfig.GLOBAL_REGISTRY_FILE = new_file
+        ckconfig.GLOBAL_STATE_FILE = new_dir / "state.json"
         ckconfig.LEGACY_GLOBAL_CONFIG_FILE = new_legacy
         ckregistry.GLOBAL_CONFIG_DIR = new_dir
         ckregistry.GLOBAL_REGISTRY_FILE = new_file
@@ -73,6 +81,7 @@ class IsolatedRegistry(unittest.TestCase):
         def _restore() -> None:
             (ckconfig.GLOBAL_CONFIG_DIR,
              ckconfig.GLOBAL_REGISTRY_FILE,
+             ckconfig.GLOBAL_STATE_FILE,
              ckconfig.LEGACY_GLOBAL_CONFIG_FILE,
              ckregistry.GLOBAL_CONFIG_DIR,
              ckregistry.GLOBAL_REGISTRY_FILE,
@@ -83,10 +92,33 @@ class IsolatedRegistry(unittest.TestCase):
     def registry_file(self) -> Path:
         return ckconfig.GLOBAL_REGISTRY_FILE
 
+    @property
+    def state_file(self) -> Path:
+        return ckconfig.GLOBAL_STATE_FILE
+
+    @property
+    def spaces_dir(self) -> Path:
+        return ckconfig.GLOBAL_CONFIG_DIR / "spaces"
+
     def write_registry(self, projects: list) -> None:
         self.registry_file.parent.mkdir(parents=True, exist_ok=True)
         self.registry_file.write_text(
             json.dumps({"projects": projects}), encoding="utf-8")
+
+    def write_spaces(self, names: list, order=None) -> None:
+        """Create real space files and, optionally, a persisted order."""
+        self.spaces_dir.mkdir(parents=True, exist_ok=True)
+        for name in names:
+            (self.spaces_dir / f"{name}.md").write_text(
+                f"# {name}\n\n## Current Sprint\n\n## Completed\n",
+                encoding="utf-8",
+            )
+        if order is not None:
+            self.state_file.parent.mkdir(parents=True, exist_ok=True)
+            self.state_file.write_text(
+                json.dumps({"spaces_order": order}, indent=2),
+                encoding="utf-8",
+            )
 
 
 def _run_main(argv):
@@ -118,6 +150,7 @@ class TestCompletionScripts(unittest.TestCase):
         self.assertEqual(rc, 0, err)
         self.assertIn("complete -F _ck_completion ck", out)
         self.assertIn("ck completion --list-projects", out)
+        self.assertIn("ck completion --list-spaces", out)
         for cmd in ("st", "list", "dashboard", "add", "done", "completion"):
             self.assertIn(cmd, out)
         self.assertNotIn("Traceback", out)
@@ -128,7 +161,9 @@ class TestCompletionScripts(unittest.TestCase):
         self.assertIn("#compdef ck", out)
         self.assertIn("compdef _ck ck", out)
         self.assertIn("_ck_projects", out)
+        self.assertIn("_ck_spaces", out)
         self.assertIn("ck completion --list-projects", out)
+        self.assertIn("ck completion --list-spaces", out)
         self.assertNotIn("Traceback", out)
 
     @unittest.skipUnless(BASH, "bash is not installed")
@@ -273,6 +308,49 @@ class TestProjectNameListing(IsolatedRegistry):
 
 
 # ---------------------------------------------------------------------------
+# Spaces sequence -> space names
+# ---------------------------------------------------------------------------
+
+
+class TestSpaceNameListing(IsolatedRegistry):
+
+    def test_default_order_surfaces_project_builtins_and_custom(self):
+        self.write_spaces(["work"])
+        rc, out, err = _run_main(["completion", "--list-spaces"])
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(
+            out.splitlines(), ["project", "local", "remote", "work"])
+
+    def test_persisted_spaces_order_is_respected(self):
+        self.write_spaces(
+            ["work", "office"],
+            order=["project", "office", "local", "remote", "work"],
+        )
+        rc, out, err = _run_main(["completion", "--list-spaces"])
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(
+            out.splitlines(),
+            ["project", "office", "local", "remote", "work"],
+        )
+
+    def test_missing_state_is_silent_and_unmaterialized(self):
+        self.assertFalse(self.state_file.exists())
+        self.assertFalse(self.spaces_dir.exists())
+        rc, out, err = _run_main(["completion", "--list-spaces"])
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(out.splitlines(), ["project", "local", "remote"])
+        self.assertNotIn("Traceback", err)
+        self.assertFalse(self.state_file.exists())
+        self.assertFalse(self.spaces_dir.exists())
+
+    def test_list_space_names_never_raises(self):
+        from unittest import mock
+        with mock.patch.object(spaces, "space_order",
+                               side_effect=RuntimeError("boom")):
+            self.assertEqual(completion.list_space_names(), [])
+
+
+# ---------------------------------------------------------------------------
 # End-to-end shell behaviour (Bash)
 # ---------------------------------------------------------------------------
 
@@ -391,6 +469,37 @@ class TestBashCompletionBehaviour(_ShellHarness):
             self._complete(["ck", "st", "beta"]), ["beta project"])
 
     @unittest.skipUnless(BASH, "bash is not installed")
+    def test_space_management_completes_ordered_space_names(self):
+        self.write_spaces(
+            ["work", "office"],
+            order=["project", "office", "local", "remote", "work"],
+        )
+        ordered = ["project", "office", "local", "remote", "work"]
+
+        self.assertEqual(
+            self._complete(["ck", "space", "move", ""]), ordered)
+        self.assertEqual(
+            self._complete(["ck", "space", "swap", ""]), ordered)
+        # The virtual project cannot be renamed; built-ins remain valid
+        # old names for the current command semantics.
+        self.assertEqual(
+            self._complete(["ck", "space", "rename", ""]),
+            ["office", "local", "remote", "work"])
+        # Only custom spaces can be deleted: project + built-ins are
+        # protected by `ck space delete` pre-flight validation.
+        self.assertEqual(
+            self._complete(["ck", "space", "delete", ""]),
+            ["office", "work"])
+
+        # swap's second operand excludes the first one; prefix filtering
+        # still applies.
+        self.assertEqual(
+            self._complete(["ck", "space", "swap", "office", ""]),
+            ["project", "local", "remote", "work"])
+        self.assertEqual(
+            self._complete(["ck", "space", "delete", "o"]), ["office"])
+
+    @unittest.skipUnless(BASH, "bash is not installed")
     def test_missing_registry_still_completes_commands(self):
         self.assertFalse(self.registry_file.exists())
         replies = self._complete(["ck", ""])
@@ -453,6 +562,60 @@ class TestZshCompletionBehaviour(_ShellHarness):
         self.assertNotIn(project_spec, after_flag)
         self.assertTrue(
             any("show the global dashboard" in line for line in after_flag))
+
+    def _space_completion(self, *words) -> list:
+        """Run `_ck` for a `ck space …` line with mocked compsys."""
+        driver = self.home / "space-specs.zsh"
+        driver.write_text(
+            'compadd() {\n'
+            '    local -a arr\n'
+            '    while (( $# )); do\n'
+            '        case $1 in\n'
+            '            -a) arr=("${(@P)2}"); shift 2 ;;\n'
+            '            *) shift ;;\n'
+            '        esac\n'
+            '    done\n'
+            '    print -l -- "${arr[@]}"\n'
+            '}\n'
+            '_wanted() { shift 3; "$@" }\n'
+            '_describe() { :; }\n'
+            'source "$1"\n'
+            'shift\n'
+            'words=("$@")\n'
+            'CURRENT=${#words[@]}\n'
+            '_ck\n',
+            encoding="utf-8",
+        )
+        script = self._script("zsh")
+        result = subprocess.run(
+            [ZSH, str(driver), str(script), *words],
+            capture_output=True, text=True, env=self._env(),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        return result.stdout.splitlines()
+
+    @unittest.skipUnless(ZSH, "zsh is not installed")
+    def test_space_management_completes_ordered_space_names(self):
+        self.write_spaces(
+            ["work", "office"],
+            order=["project", "office", "local", "remote", "work"],
+        )
+        ordered = ["project", "office", "local", "remote", "work"]
+
+        self.assertEqual(
+            self._space_completion("ck", "space", "move", ""), ordered)
+        self.assertEqual(
+            self._space_completion("ck", "space", "swap", ""), ordered)
+        self.assertEqual(
+            self._space_completion("ck", "space", "rename", ""),
+            ["office", "local", "remote", "work"])
+        self.assertEqual(
+            self._space_completion("ck", "space", "delete", ""),
+            ["office", "work"])
+        self.assertEqual(
+            self._space_completion("ck", "space", "swap", "office", ""),
+            ["project", "local", "remote", "work"])
 
     @unittest.skipUnless(ZSH, "zsh is not installed")
     def test_projects_are_parsed_from_registry_mock(self):

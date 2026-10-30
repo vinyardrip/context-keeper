@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.8.16-blue)]()
+[![version](https://img.shields.io/badge/version-0.8.17-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -103,7 +103,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.8.16
+ck -v    # → ck version 0.8.17
 ```
 
 ---
@@ -217,7 +217,7 @@ hierarchy; the active project in `ck space list` is bold cyan. With
 / `>> NEXT` context triad plus its process notes — the same verbose
 treatment registered projects get, and the compact table is not repeated
 above the cards.
-| ck completion bash\|zsh | Print the matching shell completion script to STDOUT: `eval "$(ck completion zsh)"`. Completions cover the core commands plus the registered project names read from `~/.config/ck/projects.json`; `ck st <TAB>` and `ck list <TAB>` both suggest projects. `ck st` accepts the project as its first positional only, so after a project name or a flag (`ck st alpha <TAB>`, `ck st -l <TAB>`) it switches to valid flags/options. A missing, empty or unreadable registry simply yields no project names (never a traceback) |
+| ck completion bash\|zsh | Print the matching shell completion script to STDOUT: `eval "$(ck completion zsh)"`. Completions cover the core commands plus registered project names (`~/.config/ck/projects.json`) and space names for `ck space move|swap|rename|delete` (from the persisted `spaces_order`). `ck st <TAB>` / `ck list <TAB>` suggest projects; after the `st` project or a flag, completion switches to valid flags/options. Space completion keeps the sequence order and filters protected contexts (`project` for rename/delete, built-ins for delete) plus the first `swap` operand. A missing, empty or unreadable source simply yields no names (never a traceback) |
 | ck info | Installation diagnostics (version, branch, paths) |
 | ck install | Copy ck to ~/.local/bin/ck (physical executable file, no symlink) + cklib snapshot to ~/.local/share/ck; no sudo |
 | ck uninstall | Remove ~/.local/bin/ck, the cklib snapshot and any legacy ~/.local/bin/ck-dev |
@@ -300,13 +300,21 @@ ck st <TAB>              # registered project names
 ck list <TAB>            # registered project names
 ck st alpha <TAB>        # flags: -l, -e, -g, --all
 ck st -l <TAB>           # flags only, no duplicate project names
+
+ck space move <TAB>      # project, built-ins, custom spaces (spaces_order)
+ck space swap <TAB>      # same sequence; second pick excludes the first
+ck space rename <TAB>    # existing spaces, project filtered out
+ck space delete <TAB>    # custom spaces only; project/local/remote filtered
 ```
 
-The registry read is lock-guarded like every other `ck` registry access, and a
-missing, empty or unreadable registry degrades to plain command completion —
-no traceback, no noise in the prompt. After `ck update` re-installs the
-launcher, re-source the line (or open a new shell) to pick up the latest
-script.
+Space completion follows the **persisted `spaces_order`** from
+`~/.config/ck/state.json`, so suggestions match `ck space list` exactly. The
+virtual `project` row is surfaced for `move` / `swap` but filtered from
+`rename` / `delete`; `delete` also hides the protected built-ins
+(`local` / `remote`). A missing, empty or unreadable state file or registry
+degrades to plain command completion — no traceback, no noise in the prompt.
+After `ck update` re-installs the launcher, re-source the line (or open a new
+shell) to pick up the latest script.
 
 ### Initialization & Registration
 

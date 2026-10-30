@@ -111,8 +111,10 @@ Shell completion:
                              eval "$(ck completion zsh)"
                              Scripts complete the core commands plus the
                              registered project names (from
-                             ~/.config/ck/projects.json); a missing or
-                             unreadable registry degrades to no names
+                             ~/.config/ck/projects.json) and space names
+                             for `ck space move|swap|rename|delete`
+                             (from the persisted spaces_order); missing
+                             or unreadable sources degrade to no names
 
 Global (all registered projects):
   dashboard                  Cross-project dashboard (compact table)
@@ -428,6 +430,10 @@ def build_parser() -> "argparse.ArgumentParser":
         "--list-projects", dest="list_projects", action="store_true",
         help="Internal: print registered project names one per line "
              "(used by the generated completion scripts)")
+    p_completion.add_argument(
+        "--list-spaces", dest="list_spaces", action="store_true",
+        help="Internal: print space names in the persisted sequence one "
+             "per line (used by the generated completion scripts)")
 
     p_space = sub.add_parser(
         "space", help="Manage global spaces (list/create/rename/delete)")
@@ -599,7 +605,7 @@ _LEGACY_FLAGS: dict[str, frozenset] = {
     "prune": frozenset(),
     "local": frozenset(),
     "remote": frozenset(),
-    "completion": frozenset({"--list-projects"}),
+    "completion": frozenset({"--list-projects", "--list-spaces"}),
     "install": frozenset({"--dev"}),
     "uninstall": frozenset(),
     "update": frozenset(),
@@ -1032,6 +1038,8 @@ def _dispatch(argv: Optional[List[str]] = None) -> int:
             rest = [args.shell] if args.shell else []
             if getattr(args, "list_projects", False):
                 rest.insert(0, "--list-projects")
+            if getattr(args, "list_spaces", False):
+                rest.insert(0, "--list-spaces")
             return _run_completion(rest)
         elif args.command == "prune":
             pruned = ck.prune()
@@ -2172,24 +2180,36 @@ def _run_space_command(space: str, rest: List[str]) -> int:
 # ---------------------------------------------------------------------- #
 
 def _run_completion(rest: List[str]) -> int:
-    """Print a shell completion script, or the registry's project names.
+    """Print a shell completion script, or dynamic completion names.
 
     ``ck completion bash`` / ``ck completion zsh`` write the script to
     STDOUT (so ``eval "$(ck completion zsh)"`` just works).
 
-    ``ck completion --list-projects`` is the internal helper the
-    generated scripts call on every TAB: one registered project name
-    per line, an empty output when nothing is registered, and NEVER a
-    traceback or diagnostic — completion must not pollute the prompt.
-    The registry read itself is thread/process-safe (``*.lock``) via
-    :func:`cklib.registry.list_projects`.
+    ``ck completion --list-projects`` emits one registered project per
+    line; ``--list-spaces`` emits the current space sequence (including
+    the virtual ``project`` row) in persisted ``spaces_order``. Both
+    are internal helpers the generated scripts call on TAB: empty
+    output when nothing exists, and NEVER a traceback or diagnostic —
+    completion must not pollute the prompt. The project read is
+    thread/process-safe (``*.lock``) via
+    :func:`cklib.registry.list_projects`; the space read is a pure
+    reconciliation of the persisted sequence.
     """
-    from .completion import SUPPORTED_SHELLS, list_project_names, script_for
+    from .completion import (
+        SUPPORTED_SHELLS,
+        list_project_names,
+        list_space_names,
+        script_for,
+    )
 
     positions: List[str] = []
     for token in rest:
         if token == "--list-projects":
             for name in list_project_names():
+                print(name)
+            return 0
+        if token == "--list-spaces":
+            for name in list_space_names():
                 print(name)
             return 0
         if token.startswith("-") and token != "-":

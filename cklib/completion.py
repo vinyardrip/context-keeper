@@ -22,6 +22,15 @@ a torn file. A missing, empty, unreadable or corrupt registry simply
 yields no names; the helper never raises and never prints a traceback
 (the shell side also discards stderr, so a broken registry can never
 spray diagnostics into the prompt).
+
+SPACE NAME SOURCE: ``ck completion --list-spaces`` emits the current
+space sequence from :func:`cklib.spaces.space_order` — the persisted
+``spaces_order`` reconciled with the spaces that actually exist. The
+virtual ``project`` row and the built-ins are included in that order;
+the generated scripts filter protected names for ``rename`` / ``delete``
+and exclude the already-chosen space from the second ``swap`` operand.
+Like the project source, the helper degrades to an empty list on any
+failure and never creates config files.
 """
 
 from __future__ import annotations
@@ -113,6 +122,44 @@ def list_project_names() -> List[str]:
     return names
 
 
+def list_space_names() -> List[str]:
+    """Space names in the current sequence — never raises.
+
+    Reads :func:`cklib.spaces.space_order` with the virtual
+    ``project`` row included, so the result follows the persisted
+    ``spaces_order`` (``~/.config/ck/state.json``) when present and
+    falls back to the canonical default otherwise. Built-ins and
+    custom spaces are included; the generated scripts apply the
+    per-subcommand filtering (``project`` for ``rename``, protected
+    built-ins for ``delete``, the first operand for ``swap``).
+
+    A missing, unreadable or corrupt state file, a broken spaces tree
+    or any other failure degrades to an empty list. Lock files and
+    config directories are never created by a mere TAB press.
+    """
+    try:
+        from .spaces import space_order
+
+        order = space_order(include_project=True)
+    except Exception:
+        # Completion must degrade, never fail the prompt. Broad on
+        # purpose: OSError, malformed state, broken sandbox paths and
+        # unexpected registry shapes are all "no suggestions".
+        return []
+
+    names: List[str] = []
+    seen = set()
+    for item in order:
+        if not isinstance(item, str):
+            continue
+        name = item.strip()
+        if not name or "\n" in name or "\r" in name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
+
+
 def _bash_commands() -> str:
     return " ".join(name for name, _ in COMPLETION_COMMANDS)
 
@@ -180,9 +227,10 @@ _BASH_SCRIPT = r"""# ck shell completion for Bash
 #
 # Registered project names come from the global registry
 # (~/.config/ck/projects.json), read through `ck completion
-# --list-projects`. A missing, empty or unreadable registry simply
-# yields no project suggestions; stderr is discarded so a broken
-# registry can never spray diagnostics into the prompt.
+# --list-projects`. Space names come from the persisted `spaces_order`
+# (~/.config/ck/state.json) via `ck completion --list-spaces`. Missing,
+# empty or unreadable sources simply yield no suggestions; stderr is
+# discarded so they can never spray diagnostics into the prompt.
 
 _ck_completion() {
     local cur prev cmd
@@ -243,6 +291,53 @@ _ck_completion() {
         space)
             if [ "$COMP_CWORD" -eq 2 ]; then
                 COMPREPLY=( $(compgen -W "list create rename move swap reorder delete" -- "$cur") )
+                return 0
+            fi
+            # SPACE ARGUMENTS: move / rename / delete take a space as
+            # their FIRST argument; swap takes two. Names come from the
+            # persisted spaces_order and keep that exact sequence.
+            local __ck_action="${COMP_WORDS[2]}"
+            local __ck_expect=0
+            local __ck_skip=""
+            case "$__ck_action" in
+                move|rename)
+                    if [ "$COMP_CWORD" -eq 3 ]; then
+                        __ck_expect=1
+                    fi
+                    ;;
+                swap)
+                    if [ "$COMP_CWORD" -eq 3 ]; then
+                        __ck_expect=1
+                    elif [ "$COMP_CWORD" -eq 4 ]; then
+                        __ck_expect=1
+                        __ck_skip="${COMP_WORDS[3]}"
+                    fi
+                    ;;
+                delete)
+                    if [ "$COMP_CWORD" -eq 3 ]; then
+                        __ck_expect=1
+                    fi
+                    ;;
+            esac
+            if [ "$__ck_expect" -eq 1 ]; then
+                while IFS= read -r __ck_line; do
+                    if [ -z "$__ck_line" ]; then
+                        continue
+                    fi
+                    # `project` is virtual and cannot be renamed or
+                    # deleted; local/remote are protected built-ins.
+                    case "$__ck_action:$__ck_line" in
+                        rename:project|delete:project|delete:local|delete:remote)
+                            continue
+                            ;;
+                    esac
+                    if [ -n "$__ck_skip" ] && [ "$__ck_line" = "$__ck_skip" ]; then
+                        continue
+                    fi
+                    case "$__ck_line" in
+                        "$cur"*) COMPREPLY+=("$__ck_line") ;;
+                    esac
+                done < <(command ck completion --list-spaces 2>/dev/null)
             fi
             ;;
         local|remote)
@@ -276,15 +371,37 @@ _ZSH_SCRIPT = r"""#compdef ck
 #
 # Registered project names come from the global registry
 # (~/.config/ck/projects.json), read through `ck completion
-# --list-projects`. A missing, empty or unreadable registry simply
-# yields no project suggestions; stderr is discarded so a broken
-# registry can never spray diagnostics into the prompt.
+# --list-projects`. Space names come from the persisted `spaces_order`
+# (~/.config/ck/state.json) via `ck completion --list-spaces`. Missing,
+# empty or unreadable sources simply yield no suggestions; stderr is
+# discarded so they can never spray diagnostics into the prompt.
 
 _ck_projects() {
     local -a projects
     projects=(${(f)"$(command ck completion --list-projects 2>/dev/null)"})
     (( ${#projects} )) || return 0
     _wanted projects expl 'registered project' compadd -a projects
+}
+
+_ck_spaces() {
+    local -a spaces kept
+    local candidate skip_name
+    local -i keep
+    spaces=(${(f)"$(command ck completion --list-spaces 2>/dev/null)"})
+    for candidate in "${spaces[@]}"; do
+        keep=1
+        for skip_name in "$@"; do
+            if [[ "$candidate" == "$skip_name" ]]; then
+                keep=0
+                break
+            fi
+        done
+        if (( keep )); then
+            kept+=("$candidate")
+        fi
+    done
+    (( ${#kept} )) || return 0
+    _wanted spaces expl 'space' compadd -a kept
 }
 
 _ck_commands() {
@@ -341,7 +458,35 @@ _ck() {
                     'delete:delete a space and its notes'
                 )
                 _describe -t actions 'space action' actions
+                return
             fi
+            # SPACE ARGUMENTS follow the persisted spaces_order. The
+            # virtual `project` cannot be renamed/deleted, local/remote
+            # are protected built-ins, and swap excludes its first pick.
+            case $words[3] in
+                move)
+                    if (( CURRENT == 4 )); then
+                        _ck_spaces
+                    fi
+                    ;;
+                rename)
+                    if (( CURRENT == 4 )); then
+                        _ck_spaces project
+                    fi
+                    ;;
+                swap)
+                    if (( CURRENT == 4 )); then
+                        _ck_spaces
+                    elif (( CURRENT == 5 )); then
+                        _ck_spaces "$words[4]"
+                    fi
+                    ;;
+                delete)
+                    if (( CURRENT == 4 )); then
+                        _ck_spaces project local remote
+                    fi
+                    ;;
+            esac
             ;;
         local|remote)
             if (( CURRENT == 3 )); then
@@ -370,6 +515,7 @@ __all__ = [
     "SUPPORTED_SHELLS",
     "bash_script",
     "list_project_names",
+    "list_space_names",
     "script_for",
     "zsh_script",
 ]
