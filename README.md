@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.8.15-blue)]()
+[![version](https://img.shields.io/badge/version-0.8.16-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -103,7 +103,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.8.15
+ck -v    # → ck version 0.8.16
 ```
 
 ---
@@ -217,7 +217,7 @@ hierarchy; the active project in `ck space list` is bold cyan. With
 / `>> NEXT` context triad plus its process notes — the same verbose
 treatment registered projects get, and the compact table is not repeated
 above the cards.
-| ck completion bash\|zsh | Print the matching shell completion script to STDOUT: `eval "$(ck completion zsh)"`. Completions cover the core commands plus the registered project names read from `~/.config/ck/projects.json`; a missing, empty or unreadable registry simply yields no project names (never a traceback) |
+| ck completion bash\|zsh | Print the matching shell completion script to STDOUT: `eval "$(ck completion zsh)"`. Completions cover the core commands plus the registered project names read from `~/.config/ck/projects.json`; `ck st <TAB>` and `ck list <TAB>` both suggest projects. `ck st` accepts the project as its first positional only, so after a project name or a flag (`ck st alpha <TAB>`, `ck st -l <TAB>`) it switches to valid flags/options. A missing, empty or unreadable registry simply yields no project names (never a traceback) |
 | ck info | Installation diagnostics (version, branch, paths) |
 | ck install | Copy ck to ~/.local/bin/ck (physical executable file, no symlink) + cklib snapshot to ~/.local/share/ck; no sudo |
 | ck uninstall | Remove ~/.local/bin/ck, the cklib snapshot and any legacy ~/.local/bin/ck-dev |
@@ -290,11 +290,23 @@ eval "$(ck completion zsh)"
 The scripts complete the core navigation commands and, most importantly, the
 **registered project names**: `ck <TAB>`, `ck st <TAB>` and `ck list <TAB>`
 suggest projects from `~/.config/ck/projects.json` immediately, with no second
-lookup. The registry read is lock-guarded like every other `ck` registry
-access, and a missing, empty or unreadable registry degrades to plain command
-completion — no traceback, no noise in the prompt. After `ck update`
-re-installs the launcher, re-source the line (or open a new shell) to pick up
-the latest script.
+lookup. `ck st` treats the project as its **first positional**: once a project
+name or a flag is present, completion switches to valid flags/options instead
+of repeating project names.
+
+```text
+ck <TAB>                 # commands + registered project names
+ck st <TAB>              # registered project names
+ck list <TAB>            # registered project names
+ck st alpha <TAB>        # flags: -l, -e, -g, --all
+ck st -l <TAB>           # flags only, no duplicate project names
+```
+
+The registry read is lock-guarded like every other `ck` registry access, and a
+missing, empty or unreadable registry degrades to plain command completion —
+no traceback, no noise in the prompt. After `ck update` re-installs the
+launcher, re-source the line (or open a new shell) to pick up the latest
+script.
 
 ### Initialization & Registration
 

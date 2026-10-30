@@ -9,7 +9,9 @@ The generated scripts are deliberately small and navigation-focused:
 the top-level completion offers the core commands plus the registered
 project names, and the commands that accept a project target
 (``ck st <project>`` / ``ck list <project>`` / ``ck unregister
-<project>``) complete project names.
+<project>``) complete project names. ``ck st`` accepts exactly one
+positional project: after a project name or flag is present, both
+shells switch to valid flags/options instead of repeating projects.
 
 PROJECT NAME SOURCE: the scripts never parse JSON themselves. They
 call ``ck completion --list-projects``, which reads the global registry
@@ -211,7 +213,11 @@ _ck_completion() {
     cmd="${COMP_WORDS[1]}"
     case "$cmd" in
         st)
-            if [[ "$cur" == -* ]]; then
+            # PROJECT NAME IS THE FIRST (AND ONLY) POSITIONAL. Once any
+            # argument after `st` exists — a project name or a flag such
+            # as -l / -e / -g / --all — there is nothing left to name:
+            # switch to the valid options instead of repeating projects.
+            if [[ "$cur" == -* ]] || [ "$COMP_CWORD" -gt 2 ]; then
                 COMPREPLY=( $(compgen -W "-l --list -e --edit -g --global --all" -- "$cur") )
             else
                 for __ck_name in "${__ck_projects[@]}"; do
@@ -299,12 +305,20 @@ _ck() {
 
     case $words[2] in
         st)
-            _arguments \
-                '(-l --list)'{-l,--list}'[print the task list]' \
-                '(-e --edit)'{-e,--edit}'[open PLAN.md in the editor]' \
-                '(-g --global)'{-g,--global}'[show the global dashboard]' \
-                '--all[include the full PLAN.md]' \
-                '1:registered project:_ck_projects'
+            local -a specs
+            specs=(
+                '(-l --list)'{-l,--list}'[print the task list]'
+                '(-e --edit)'{-e,--edit}'[open PLAN.md in the editor]'
+                '(-g --global)'{-g,--global}'[show the global dashboard]'
+                '--all[include the full PLAN.md]'
+            )
+            # The project is the FIRST (and only) positional. After a
+            # project name or a flag is present, offer options only —
+            # never duplicate the project list.
+            if (( CURRENT == 3 )); then
+                specs+=('1:registered project:_ck_projects')
+            fi
+            _arguments "${specs[@]}"
             ;;
         list|unregister)
             _ck_projects

@@ -14,9 +14,11 @@ Coverage:
   lock file is created by a completion probe).
 - The generated Bash script really parses names out of the registry
   mock and completes them for ``ck <TAB>``, ``ck st <TAB>`` and
-  ``ck list <TAB>``.
-- The Zsh helper (``_ck_projects``) feeds the parsed names into the
-  completion system (``compadd``).
+  ``ck list <TAB>``. ``ck st`` accepts the project as its first
+  positional only: after a project name or a flag it switches to
+  valid options instead of repeating project names.
+- The Zsh script wires ``_ck_projects`` into the ``st`` positional and
+  applies the same first-positional rule (Bash and Zsh symmetry).
 """
 
 from __future__ import annotations
@@ -355,6 +357,32 @@ class TestBashCompletionBehaviour(_ShellHarness):
             sorted(self._complete(["ck", "list", ""])), ["alpha", "beta"])
 
     @unittest.skipUnless(BASH, "bash is not installed")
+    def test_st_projects_then_flags_after_first_positional(self):
+        self.write_registry([
+            _entry("alpha", "/tmp/alpha", "2026-10-01T00:00:00+00:00"),
+            _entry("beta", "/tmp/beta", "2026-10-02T00:00:00+00:00"),
+        ])
+        # `ck st <TAB>` is project completion, exactly like `ck list`.
+        self.assertEqual(
+            sorted(self._complete(["ck", "st", ""])), ["alpha", "beta"])
+        self.assertEqual(
+            sorted(self._complete(["ck", "list", ""])), ["alpha", "beta"])
+
+        # A project name already consumed the only positional: flags.
+        after_project = self._complete(["ck", "st", "alpha", ""])
+        self.assertIn("-l", after_project)
+        self.assertIn("--all", after_project)
+        self.assertNotIn("alpha", after_project)
+        self.assertNotIn("beta", after_project)
+
+        # A flag also consumes the positional slot: keep offering flags,
+        # never duplicate project names.
+        after_flag = self._complete(["ck", "st", "-l", ""])
+        self.assertIn("-g", after_flag)
+        self.assertNotIn("alpha", after_flag)
+        self.assertNotIn("beta", after_flag)
+
+    @unittest.skipUnless(BASH, "bash is not installed")
     def test_space_names_with_spaces_survive(self):
         self.write_registry([
             _entry("beta project", "/tmp/beta", "2026-10-02T00:00:00+00:00"),
@@ -375,6 +403,56 @@ class TestBashCompletionBehaviour(_ShellHarness):
 
 
 class TestZshCompletionBehaviour(_ShellHarness):
+
+    def _st_arguments(self, *words) -> list:
+        """Run the generated `_ck` for `words`, returning `_arguments`
+        specs. The mock isolates the positional/option wiring from a
+        full compsys session."""
+        driver = self.home / "st-specs.zsh"
+        driver.write_text(
+            '_arguments() {\n'
+            '    local arg\n'
+            '    for arg in "$@"; do\n'
+            '        print -r -- "$arg"\n'
+            '    done\n'
+            '}\n'
+            'source "$1"\n'
+            'shift\n'
+            'words=("$@")\n'
+            'CURRENT=${#words[@]}\n'
+            '_ck\n',
+            encoding="utf-8",
+        )
+        script = self._script("zsh")
+        result = subprocess.run(
+            [ZSH, str(driver), str(script), *words],
+            capture_output=True, text=True, env=self._env(),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        return result.stdout.splitlines()
+
+    @unittest.skipUnless(ZSH, "zsh is not installed")
+    def test_st_projects_then_flags_after_first_positional(self):
+        self.write_registry([
+            _entry("alpha", "/tmp/alpha", "2026-10-01T00:00:00+00:00"),
+            _entry("beta", "/tmp/beta", "2026-10-02T00:00:00+00:00"),
+        ])
+        project_spec = "1:registered project:_ck_projects"
+
+        fresh = self._st_arguments("ck", "st", "")
+        self.assertIn(project_spec, fresh)
+        self.assertTrue(any("print the task list" in line for line in fresh))
+
+        after_project = self._st_arguments("ck", "st", "alpha", "")
+        self.assertNotIn(project_spec, after_project)
+        self.assertTrue(
+            any("print the task list" in line for line in after_project))
+
+        after_flag = self._st_arguments("ck", "st", "-l", "")
+        self.assertNotIn(project_spec, after_flag)
+        self.assertTrue(
+            any("show the global dashboard" in line for line in after_flag))
 
     @unittest.skipUnless(ZSH, "zsh is not installed")
     def test_projects_are_parsed_from_registry_mock(self):
