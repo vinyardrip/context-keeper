@@ -468,8 +468,24 @@ __CK_COMMAND_ENTRIES__
     _describe -t commands 'ck command' commands
 }
 
+_ck_command() {
+    # Command position (`ck<TAB>`) is completed through `-command-`,
+    # not through `_ck`, and the default `_command_names` would expose
+    # every ck* file in the working directory. Pin the exact word to
+    # `ck`; other prefixes keep the ordinary command-name list.
+    if [[ $PREFIX == ck ]]; then
+        compadd -- ck
+        return
+    fi
+    _command_names
+}
+
 _ck() {
     local -a actions
+    if (( CURRENT == 1 )); then
+        compadd -- ck
+        return
+    fi
     if (( CURRENT == 2 )); then
         _ck_commands
         _ck_projects
@@ -478,7 +494,7 @@ _ck() {
 
     case $words[2] in
         st)
-            local -a specs
+            local -a specs options
             specs=(
                 '(-l --list)'{-l,--list}'[print the task list]'
                 '(-e --edit)'{-e,--edit}'[open PLAN.md in the editor]'
@@ -490,10 +506,30 @@ _ck() {
             # argument 2 even though it is completed at CURRENT == 3.
             # After a project name or a flag is present, offer options
             # only — never duplicate the project list.
-            if (( CURRENT == 3 )); then
+            local -i used_l=0 used_e=0 used_g=0 used_all=0 i
+            for (( i = 3; i < CURRENT; i++ )); do
+                case $words[i] in
+                    -l|--list) used_l=1 ;;
+                    -e|--edit) used_e=1 ;;
+                    -g|--global) used_g=1 ;;
+                    --all) used_all=1 ;;
+                esac
+            done
+            if (( CURRENT == 3 )) && [[ $PREFIX != -* ]]; then
                 specs+=('2:registered project:_ck_projects')
             fi
-            _arguments "${specs[@]}"
+            # A trailing catch-all keeps the option table valid after a
+            # consumed positional/flag: `_arguments` leaves the rest in
+            # `st_rest`, where every still-unused flag is offered.
+            specs+=('*: :->st_rest')
+            _arguments -s "${specs[@]}"
+            if [[ $state == st_rest && -z $PREFIX ]]; then
+                (( used_l )) || options+=(-l --list)
+                (( used_e )) || options+=(-e --edit)
+                (( used_g )) || options+=(-g --global)
+                (( used_all )) || options+=(--all)
+                compadd -a options
+            fi
             ;;
         list|unregister)
             _ck_projects
@@ -569,6 +605,7 @@ __CK_SPACE_ACTION_ENTRIES__
 
 if (( $+functions[compdef] )); then
     compdef _ck ck
+    compdef _ck_command -command-
 fi
 """
 

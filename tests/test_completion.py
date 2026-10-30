@@ -18,7 +18,10 @@ Coverage:
   positional only: after a project name or a flag it switches to
   valid options instead of repeating project names.
 - The Zsh script wires ``_ck_projects`` into the ``st`` positional and
-  applies the same first-positional rule (Bash and Zsh symmetry).
+  applies the same first-positional rule (Bash and Zsh symmetry). After a
+  consumed project or flag the ``st_rest`` state re-offers every unused
+  flag, and ``ck<TAB>`` at command position is pinned to ``ck`` through a
+  ``-command-`` wrapper (never the cwd filename fallback).
 - ``ck completion --list-spaces`` follows the persisted ``spaces_order``
   and includes the virtual ``project`` row plus built-in/custom spaces.
   Both shells complete those names for ``ck space
@@ -635,6 +638,127 @@ class TestZshCompletionBehaviour(_ShellHarness):
         self.assertNotIn(project_spec, after_flag)
         self.assertTrue(
             any("show the global dashboard" in line for line in after_flag))
+
+    def _st_rest_options(self, *words) -> list:
+        """Run ``_ck`` for ``st`` with ``_arguments`` reporting ``st_rest``.
+
+        This isolates the generated flag-refresh logic from a full compsys
+        session: after a consumed positional/flag the trailing catch-all
+        sets the state, then `_ck` must re-offer the unused flags.
+        """
+        driver = self.home / "st-rest.zsh"
+        driver.write_text(
+            'compadd() {\n'
+            '    local -a arr\n'
+            '    while (( $# )); do\n'
+            '        case $1 in\n'
+            '            -a) arr=("${(@P)2}"); shift 2 ;;\n'
+            '            *) shift ;;\n'
+            '        esac\n'
+            '    done\n'
+            '    print -l -- "${arr[@]}"\n'
+            '}\n'
+            '_arguments() { state=st_rest }\n'
+            'source "$1"\n'
+            'shift\n'
+            'words=("$@")\n'
+            'CURRENT=${#words[@]}\n'
+            'PREFIX=\n'
+            '_ck\n',
+            encoding="utf-8",
+        )
+        script = self._script("zsh")
+        result = subprocess.run(
+            [ZSH, str(driver), str(script), *words],
+            capture_output=True, text=True, env=self._env(),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        return result.stdout.splitlines()
+
+    @unittest.skipUnless(ZSH, "zsh is not installed")
+    def test_zsh_st_flags_after_positional(self):
+        """`ck st alpha <TAB>` must offer flags, not fall through to empty."""
+        script = self._script("zsh").read_text(encoding="utf-8")
+        self.assertIn("st_rest", script)
+        self.assertIn('_arguments -s "${specs[@]}"', script)
+        self.assertEqual(
+            self._st_rest_options("ck", "st", "alpha", ""),
+            ["-l", "--list", "-e", "--edit", "-g", "--global", "--all"],
+        )
+
+    @unittest.skipUnless(ZSH, "zsh is not installed")
+    def test_zsh_st_flags_after_flag(self):
+        """`ck st -l <TAB>` must offer the unused flags, never `--list`."""
+        self.assertEqual(
+            self._st_rest_options("ck", "st", "-l", ""),
+            ["-e", "--edit", "-g", "--global", "--all"],
+        )
+        self.assertEqual(
+            self._st_rest_options("ck", "st", "--all", ""),
+            ["-l", "--list", "-e", "--edit", "-g", "--global"],
+        )
+
+    @unittest.skipUnless(ZSH, "zsh is not installed")
+    def test_zsh_current_1_is_ck_only(self):
+        """`ck<TAB>` must not fall through to filename completion."""
+        script = self._script("zsh").read_text(encoding="utf-8")
+        self.assertIn("if (( CURRENT == 1 )); then", script)
+        self.assertIn("compadd -- ck", script)
+        self.assertIn("compdef _ck_command -command-", script)
+
+        driver = self.home / "command-name.zsh"
+        driver.write_text(
+            'compadd() {\n'
+            '    while (( $# )); do\n'
+            '        case $1 in\n'
+            '            --) shift; break ;;\n'
+            '            -*) shift ;;\n'
+            '            *) break ;;\n'
+            '        esac\n'
+            '    done\n'
+            '    print -l -- "$@"\n'
+            '}\n'
+            '_command_names() { print -l -- ck-clean ck-dev cklib cksum }\n'
+            'source "$1"\n'
+            'PREFIX=ck\n'
+            '_ck_command\n',
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [ZSH, str(driver), str(self._script("zsh"))],
+            capture_output=True, text=True, env=self._env(),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["ck"])
+
+        driver.write_text(
+            'compadd() {\n'
+            '    local -a skipped\n'
+            '    while (( $# )); do\n'
+            '        case $1 in\n'
+            '            --) shift; skipped+=("$@"); break ;;\n'
+            '            -*) shift ;;\n'
+            '            *) skipped+=("$1"); shift ;;\n'
+            '        esac\n'
+            '    done\n'
+            '    print -l -- "${skipped[@]}"\n'
+            '}\n'
+            '_command_names() { print -l -- ck-clean ck-dev cklib cksum }\n'
+            'source "$1"\n'
+            'PREFIX=ck-\n'
+            '_ck_command\n',
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [ZSH, str(driver), str(self._script("zsh"))],
+            capture_output=True, text=True, env=self._env(),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.splitlines(),
+            ["ck-clean", "ck-dev", "cklib", "cksum"],
+        )
 
     def _space_completion(self, *words, env_extra=None) -> list:
         """Run `_ck` for a `ck space …` line with mocked compsys."""

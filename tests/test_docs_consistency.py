@@ -1,6 +1,6 @@
 """Documentation consistency: version bump and roadmap hygiene.
 
-Guards the v0.8.21 documentation cleanup:
+Guards the v0.8.22 documentation cleanup:
 
 - every version source agrees (package, pyproject, README, ROADMAP);
 - completed features (Shell Completion) never reappear in the
