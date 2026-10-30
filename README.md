@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.8.22-blue)]()
+[![version](https://img.shields.io/badge/version-0.9.0-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -51,7 +51,7 @@ Context Keeper (ck) acts as a bridge between your brain, AI agents, and Git, per
 - Fail-Closed Locking: Cross-process file locking guards registry, PLAN.md, HISTORY.md and state.json writes
 - Full Plan View: ck st --all
 - Dev Sandbox: `ck-dev` runs any command against real project data read-only, redirecting all writes into a git-ignored `.sandbox/` (`ck-clean` resets it); global spaces are strictly isolated under `.sandbox/config/spaces/`; `ck-dev sandbox setup` builds a disposable mock environment with bulk test data; entry keeps `ROADMAP.md -> .ck/PLAN.md` safely symlinked
-- Shell Completion: `ck completion bash|zsh` for commands, flags, registered projects and global spaces (Zsh pins `ck<TAB>` to `ck`, no filename fallback; honors an executable `CK_BIN`)
+- Shell Completion: `ck completion bash|zsh` for commands, flags, registered projects and global spaces (Zsh shows the menu on the FIRST `<TAB>` at every position, pins `ck<TAB>` to `ck` without filename fallback, and honors an executable `CK_BIN`)
 
 ---
 
@@ -104,7 +104,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.8.22
+ck -v    # → ck version 0.9.0
 ```
 
 ---
@@ -225,7 +225,7 @@ hierarchy; the active project in `ck space list` is bold cyan. With
 / `>> NEXT` context triad plus its process notes — the same verbose
 treatment registered projects get, and the compact table is not repeated
 above the cards.
-| ck completion bash\|zsh | Print the matching shell completion script to STDOUT: `eval "$(ck completion zsh)"`. Completions cover the core commands plus registered project names (`~/.config/ck/projects.json`) and space names for `ck space move|swap|rename|delete` (from the persisted `spaces_order`). `ck st <TAB>` / `ck list <TAB>` suggest projects; after the `st` project or a flag, completion switches to valid flags/options. Space completion keeps the sequence order and filters protected contexts (`project` for rename/delete, built-ins for delete) plus the first `swap` operand. A per-call `_ck_bin` resolver prefers an executable `CK_BIN` (a `ck-dev` session exports its local launcher) and falls back to the `ck` on `PATH`; top-level completion never falls back to filenames. A missing, empty or unreadable source simply yields no names (never a traceback) |
+| ck completion bash\|zsh | Print the matching shell completion script to STDOUT: `eval "$(ck completion zsh)"`. Completions cover the core commands and the registered project names; in Zsh every global space (`ck <TAB>`, `ck <space> <TAB>`) (`~/.config/ck/projects.json`); space names for `ck space move|swap|rename|delete` follow the persisted `spaces_order`. Zsh shows the menu on the FIRST `<TAB>` at every multi-match position, `ck st <project> <TAB>` / `ck st -l <TAB>` offer the unused flags, and protected contexts are filtered (`project` for rename/delete, built-ins for delete, the first `swap` operand). A per-call `_ck_bin` resolver prefers an executable `CK_BIN` (a `ck-dev` session exports its local launcher) and falls back to the `ck` on `PATH`; top-level completion never falls back to filenames. A missing, empty or unreadable source simply yields no names (never a traceback) |
 | ck info | Installation diagnostics (version, branch, paths, `launcher_path`) plus an accurate `install_mode`: `symlink (one-liner tree)`, `physical copy` after `ck install`, or `standalone/dev launcher` for a direct checkout |
 | ck install | Copy ck to ~/.local/bin/ck (physical executable file, no symlink) + cklib snapshot to ~/.local/share/ck; no sudo |
 | ck uninstall | Remove ~/.local/bin/ck, the cklib snapshot and any legacy ~/.local/bin/ck-dev |
@@ -295,32 +295,38 @@ eval "$(ck completion bash)"
 eval "$(ck completion zsh)"
 ```
 
-The scripts complete the core navigation commands and, most importantly, the
-**registered project names**: `ck <TAB>`, `ck st <TAB>` and `ck list <TAB>`
-suggest projects from `~/.config/ck/projects.json` immediately, with no second
-lookup. `ck st` treats the project as its **first positional**: once a project
-name or a flag is present, completion switches to the remaining flags instead
-of repeating project names. The Zsh generator binds that project slot to
-`_arguments` position **2** — `st` itself is command argument 1 — and keeps a
-trailing catch-all, so `ck st <TAB>` suggests projects while
-`ck st alpha <TAB>` and `ck st -l <TAB>` both stay flag-only (already used
-flags are filtered out). At command position Zsh completes through a dedicated
-`-command-` wrapper: `ck<TAB>` offers **only `ck`** and never the ck* files in
-the working directory.
+The scripts complete the core navigation commands and the **registered
+project names** from `~/.config/ck/projects.json`; in Zsh every **global
+space** from the persisted `spaces_order` is completed too. The Zsh matrix
+below shows what the **first `<TAB>`** offers — there is no prefix-then-menu
+step and no bare `-` insertion before the flag list.
 
-| Position | Suggests | Behaviour |
-| --- | --- | --- |
-| `ck <TAB>` | commands + registered project names | command/project completion only — at command position just `ck`, never filenames from the cwd |
-| `ck st <TAB>` | registered project names | the project is the only positional |
-| `ck list <TAB>` | registered project names | same registry source as `ck st` |
-| `ck unregister <TAB>` | registered project names | |
-| `ck st <project> <TAB>` | `-l`, `--list`, `-e`, `--edit`, `-g`, `--global`, `--all` | after a project or flag, projects are not repeated |
-| `ck st -l <TAB>` | `-e`, `--edit`, `-g`, `--global`, `--all` | already used `-l` / `--list` filtered out |
-| `ck space <TAB>` | `list`, `create`, `rename`, `move`, `swap`, `reorder`, `delete` | |
-| `ck space move\|swap\|rename\|delete <TAB>` | space names in `spaces_order` | `project` filtered from rename/delete, built-ins from delete, first `swap` operand excluded |
-| `ck local <TAB>` | `add`, `list`, `st`, `done`, `focus`, `note`, `notes`, `edit`, `dashboard` | same action set for `remote` and custom spaces |
-| `ck completion <TAB>` | `bash`, `zsh` | |
-| `ck register --path <TAB>` | directories | the one intentional filesystem completion |
+| Input | First `<TAB>` shows |
+| --- | --- |
+| `ck <TAB>` | all commands **+ all spaces** (with descriptions) + registered projects |
+| `ck st <TAB>` | registered projects |
+| `ck st <project> <TAB>` | `--all`, `--edit`, `--global`, `--list` |
+| `ck st -<TAB>` | the same flag list |
+| `ck st -l <TAB>` | `--all`, `--edit`, `--global` (`--list` filtered out) |
+| `ck list <TAB>` | registered projects |
+| `ck <space> <TAB>` | `add`, `list`, `st`, `status`, `done`, `focus`, `start`, `note`, `notes`, `edit`, `dashboard` |
+| `ck space <TAB>` | `list`, `create`, `rename`, `move`, `swap`, `reorder`, `delete` |
+| `ck space move <TAB>` | existing spaces, including `project` |
+| `ck space swap <TAB>` | existing spaces; the second operand excludes the first |
+| `ck space rename <TAB>` | existing spaces minus `project` |
+| `ck space delete <TAB>` | existing spaces minus the protected `project`, `local`, `remote` |
+| `ck local <TAB>` | the same space actions (`ck remote` and every custom space too) |
+| `ck completion <TAB>` | `bash`, `zsh` |
+| `ck register <TAB>` | `--name`, `--path` + registered projects |
+| `ck<TAB>` | only `ck` — never `ck-clean`, `ck-dev`, `cklib`, `cksum` |
+| `zzz<TAB>`, `<TAB>` at an empty prompt, `git <TAB>` | the ordinary command / git completion (never hijacked) |
+| `ck foo <TAB>` | nothing — no filename fallback |
+
+`ck st` treats the project as its **only positional**: with no argument yet it
+suggests projects, while `ck st <project> <TAB>` and `ck st -l <TAB>` keep
+offering the flags that are still unused. `ck <space> <TAB>` is routed
+dynamically: `local`, `remote` and every custom space share one action
+vocabulary, so a space added with `ck space create` completes immediately.
 
 Space completion follows the **persisted `spaces_order`** from
 `~/.config/ck/state.json`, so suggestions match `ck space list` exactly. The
@@ -1087,8 +1093,8 @@ Logs go **exclusively** to `stderr` and `.sandbox/dev.log` — `stdout` stays co
 - [x] Install and update utilities (`ck install`, `ck update`, `ck uninstall`)
 - [x] Shell Completion for Bash / Zsh: commands, flags, registered projects and spaces (`ck completion bash|zsh`, executable `CK_BIN` fallback)
 - [x] Baseline pytest coverage (`cklib/core.py`, `cklib/history.py` and the full CLI/sandbox suite)
-- [x] Strict sandbox isolation for global spaces (`.sandbox/config/spaces/`) and `ck save` history-vs-Git wording audit (`v0.8.22`)
-- [x] Zsh completion: flags stay available after `ck st <project>` / `ck st -l`, and `ck<TAB>` is pinned to `ck` without filename fallback (`v0.8.22`)
+- [x] Strict sandbox isolation for global spaces (`.sandbox/config/spaces/`) and `ck save` history-vs-Git wording audit (`v0.9.0`)
+- [x] Zsh completion redesign: the menu appears on the FIRST `<TAB>` at every position (flags after `ck st <project>` / `ck st -l`, spaces and projects in `ck <TAB>`), dynamic `ck <space> <TAB>` routing, no prefix-then-menu `-` insertion, and `ck-dev` exports `CK_BIN` (`v0.9.0`)
 
 ---
 
@@ -1128,7 +1134,7 @@ Context Keeper (ck) служит мостом между вашим разумо
 - Глобальный реестр проектов и панель мониторинга
 - Fail-closed блокировка файлов, атомарная запись
 - Дев-режим с песочницей: `ck-dev` выполняет команды в режиме «только чтение» реальных данных, все записи уходят в git-ignored `.sandbox/` (`ck-clean` очищает её); глобальные пространства строго изолированы в `.sandbox/config/spaces/`; `ck-dev sandbox setup` строит одноразовое окружение-макет с объёмными тестовыми данными, `ck dev emulate` — интерактивный стресс-эмулятор ротации истории (3 цикла, `.md.gz`-архивы, FIFO-очистка) внутри `.sandbox/projects/sandbox_stress`
-- Автодополнение shell: `ck completion bash|zsh` для команд, флагов, зарегистрированных проектов и глобальных пространств (Zsh закрепляет `ck<TAB>` за `ck`, без filename-fallback; учитывает исполняемый `CK_BIN`)
+- Автодополнение shell: `ck completion bash|zsh` для команд, флагов, зарегистрированных проектов и глобальных пространств (Zsh показывает меню на ПЕРВОМ `<TAB>` в каждой позиции, закрепляет `ck<TAB>` за `ck`, без filename-fallback, и учитывает исполняемый `CK_BIN`)
 
 ---
 
@@ -1289,36 +1295,54 @@ eval "$(ck completion zsh)"
 ```
 
 Скрипты дополняют команды и **зарегистрированные проекты** из
-`~/.config/ck/projects.json`: `ck <TAB>`, `ck st <TAB>` и `ck list <TAB>`
-сразу предлагают имена проектов. В `ck st` проект — **первый позиционный
-аргумент**: после проекта или флага остаются только ещё не использованные
-флаги, а список проектов не повторяется. Генератор Zsh привязывает проект к
-позиции **2** `_arguments` (сам `st` — аргумент 1) и добавляет trailing
-catch-all, поэтому `ck st <TAB>` показывает проекты, а
-`ck st alpha <TAB>` и `ck st -l <TAB>` — только флаги. В командной позиции
-Zsh использует отдельный wrapper для `-command-`: `ck<TAB>` предлагает
-**только `ck`** и никогда не подставляет файлы `ck*` из текущего каталога.
+`~/.config/ck/projects.json`; в Zsh дополнительно дополняются все
+**глобальные пространства** из сохранённого `spaces_order`. Таблица ниже
+показывает, что предлагает **первый `<TAB>`** в Zsh — без шага «сначала
+префикс, меню потом» и без подстановки одиночного `-` перед флагами.
 
-| Ввод | Подсказки | Поведение |
-| --- | --- | --- |
-| `ck <TAB>` | команды + зарегистрированные проекты | в командной позиции только `ck`, без filename-fallback |
-| `ck st <TAB>` | зарегистрированные проекты | проект — единственный позиционный аргумент |
-| `ck list <TAB>` | зарегистрированные проекты | тот же реестр, что у `ck st` |
-| `ck unregister <TAB>` | зарегистрированные проекты | |
-| `ck st <project> <TAB>` | `-l`, `--list`, `-e`, `--edit`, `-g`, `--global`, `--all` | после проекта или флага проекты не повторяются |
-| `ck st -l <TAB>` | `-e`, `--edit`, `-g`, `--global`, `--all` | использованный `-l` / `--list` скрыт |
-| `ck space <TAB>` | `list`, `create`, `rename`, `move`, `swap`, `reorder`, `delete` | |
-| `ck space move\|swap\|rename\|delete <TAB>` | имена пространств в `spaces_order` | `project` скрыт для rename/delete, built-ins — для delete, первый операнд `swap` исключён |
-| `ck local <TAB>` | `add`, `list`, `st`, `done`, `focus`, `note`, `notes`, `edit`, `dashboard` | тот же набор для `remote` и кастомных пространств |
-| `ck completion <TAB>` | `bash`, `zsh` | |
-| `ck register --path <TAB>` | каталоги | единственное намеренное filesystem-дополнение |
+| Ввод | Первый `<TAB>` показывает |
+| --- | --- |
+| `ck <TAB>` | все команды **+ все пространства** (с описаниями) + зарегистрированные проекты |
+| `ck st <TAB>` | зарегистрированные проекты |
+| `ck st <project> <TAB>` | `--all`, `--edit`, `--global`, `--list` |
+| `ck st -<TAB>` | тот же список флагов |
+| `ck st -l <TAB>` | `--all`, `--edit`, `--global` (`--list` скрыт) |
+| `ck list <TAB>` | зарегистрированные проекты |
+| `ck <space> <TAB>` | `add`, `list`, `st`, `status`, `done`, `focus`, `start`, `note`, `notes`, `edit`, `dashboard` |
+| `ck space <TAB>` | `list`, `create`, `rename`, `move`, `swap`, `reorder`, `delete` |
+| `ck space move <TAB>` | существующие пространства, включая `project` |
+| `ck space swap <TAB>` | существующие пространства; второй операнд исключает первый |
+| `ck space rename <TAB>` | существующие пространства без `project` |
+| `ck space delete <TAB>` | существующие пространства без защищённых `project`, `local`, `remote` |
+| `ck local <TAB>` | те же действия пространства (`ck remote` и любое кастомное пространство тоже) |
+| `ck completion <TAB>` | `bash`, `zsh` |
+| `ck register <TAB>` | `--name`, `--path` + зарегистрированные проекты |
+| `ck<TAB>` | только `ck` — никогда `ck-clean`, `ck-dev`, `cklib`, `cksum` |
+| `zzz<TAB>`, `<TAB>` в пустой строке, `git <TAB>` | обычное дополнение команд / git (не перехватывается) |
+| `ck foo <TAB>` | ничего — без filename-fallback |
+
+В `ck st` проект — **единственный позиционный аргумент**: пока его нет,
+предлагаются проекты, а `ck st <project> <TAB>` и `ck st -l <TAB>` предлагают
+только ещё не использованные флаги. `ck <space> <TAB>` маршрутизируется
+динамически: `local`, `remote` и любое кастомное пространство используют один
+набор действий, поэтому пространство, созданное через `ck space create`,
+дополняется сразу.
+
+Порядок пространств берётся из **сохранённого `spaces_order`** в
+`~/.config/ck/state.json`, поэтому подсказки совпадают с `ck space list`.
+Виртуальная строка `project` показывается для `move` / `swap`, но скрыта для
+`rename` / `delete`; `delete` также скрывает защищённые built-ins
+(`local` / `remote`). Отсутствующий, пустой или нечитаемый state-файл или
+реестр деградирует до обычного дополнения команд — без traceback и шума в
+приглашении.
 
 Оба скрипта разрешают helper на каждое нажатие TAB через `_ck_bin`:
 исполняемый `CK_BIN` имеет приоритет (сессия `ck-dev` экспортирует локальный
 launcher), иначе используется `ck` из `PATH`. Устаревший `CK_BIN` от
 удалённого checkout поэтому деградирует до установленного бинарника, а не
-ломает автодополнение. После `ck update` re-source строку (или откройте новый
-shell), чтобы подхватить свежий скрипт.
+ломает автодополнение: `mise` или переэкспортированный `PATH` не подменят
+бинарник. После `ck update` re-source строку (или откройте новый shell),
+чтобы подхватить свежий скрипт.
 
 ---
 
@@ -1625,5 +1649,5 @@ CK_DEBUG=1 ./ck-dev add "traced"    # или: ./ck-dev -v add "traced"
 - [x] Утилиты установки и обновления (`ck install`, `ck update`, `ck uninstall`)
 - [x] Shell Completion (автодополнение) для Bash / Zsh: команды, флаги, зарегистрированные проекты и пространства (`ck completion bash|zsh`, fallback на исполняемый `CK_BIN`)
 - [x] Базовое покрытие pytest (`cklib/core.py`, `cklib/history.py` и полный набор тестов CLI/песочницы)
-- [x] Строгая изоляция глобальных пространств в песочнице (`.sandbox/config/spaces/`) и аудит формулировок `ck save` про историю и Git (`v0.8.22`)
-- [x] Zsh-автодополнение: флаги остаются доступны после `ck st <project>` / `ck st -l`, а `ck<TAB>` ограничен только `ck` без filename-fallback (`v0.8.22`)
+- [x] Строгая изоляция глобальных пространств в песочнице (`.sandbox/config/spaces/`) и аудит формулировок `ck save` про историю и Git (`v0.9.0`)
+- [x] Редизайн Zsh-автодополнения: меню появляется на ПЕРВОМ `<TAB>` в каждой позиции (флаги после `ck st <project>` / `ck st -l`, пространства и проекты в `ck <TAB>`), динамическая маршрутизация `ck <space> <TAB>`, без подстановки `-`, и `ck-dev` экспортирует `CK_BIN` (`v0.9.0`)

@@ -6,12 +6,22 @@ STDOUT so it can be sourced directly::
     eval "$(ck completion bash)"    # or: zsh
 
 The generated scripts are deliberately small and navigation-focused:
-the top-level completion offers the core commands plus the registered
-project names, and the commands that accept a project target
-(``ck st <project>`` / ``ck list <project>`` / ``ck unregister
-<project>``) complete project names. ``ck st`` accepts exactly one
-positional project: after a project name or flag is present, both
-shells switch to valid flags/options instead of repeating projects.
+the top-level completion offers the core commands and the registered
+project names (plus, in Zsh, every global space), and the commands that accept a
+project target (``ck st <project>`` / ``ck list <project>`` /
+``ck unregister <project>``) complete project names. ``ck st`` accepts
+exactly one positional project: after a project name or flag is
+present, both shells switch to valid flags/options instead of
+repeating projects. ``ck <space> <TAB>`` routes through the persisted
+space sequence, so custom spaces complete their actions just like the
+built-in ``local`` / ``remote``.
+
+FIRST-TAB MENU: in Zsh every multi-match position shows its list on
+the FIRST <TAB>. Plain ``compadd`` / ``_describe`` insertion would
+insert the longest common prefix (a bare ``-`` for a flag list) and
+only list on the second <TAB>; the generated script clears
+``compstate[insert]`` whenever more than one entry matches, while a
+single match still completes normally.
 
 PROJECT NAME SOURCE: the scripts never parse JSON themselves. They
 call ``ck completion --list-projects``, which reads the global registry
@@ -211,7 +221,7 @@ def _zsh_space_actions() -> str:
         "edit": "open the space file in the editor",
         "dashboard": "global dashboard",
     }
-    return "\n".join(f"                    '{a}:{descriptions[a]}'"
+    return "\n".join(f"        '{a}:{descriptions[a]}'"
                      for a in _SPACE_ACTIONS)
 
 
@@ -412,6 +422,12 @@ _ZSH_SCRIPT = r"""#compdef ck
 #   eval "$(ck completion zsh)"           # this session
 #   echo 'eval "$(ck completion zsh)"' >> ~/.zshrc   # persist
 #
+# FIRST-TAB RULE: every multi-match position shows the menu on the
+# FIRST <TAB>. `compadd`/`_describe` alone insert the longest common
+# prefix instead (a bare `-` for a flag list) and only list on the
+# SECOND <TAB>; `_ck_add` therefore clears `compstate[insert]` whenever
+# more than one entry matches. A single match still completes normally.
+#
 # Registered project names come from the global registry
 # (~/.config/ck/projects.json), read through `ck completion
 # --list-projects`. Space names come from the persisted `spaces_order`
@@ -432,11 +448,69 @@ _ck_bin() {
     command -v ck 2>/dev/null || print -r -- ck
 }
 
+# Add matches with descriptions.
+#
+# $1 = completion tag, $2 = group label, $3/$4 = names of the parallel
+# value/description arrays built by the caller. Matches are filtered by
+# the current PREFIX here (compadd would do it too, but the count is
+# needed for the first-TAB decision). Several matches clear
+# `compstate[insert]` so Zsh LISTS the menu on the FIRST <TAB> instead
+# of inserting a common prefix (a bare `-` for a flag list); a single
+# match is left to complete normally. `-l` keeps one entry per line
+# and `-d` carries the aligned `value  -- description` display string.
+_ck_add() {
+    local tag=$1 descr=$2 vname=$3 dname=$4
+    local -a src_values src_descs kept_values kept_descs displays
+    local -i i width=0
+    src_values=("${(@P)vname}")
+    src_descs=("${(@P)dname}")
+    for (( i = 1; i <= ${#src_values}; i++ )); do
+        [[ ${src_values[i]} == ${PREFIX}* ]] || continue
+        kept_values+=("${src_values[i]}")
+        kept_descs+=("${src_descs[i]:-$descr}")
+        (( ${#src_values[i]} > width )) && width=${#src_values[i]}
+    done
+    (( ${#kept_values} )) || return 0
+    (( ${#kept_values} > 1 )) && compstate[insert]=''
+    for (( i = 1; i <= ${#kept_values}; i++ )); do
+        displays+=("${(r:width:)kept_values[i]}  -- ${kept_descs[i]}")
+    done
+    _wanted "$tag" expl "$descr" compadd -l -d displays -a kept_values
+}
+
+# Add `value:description` entries (flags, commands, actions). Their
+# values never contain a colon, so everything before the first one is
+# the value.
+_ck_entries() {
+    local tag=$1 descr=$2
+    shift 2
+    local -a values descs
+    local entry
+    for entry in "$@"; do
+        values+=("${entry%%:*}")
+        descs+=("${entry#*:}")
+    done
+    _ck_add "$tag" "$descr" values descs
+}
+
+# Add plain names (projects, spaces, shells) sharing one description.
+_ck_names() {
+    local tag=$1 descr=$2
+    shift 2
+    local -a values descs
+    local item
+    for item in "$@"; do
+        [[ -n $item ]] || continue
+        values+=("$item")
+        descs+=("$descr")
+    done
+    _ck_add "$tag" "$descr" values descs
+}
+
 _ck_projects() {
     local -a projects
     projects=(${(f)"$("$(_ck_bin)" completion --list-projects 2>/dev/null)"})
-    (( ${#projects} )) || return 0
-    _wanted projects expl 'registered project' compadd -a projects
+    _ck_names projects 'registered project' "${projects[@]}"
 }
 
 _ck_spaces() {
@@ -456,57 +530,95 @@ _ck_spaces() {
             kept+=("$candidate")
         fi
     done
-    (( ${#kept} )) || return 0
-    _wanted spaces expl 'space' compadd -a kept
+    _ck_names spaces 'space' "${kept[@]}"
+}
+
+# Exact membership test: `_ck_has <name> <values...>`.
+_ck_has() {
+    local needle=$1 value
+    shift
+    for value in "$@"; do
+        [[ $value == "$needle" ]] && return 0
+    done
+    return 1
 }
 
 _ck_commands() {
-    local -a commands
-    commands=(
+    # Commands, every global space and the registered project names:
+    # a user with five spaces sees them all at the FIRST position.
+    local -a entries vals descs spaces projects names
+    local name entry
+    entries=(
 __CK_COMMAND_ENTRIES__
     )
-    _describe -t commands 'ck command' commands
+    for entry in "${entries[@]}"; do
+        vals+=("${entry%%:*}")
+        descs+=("${entry#*:}")
+        names+=("${entry%%:*}")
+    done
+    spaces=(${(f)"$("$(_ck_bin)" completion --list-spaces 2>/dev/null)"})
+    for name in "${spaces[@]}"; do
+        [[ -n $name ]] || continue
+        _ck_has "$name" "${names[@]}" && continue
+        names+=("$name")
+        vals+=("$name")
+        descs+=('global space')
+    done
+    projects=(${(f)"$("$(_ck_bin)" completion --list-projects 2>/dev/null)"})
+    for name in "${projects[@]}"; do
+        [[ -n $name ]] || continue
+        _ck_has "$name" "${names[@]}" && continue
+        names+=("$name")
+        vals+=("$name")
+        descs+=('registered project')
+    done
+    _ck_add commands 'ck command or space' vals descs
+}
+
+_ck_space_actions() {
+    # `ck local <TAB>` / `ck remote <TAB>` / `ck <custom-space> <TAB>`:
+    # every space shares one action vocabulary.
+    local -a actions
+    actions=(
+__CK_SPACE_ACTION_ENTRIES__
+    )
+    _ck_entries actions 'space action' "${actions[@]}"
 }
 
 _ck_command() {
     # Command position (`ck<TAB>`) is completed through `-command-`,
     # not through `_ck`, and the default `_command_names` would expose
     # every ck* file in the working directory. Pin the exact word to
-    # `ck`; other prefixes keep the ordinary command-name list.
+    # `ck`; every other prefix (including the empty prompt and every
+    # non-ck command) keeps the ordinary command-name list.
     if [[ $PREFIX == ck ]]; then
         compadd -- ck
-        return
+        return 0
     fi
     _command_names
 }
 
 _ck() {
-    local -a actions
     if (( CURRENT == 1 )); then
         compadd -- ck
-        return
+        return 0
     fi
     if (( CURRENT == 2 )); then
         _ck_commands
-        _ck_projects
-        return
+        return 0
     fi
 
+    local -a flags actions spaces
+    local -i used_l=0 used_e=0 used_g=0 used_all=0 i
     case $words[2] in
         st)
-            local -a specs options
-            specs=(
-                '(-l --list)'{-l,--list}'[print the task list]'
-                '(-e --edit)'{-e,--edit}'[open PLAN.md in the editor]'
-                '(-g --global)'{-g,--global}'[show the global dashboard]'
-                '--all[include the full PLAN.md]'
-            )
-            # `_arguments` positions count COMMAND arguments, not
-            # `words`: `st` is argument 1, so the project slot is
-            # argument 2 even though it is completed at CURRENT == 3.
-            # After a project name or a flag is present, offer options
-            # only — never duplicate the project list.
-            local -i used_l=0 used_e=0 used_g=0 used_all=0 i
+            # The project is the FIRST (and only) positional: with no
+            # argument yet offer projects; as soon as a project name
+            # or a flag is present offer the still-unused flags.
+            if (( CURRENT == 3 )) && [[ $PREFIX != -* ]]; then
+                _ck_projects
+                return 0
+            fi
             for (( i = 3; i < CURRENT; i++ )); do
                 case $words[i] in
                     -l|--list) used_l=1 ;;
@@ -515,30 +627,48 @@ _ck() {
                     --all) used_all=1 ;;
                 esac
             done
-            if (( CURRENT == 3 )) && [[ $PREFIX != -* ]]; then
-                specs+=('2:registered project:_ck_projects')
-            fi
-            # A trailing catch-all keeps the option table valid after a
-            # consumed positional/flag: `_arguments` leaves the rest in
-            # `st_rest`, where every still-unused flag is offered.
-            specs+=('*: :->st_rest')
-            _arguments -s "${specs[@]}"
-            if [[ $state == st_rest && -z $PREFIX ]]; then
-                (( used_l )) || options+=(-l --list)
-                (( used_e )) || options+=(-e --edit)
-                (( used_g )) || options+=(-g --global)
-                (( used_all )) || options+=(--all)
-                compadd -a options
-            fi
+            (( used_l )) || flags+=(
+                '-l:print the task list'
+                '--list:print the task list'
+            )
+            (( used_e )) || flags+=(
+                '-e:open PLAN.md in the editor'
+                '--edit:open PLAN.md in the editor'
+            )
+            (( used_g )) || flags+=(
+                '-g:show the global dashboard'
+                '--global:show the global dashboard'
+            )
+            (( used_all )) || flags+=('--all:include the full PLAN.md')
+            _ck_entries options 'option' "${flags[@]}"
             ;;
         list|unregister)
             _ck_projects
             ;;
         register)
-            _arguments \
-                '(-n --name)'{-n,--name}'[display name]:display name:' \
-                '--path[project path]:project path:_files -/' \
-                '1:registered project:_ck_projects'
+            # Flags and registered projects in ONE group so the menu
+            # appears on the FIRST <TAB> (an `_arguments` table would
+            # insert the common `-` prefix first).
+            if (( CURRENT == 3 )); then
+                local -a values descs projects
+                local name
+                projects=(${(f)"$("$(_ck_bin)" completion --list-projects 2>/dev/null)"})
+                for name in "${projects[@]}"; do
+                    [[ -n $name ]] || continue
+                    values+=("$name")
+                    descs+=('registered project')
+                done
+                if [[ $PREFIX != -* ]]; then
+                    values+=('--path' '--name' '-n')
+                    descs+=('project path' 'display name' 'display name')
+                fi
+                _ck_add values 'option or registered project' values descs
+                return 0
+            fi
+            # `--path` is the one intentional filesystem completion.
+            if (( CURRENT == 4 )) && [[ $words[3] == --path ]]; then
+                _files -/
+            fi
             ;;
         space)
             if (( CURRENT == 3 )); then
@@ -551,8 +681,8 @@ _ck() {
                     'reorder:normalize the space order'
                     'delete:delete a space and its notes'
                 )
-                _describe -t actions 'space action' actions
-                return
+                _ck_entries actions 'space action' "${actions[@]}"
+                return 0
             fi
             # SPACE ARGUMENTS follow the persisted spaces_order. The
             # virtual `project` cannot be renamed/deleted, local/remote
@@ -584,23 +714,28 @@ _ck() {
             ;;
         local|remote)
             if (( CURRENT == 3 )); then
-                actions=(
-__CK_SPACE_ACTION_ENTRIES__
-                )
-                _describe -t actions 'space action' actions
+                _ck_space_actions
             fi
             ;;
         completion)
             if (( CURRENT == 3 )); then
-                _values 'shell' bash zsh
+                _ck_names shells 'shell' bash zsh
             fi
             ;;
         *)
-            # Unknown subcommand: no completion, and no fallback to
-            # arbitrary files from the working directory.
-            return 0
+            # DYNAMIC SPACE ROUTING: `ck <space> <TAB>` for any space
+            # from the persisted sequence, not just local/remote.
+            spaces=(${(f)"$("$(_ck_bin)" completion --list-spaces 2>/dev/null)"})
+            if (( ${spaces[(Ie)$words[2]]} )) && (( CURRENT == 3 )); then
+                _ck_space_actions
+            fi
+            # Unknown command/argument: no completion, and no fallback
+            # to arbitrary files from the working directory.
             ;;
     esac
+    # Never let a no-match branch return non-zero: zsh would then run
+    # `_default` and offer filenames from the working directory.
+    return 0
 }
 
 if (( $+functions[compdef] )); then

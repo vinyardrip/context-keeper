@@ -17,11 +17,13 @@ Coverage:
   ``ck list <TAB>``. ``ck st`` accepts the project as its first
   positional only: after a project name or a flag it switches to
   valid options instead of repeating project names.
-- The Zsh script wires ``_ck_projects`` into the ``st`` positional and
-  applies the same first-positional rule (Bash and Zsh symmetry). After a
-  consumed project or flag the ``st_rest`` state re-offers every unused
-  flag, and ``ck<TAB>`` at command position is pinned to ``ck`` through a
-  ``-command-`` wrapper (never the cwd filename fallback).
+- The Zsh script shows the menu on the FIRST <TAB> at every multi-match
+  position (``compstate[insert]`` cleared): flags after
+  ``ck st <project>`` / ``ck st -l``, commands plus spaces plus projects
+  at ``ck <TAB>``, and the shared action list for ``ck local`` /
+  ``ck remote`` / every custom space. A single match still completes.
+  ``ck<TAB>`` at command position is pinned to ``ck`` through a
+  ``-command-`` wrapper that delegates every other prefix.
 - ``ck completion --list-spaces`` follows the persisted ``spaces_order``
   and includes the virtual ``project`` row plus built-in/custom spaces.
   Both shells complete those names for ``ck space
@@ -584,154 +586,294 @@ class TestBashCompletionBehaviour(_ShellHarness):
 
 
 class TestZshCompletionBehaviour(_ShellHarness):
+    """Every row of the Zsh completion matrix, with a mocked compsys.
 
-    def _st_arguments(self, *words) -> list:
-        """Run the generated `_ck` for `words`, returning `_arguments`
-        specs. The mock isolates the positional/option wiring from a
-        full compsys session."""
-        driver = self.home / "st-specs.zsh"
+    The stand-ins record (a) the names `_ck` offered and (b) the
+    ``compstate[insert]`` decision, which is how the FIRST-TAB rule is
+    enforced: several matches clear it (the menu is listed on the first
+    <TAB>), a single match leaves it untouched (the name is completed).
+    """
+
+    SPACE_ACTIONS = [
+        "add", "list", "st", "status", "done", "focus", "start",
+        "note", "notes", "edit", "dashboard",
+    ]
+
+    def _offer(self, *words, prefix="", env_extra=None):
+        """Run `_ck` for `words`; return (offered names, insert state)."""
+        driver = self.home / "offer.zsh"
         driver.write_text(
-            '_arguments() {\n'
-            '    local arg\n'
-            '    for arg in "$@"; do\n'
-            '        print -r -- "$arg"\n'
-            '    done\n'
-            '}\n'
-            'source "$1"\n'
-            'shift\n'
-            'words=("$@")\n'
-            'CURRENT=${#words[@]}\n'
-            '_ck\n',
-            encoding="utf-8",
-        )
-        script = self._script("zsh")
-        result = subprocess.run(
-            [ZSH, str(driver), str(script), *words],
-            capture_output=True, text=True, env=self._env(),
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertNotIn("Traceback", result.stderr)
-        return result.stdout.splitlines()
-
-    @unittest.skipUnless(ZSH, "zsh is not installed")
-    def test_st_projects_then_flags_after_first_positional(self):
-        self.write_registry([
-            _entry("alpha", "/tmp/alpha", "2026-10-01T00:00:00+00:00"),
-            _entry("beta", "/tmp/beta", "2026-10-02T00:00:00+00:00"),
-        ])
-        # `_arguments` counts command arguments: `st` is argument 1,
-        # so the project positional MUST be bound to position 2.
-        project_spec = "2:registered project:_ck_projects"
-        wrong_spec = "1:registered project:_ck_projects"
-
-        fresh = self._st_arguments("ck", "st", "")
-        self.assertIn(project_spec, fresh)
-        self.assertNotIn(wrong_spec, fresh)
-        self.assertTrue(any("print the task list" in line for line in fresh))
-
-        after_project = self._st_arguments("ck", "st", "alpha", "")
-        self.assertNotIn(project_spec, after_project)
-        self.assertTrue(
-            any("print the task list" in line for line in after_project))
-
-        after_flag = self._st_arguments("ck", "st", "-l", "")
-        self.assertNotIn(project_spec, after_flag)
-        self.assertTrue(
-            any("show the global dashboard" in line for line in after_flag))
-
-    def _st_rest_options(self, *words) -> list:
-        """Run ``_ck`` for ``st`` with ``_arguments`` reporting ``st_rest``.
-
-        This isolates the generated flag-refresh logic from a full compsys
-        session: after a consumed positional/flag the trailing catch-all
-        sets the state, then `_ck` must re-offer the unused flags.
-        """
-        driver = self.home / "st-rest.zsh"
-        driver.write_text(
+            'typeset -A compstate\n'
             'compadd() {\n'
             '    local -a arr\n'
             '    while (( $# )); do\n'
             '        case $1 in\n'
             '            -a) arr=("${(@P)2}"); shift 2 ;;\n'
-            '            *) shift ;;\n'
+            '            -d) shift 2 ;;\n'
+            '            --) shift; break ;;\n'
+            '            -*) shift ;;\n'
+            '            *) arr+=("$1"); shift ;;\n'
             '        esac\n'
             '    done\n'
             '    print -l -- "${arr[@]}"\n'
             '}\n'
-            '_arguments() { state=st_rest }\n'
+            '_wanted() { shift 3; "$@" }\n'
             'source "$1"\n'
             'shift\n'
             'words=("$@")\n'
             'CURRENT=${#words[@]}\n'
-            'PREFIX=\n'
-            '_ck\n',
+            'PREFIX=${CK_TEST_PREFIX-}\n'
+            '_ck\n'
+            'print -r -- "INSERT=${compstate[insert]-unset}"\n',
             encoding="utf-8",
         )
         script = self._script("zsh")
+        env = self._env(env_extra)
+        env["CK_TEST_PREFIX"] = prefix
         result = subprocess.run(
             [ZSH, str(driver), str(script), *words],
-            capture_output=True, text=True, env=self._env(),
+            capture_output=True, text=True, env=env,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("Traceback", result.stderr)
-        return result.stdout.splitlines()
+        offered, insert = [], "unset"
+        for line in result.stdout.splitlines():
+            if line.startswith("INSERT="):
+                insert = line[len("INSERT="):]
+            else:
+                offered.append(line)
+        return offered, insert
+
+    def _registry(self):
+        self.write_registry([
+            _entry("alpha", "/tmp/alpha", "2026-10-01T00:00:00+00:00"),
+            _entry("beta", "/tmp/beta", "2026-10-02T00:00:00+00:00"),
+        ])
+
+    def _spaces(self, names=("agent", "airlock", "today")):
+        self.write_spaces(list(names))
+
+    # -- first position ----------------------------------------------------
 
     @unittest.skipUnless(ZSH, "zsh is not installed")
-    def test_zsh_st_flags_after_positional(self):
-        """`ck st alpha <TAB>` must offer flags, not fall through to empty."""
+    def test_ck_first_tab_lists_commands_spaces_and_projects(self):
+        self._registry()
+        self._spaces()
+        offered, insert = self._offer("ck", "")
+        self.assertEqual(insert, "", "the menu must appear on the FIRST tab")
+        for command in ("st", "list", "dashboard", "register", "completion"):
+            self.assertIn(command, offered)
+        for space in ("project", "local", "remote", "agent", "airlock", "today"):
+            self.assertIn(space, offered)
+        for project in ("alpha", "beta"):
+            self.assertIn(project, offered)
+        # `local` / `remote` are commands and spaces: offered exactly once.
+        self.assertEqual(offered.count("local"), 1)
+        self.assertEqual(offered.count("remote"), 1)
+
+    # -- st ----------------------------------------------------------------
+
+    @unittest.skipUnless(ZSH, "zsh is not installed")
+    def test_st_first_tab_lists_projects(self):
+        self._registry()
+        offered, insert = self._offer("ck", "st", "")
+        self.assertEqual(sorted(offered), ["alpha", "beta"])
+        self.assertEqual(insert, "")
+
+    @unittest.skipUnless(ZSH, "zsh is not installed")
+    def test_st_single_project_still_completes(self):
+        self.write_registry([
+            _entry("alpha", "/tmp/alpha", "2026-10-01T00:00:00+00:00")])
+        offered, insert = self._offer("ck", "st", "al", prefix="al")
+        self.assertEqual(offered, ["alpha"])
+        self.assertEqual(insert, "unset")
+
+    @unittest.skipUnless(ZSH, "zsh is not installed")
+    def test_st_flags_first_tab_after_project(self):
+        self._registry()
+        offered, insert = self._offer("ck", "st", "alpha", "")
+        self.assertEqual(
+            sorted(offered),
+            sorted(["-l", "--list", "-e", "--edit", "-g", "--global", "--all"]),
+        )
+        self.assertEqual(insert, "", "flags menu must appear on the FIRST tab")
+        self.assertNotIn("alpha", offered)
+
+    @unittest.skipUnless(ZSH, "zsh is not installed")
+    def test_st_flags_first_tab_with_dash_prefix(self):
+        self._registry()
+        offered, insert = self._offer("ck", "st", "-", prefix="-")
+        self.assertEqual(
+            sorted(offered),
+            sorted(["-l", "--list", "-e", "--edit", "-g", "--global", "--all"]),
+        )
+        self.assertEqual(insert, "")
+
+    @unittest.skipUnless(ZSH, "zsh is not installed")
+    def test_st_flags_hide_used_list_flag(self):
+        self._registry()
+        expected = sorted(["-e", "--edit", "-g", "--global", "--all"])
+        after_flag, insert = self._offer("ck", "st", "-l", "")
+        self.assertEqual(sorted(after_flag), expected)
+        self.assertEqual(insert, "")
+        after_project, _ = self._offer("ck", "st", "alpha", "-l", "")
+        self.assertEqual(sorted(after_project), expected)
+
+    @unittest.skipUnless(ZSH, "zsh is not installed")
+    def test_st_flags_hide_every_used_flag(self):
+        self._registry()
+        offered, insert = self._offer(
+            "ck", "st", "alpha", "--all", "-e", "-g", "")
+        self.assertEqual(sorted(offered), sorted(["-l", "--list"]))
+        self.assertEqual(insert, "", "two entries still form a first-TAB menu")
+
+    # -- list / unregister -------------------------------------------------
+
+    @unittest.skipUnless(ZSH, "zsh is not installed")
+    def test_list_first_tab_lists_projects(self):
+        self._registry()
+        offered, insert = self._offer("ck", "list", "")
+        self.assertEqual(sorted(offered), ["alpha", "beta"])
+        self.assertEqual(insert, "")
+
+    # -- space routing -----------------------------------------------------
+
+    @unittest.skipUnless(ZSH, "zsh is not installed")
+    def test_local_remote_and_custom_spaces_offer_actions(self):
+        self._registry()
+        self._spaces()
+        for space in ("local", "remote", "agent"):
+            offered, insert = self._offer("ck", space, "")
+            self.assertEqual(sorted(offered), sorted(self.SPACE_ACTIONS),
+                             f"ck {space} <TAB>")
+            self.assertEqual(insert, "")
+
+    @unittest.skipUnless(ZSH, "zsh is not installed")
+    def test_space_first_tab_lists_management_actions(self):
+        offered, insert = self._offer("ck", "space", "")
+        self.assertEqual(
+            sorted(offered),
+            sorted(["list", "create", "rename", "move", "swap",
+                    "reorder", "delete"]),
+        )
+        self.assertEqual(insert, "")
+
+    @unittest.skipUnless(ZSH, "zsh is not installed")
+    def test_space_rename_hides_project(self):
+        self._registry()
+        self._spaces()
+        offered, insert = self._offer("ck", "space", "rename", "")
+        self.assertEqual(
+            sorted(offered), ["agent", "airlock", "local", "remote", "today"])
+        self.assertEqual(insert, "")
+
+    @unittest.skipUnless(ZSH, "zsh is not installed")
+    def test_space_move_keeps_project(self):
+        self._registry()
+        self._spaces()
+        offered, _ = self._offer("ck", "space", "move", "")
+        self.assertEqual(
+            sorted(offered),
+            ["agent", "airlock", "local", "project", "remote", "today"])
+
+    @unittest.skipUnless(ZSH, "zsh is not installed")
+    def test_space_delete_hides_protected_spaces(self):
+        self._registry()
+        self._spaces()
+        offered, insert = self._offer("ck", "space", "delete", "")
+        self.assertEqual(sorted(offered), ["agent", "airlock", "today"])
+        self.assertEqual(insert, "")
+
+    @unittest.skipUnless(ZSH, "zsh is not installed")
+    def test_space_swap_excludes_first_operand(self):
+        self._registry()
+        self._spaces()
+        offered, _ = self._offer("ck", "space", "swap", "")
+        self.assertEqual(
+            sorted(offered),
+            ["agent", "airlock", "local", "project", "remote", "today"])
+        offered, _ = self._offer("ck", "space", "swap", "agent", "")
+        self.assertEqual(
+            sorted(offered),
+            ["airlock", "local", "project", "remote", "today"])
+
+    # -- completion / register / unknown -----------------------------------
+
+    @unittest.skipUnless(ZSH, "zsh is not installed")
+    def test_completion_first_tab_lists_shells(self):
+        offered, insert = self._offer("ck", "completion", "")
+        self.assertEqual(sorted(offered), ["bash", "zsh"])
+        self.assertEqual(insert, "")
+
+    @unittest.skipUnless(ZSH, "zsh is not installed")
+    def test_register_first_tab_lists_flags_and_projects(self):
+        self._registry()
+        offered, insert = self._offer("ck", "register", "")
+        self.assertEqual(
+            sorted(offered),
+            sorted(["--path", "--name", "-n", "alpha", "beta"]),
+        )
+        self.assertEqual(insert, "")
+
+    @unittest.skipUnless(ZSH, "zsh is not installed")
+    def test_unknown_argument_stays_empty(self):
+        offered, insert = self._offer("ck", "foo", "")
+        self.assertEqual(offered, [])
+        self.assertEqual(insert, "unset")
+        # The only filesystem completion is `ck register --path`.
         script = self._script("zsh").read_text(encoding="utf-8")
-        self.assertIn("st_rest", script)
-        self.assertIn('_arguments -s "${specs[@]}"', script)
-        self.assertEqual(
-            self._st_rest_options("ck", "st", "alpha", ""),
-            ["-l", "--list", "-e", "--edit", "-g", "--global", "--all"],
-        )
+        self.assertEqual(script.count("_files"), 1)
+
+    # -- helper resolution -------------------------------------------------
 
     @unittest.skipUnless(ZSH, "zsh is not installed")
-    def test_zsh_st_flags_after_flag(self):
-        """`ck st -l <TAB>` must offer the unused flags, never `--list`."""
-        self.assertEqual(
-            self._st_rest_options("ck", "st", "-l", ""),
-            ["-e", "--edit", "-g", "--global", "--all"],
+    def test_ck_bin_resolves_helper_when_path_lacks_ck(self):
+        self._spaces()
+        empty_path = self.home / "empty-path"
+        empty_path.mkdir()
+        offered, _ = self._offer(
+            "ck", "space", "move", "",
+            env_extra={"CK_BIN": str(self.home / "bin" / "ck"),
+                       "PATH": str(empty_path)},
         )
         self.assertEqual(
-            self._st_rest_options("ck", "st", "--all", ""),
-            ["-l", "--list", "-e", "--edit", "-g", "--global"],
-        )
+            sorted(offered),
+            ["agent", "airlock", "local", "project", "remote", "today"])
 
     @unittest.skipUnless(ZSH, "zsh is not installed")
-    def test_zsh_current_1_is_ck_only(self):
-        """`ck<TAB>` must not fall through to filename completion."""
-        script = self._script("zsh").read_text(encoding="utf-8")
-        self.assertIn("if (( CURRENT == 1 )); then", script)
-        self.assertIn("compadd -- ck", script)
-        self.assertIn("compdef _ck_command -command-", script)
+    def test_stale_ck_bin_falls_back_to_path(self):
+        """A CK_BIN left by a removed checkout must not break TAB."""
+        self._spaces(["work"])
+        offered, _ = self._offer(
+            "ck", "space", "move", "",
+            env_extra={"CK_BIN": str(self.home / "removed" / "ck")},
+        )
+        self.assertEqual(
+            sorted(offered),
+            ["local", "project", "remote", "work"])
 
+    @unittest.skipUnless(ZSH, "zsh is not installed")
+    def test_projects_are_parsed_from_registry_mock(self):
+        self.write_registry([
+            _entry("alpha", "/tmp/alpha", "2026-10-01T00:00:00+00:00"),
+            _entry("beta project", "/tmp/beta",
+                   "2026-10-02T00:00:00+00:00"),
+        ])
+        offered, _ = self._offer("ck", "st", "")
+        self.assertEqual(offered, ["beta project", "alpha"])
+
+    @unittest.skipUnless(ZSH, "zsh is not installed")
+    def test_missing_registry_is_quiet(self):
+        self.assertFalse(self.registry_file.exists())
+        offered, _ = self._offer("ck", "st", "")
+        self.assertEqual(offered, [])
+
+    # -- command position --------------------------------------------------
+
+    @unittest.skipUnless(ZSH, "zsh is not installed")
+    def test_ck_command_does_not_hijack_other_prefixes(self):
+        """`_ck_command` special-cases only the exact `ck` word."""
         driver = self.home / "command-name.zsh"
-        driver.write_text(
-            'compadd() {\n'
-            '    while (( $# )); do\n'
-            '        case $1 in\n'
-            '            --) shift; break ;;\n'
-            '            -*) shift ;;\n'
-            '            *) break ;;\n'
-            '        esac\n'
-            '    done\n'
-            '    print -l -- "$@"\n'
-            '}\n'
-            '_command_names() { print -l -- ck-clean ck-dev cklib cksum }\n'
-            'source "$1"\n'
-            'PREFIX=ck\n'
-            '_ck_command\n',
-            encoding="utf-8",
-        )
-        result = subprocess.run(
-            [ZSH, str(driver), str(self._script("zsh"))],
-            capture_output=True, text=True, env=self._env(),
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ["ck"])
-
         driver.write_text(
             'compadd() {\n'
             '    local -a skipped\n'
@@ -744,161 +886,32 @@ class TestZshCompletionBehaviour(_ShellHarness):
             '    done\n'
             '    print -l -- "${skipped[@]}"\n'
             '}\n'
-            '_command_names() { print -l -- ck-clean ck-dev cklib cksum }\n'
+            '_command_names() { print -l -- ck ck-clean ck-dev cklib cksum ls git }\n'
             'source "$1"\n'
-            'PREFIX=ck-\n'
+            'PREFIX=${CK_TEST_PREFIX-}\n'
             '_ck_command\n',
             encoding="utf-8",
         )
-        result = subprocess.run(
-            [ZSH, str(driver), str(self._script("zsh"))],
-            capture_output=True, text=True, env=self._env(),
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(
-            result.stdout.splitlines(),
-            ["ck-clean", "ck-dev", "cklib", "cksum"],
-        )
-
-    def _space_completion(self, *words, env_extra=None) -> list:
-        """Run `_ck` for a `ck space …` line with mocked compsys."""
-        driver = self.home / "space-specs.zsh"
-        driver.write_text(
-            'compadd() {\n'
-            '    local -a arr\n'
-            '    while (( $# )); do\n'
-            '        case $1 in\n'
-            '            -a) arr=("${(@P)2}"); shift 2 ;;\n'
-            '            *) shift ;;\n'
-            '        esac\n'
-            '    done\n'
-            '    print -l -- "${arr[@]}"\n'
-            '}\n'
-            '_wanted() { shift 3; "$@" }\n'
-            '_describe() { :; }\n'
-            'source "$1"\n'
-            'shift\n'
-            'words=("$@")\n'
-            'CURRENT=${#words[@]}\n'
-            '_ck\n',
-            encoding="utf-8",
-        )
         script = self._script("zsh")
-        result = subprocess.run(
-            [ZSH, str(driver), str(script), *words],
-            capture_output=True, text=True, env=self._env(env_extra),
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertNotIn("Traceback", result.stderr)
-        return result.stdout.splitlines()
 
-    @unittest.skipUnless(ZSH, "zsh is not installed")
-    def test_ck_bin_resolves_helper_when_path_lacks_ck(self):
-        self.write_spaces(
-            ["work", "office"],
-            order=["project", "office", "local", "remote", "work"],
-        )
-        empty_path = self.home / "empty-path"
-        empty_path.mkdir()
-        self.assertEqual(
-            self._space_completion(
-                "ck", "space", "move", "",
-                env_extra={"CK_BIN": str(self.home / "bin" / "ck"),
-                           "PATH": str(empty_path)},
-            ),
-            ["project", "office", "local", "remote", "work"],
-        )
+        def run(prefix: str) -> list:
+            env = self._env()
+            env["CK_TEST_PREFIX"] = prefix
+            result = subprocess.run(
+                [ZSH, str(driver), str(script)],
+                capture_output=True, text=True, env=env,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout.splitlines()
 
-    @unittest.skipUnless(ZSH, "zsh is not installed")
-    def test_stale_ck_bin_falls_back_to_path(self):
-        """A CK_BIN left by a removed checkout must not break TAB."""
-        self.write_spaces(
-            ["work"],
-            order=["project", "local", "remote", "work"],
-        )
-        self.assertEqual(
-            self._space_completion(
-                "ck", "space", "move", "",
-                env_extra={"CK_BIN": str(self.home / "removed" / "ck")},
-            ),
-            ["project", "local", "remote", "work"],
-        )
-
-    @unittest.skipUnless(ZSH, "zsh is not installed")
-    def test_space_management_completes_ordered_space_names(self):
-        self.write_spaces(
-            ["work", "office"],
-            order=["project", "office", "local", "remote", "work"],
-        )
-        ordered = ["project", "office", "local", "remote", "work"]
-
-        self.assertEqual(
-            self._space_completion("ck", "space", "move", ""), ordered)
-        self.assertEqual(
-            self._space_completion("ck", "space", "swap", ""), ordered)
-        self.assertEqual(
-            self._space_completion("ck", "space", "rename", ""),
-            ["office", "local", "remote", "work"])
-        self.assertEqual(
-            self._space_completion("ck", "space", "delete", ""),
-            ["office", "work"])
-        self.assertEqual(
-            self._space_completion("ck", "space", "swap", "office", ""),
-            ["project", "local", "remote", "work"])
-
-    @unittest.skipUnless(ZSH, "zsh is not installed")
-    def test_projects_are_parsed_from_registry_mock(self):
-        self.write_registry([
-            _entry("alpha", "/tmp/alpha", "2026-10-01T00:00:00+00:00"),
-            _entry("beta project", "/tmp/beta", "2026-10-02T00:00:00+00:00"),
-        ])
-        driver = self.home / "drive.zsh"
-        # Minimal compsys stand-ins: route `_wanted ... compadd -a arr`
-        # to the real array and print its elements.
-        driver.write_text(
-            'compadd() {\n'
-            '    local -a arr\n'
-            '    while (( $# )); do\n'
-            '        case $1 in\n'
-            '            -a) arr=("${(@P)2}"); shift 2 ;;\n'
-            '            *) shift ;;\n'
-            '        esac\n'
-            '    done\n'
-            '    print -l -- "${arr[@]}"\n'
-            '}\n'
-            '_wanted() { shift 3; "$@" }\n'
-            'source "$1"\n'
-            '_ck_projects\n',
-            encoding="utf-8",
-        )
-        script = self._script("zsh")
-        result = subprocess.run(
-            [ZSH, str(driver), str(script)],
-            capture_output=True, text=True, env=self._env(),
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(
-            result.stdout.splitlines(), ["beta project", "alpha"])
-        self.assertNotIn("Traceback", result.stderr)
-
-    @unittest.skipUnless(ZSH, "zsh is not installed")
-    def test_missing_registry_is_quiet(self):
-        self.assertFalse(self.registry_file.exists())
-        driver = self.home / "quiet.zsh"
-        driver.write_text(
-            '_wanted() { shift 3; "$@" }\n'
-            'compadd() { print -l -- "called" }\n'
-            'source "$1"\n'
-            '_ck_projects\n',
-            encoding="utf-8",
-        )
-        script = self._script("zsh")
-        result = subprocess.run(
-            [ZSH, str(driver), str(script)],
-            capture_output=True, text=True, env=self._env(),
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout, "")
+        # Exact `ck` word: only `ck`, never the ck* files next to it.
+        self.assertEqual(run("ck"), ["ck"])
+        # Any other prefix keeps the ordinary command-name list.
+        self.assertEqual(run("zzz"),
+                         ["ck", "ck-clean", "ck-dev", "cklib", "cksum",
+                          "ls", "git"])
+        self.assertEqual(run(""), ["ck", "ck-clean", "ck-dev", "cklib",
+                                   "cksum", "ls", "git"])
 
 
 if __name__ == "__main__":

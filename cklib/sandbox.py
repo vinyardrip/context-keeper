@@ -786,6 +786,12 @@ def sandbox_shell_env(project: Path) -> dict:
     env[SANDBOX_ACTIVE_ENV] = str(project)
     env[SANDBOX_ROOT_ENV] = str(sandbox_root())
     env[SANDBOX_SHELL_ENV] = "1"
+    # COMPLETION BINARY PIN: the generated scripts resolve the helper
+    # through `_ck_bin`, where an executable CK_BIN wins over `ck` on
+    # PATH. Export the checkout's launcher so TAB completion keeps
+    # using this session's code even when PATH is re-exported by the
+    # user's rc files or a version manager (mise).
+    env["CK_BIN"] = str(production_repo_root() / "ck")
     _pin_pythonpath(env)
     # PATH priority routing: the checkout's own entrypoint dir wins
     # the `ck` lookup race inside the subshell (same repair
@@ -1018,6 +1024,10 @@ def enter_sandbox(*, project: Optional[Union[Path, str]] = None) -> int:
     # the checkout root from this variable, so export it here too —
     # not only in the wrapper and the subshell env.
     os.environ[SANDBOX_ROOT_ENV] = str(sandbox_root())
+    # COMPLETION BINARY PIN: `_ck_bin` prefers an executable CK_BIN,
+    # so pin this checkout's launcher instead of leaving completion to
+    # whichever `ck` PATH happens to resolve.
+    os.environ["CK_BIN"] = str(production_repo_root() / "ck")
     # SOURCE PIN (spec): inside the session, `ck -v` must reflect the
     # version defined in the LOCAL repository code. Force the checkout
     # to position 0 of sys.path so this process imports the workspace
