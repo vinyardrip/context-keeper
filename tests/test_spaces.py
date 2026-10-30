@@ -1559,6 +1559,7 @@ class TestSpaceStatusEditStart(_IsolatedHome):
     def test_edit_in_dev_mode_targets_sandbox_copy(self):
         """Dev mode never hands the real space file to the editor."""
         self._seed("local", "first task")
+        production = spaces.space_path("local")
         editor, log = self._fake_editor()
         # Activated AFTER seeding so the real (tmp-HOME) space file
         # exists and the redirect can be observed end to end.
@@ -1576,7 +1577,8 @@ class TestSpaceStatusEditStart(_IsolatedHome):
         self.assertIn("CK_SANDBOX is active", out)
         self.assertTrue(log.exists())
         invoked = Path(log.read_text(encoding="utf-8"))
-        self.assertNotEqual(invoked, spaces.space_path("local"))
+        self.assertNotEqual(invoked, production)
+        self.assertEqual(invoked, spaces.space_path("local"))
         self.assertTrue(cksandbox.is_within_sandbox(invoked))
         self.assertEqual(invoked.name, "local.md")
 
@@ -2159,7 +2161,10 @@ class TestDynamicSpaceDiscovery(_IsolatedHome):
         code, out = self._run(["space", "create", "test-custom"])
         self.assertEqual(code, 0, out)
         # It really did land in the sandbox, not in production.
-        self.assertFalse(spaces.space_path("test-custom").exists())
+        self.assertFalse(
+            (ckconfig.GLOBAL_CONFIG_DIR / "spaces" / "test-custom.md").exists())
+        self.assertTrue(cksandbox.is_within_sandbox(
+            spaces.space_path("test-custom")))
         self.assertTrue(cksandbox.is_within_sandbox(
             spaces._write_path("test-custom")))
 
@@ -2184,18 +2189,23 @@ class TestDynamicSpaceDiscovery(_IsolatedHome):
         sandboxed = cksandbox.sandbox_root() / "config" / "spaces"
         self.assertFalse(sandboxed.exists())
 
-    def test_space_present_in_both_dirs_is_reported_once(self):
-        self._run(["space", "create", "test-custom"])
+    def test_production_space_is_invisible_in_dev_mode(self):
+        """STRICT ISOLATION: host spaces never leak into a sandbox run."""
+        self._run(["space", "create", "prod-only"])
+
         os.environ["CK_SANDBOX"] = "1"
         self.addCleanup(os.environ.pop, "CK_SANDBOX", None)
-        self._run(["space", "create", "test-custom-sandbox"])
+        self._run(["space", "create", "sandbox-only"])
 
         names = spaces.existing_space_names()
 
-        # A space living in both trees is discovered exactly once.
-        self.assertEqual(names.count("test-custom"), 1)
-        self.assertIn("test-custom-sandbox", names)
+        self.assertIn("sandbox-only", names)
+        self.assertNotIn("prod-only", names)
+        self.assertFalse(spaces.is_valid_space("prod-only"))
         self.assertEqual(names, sorted(set(names)))
+        # The host space file itself is untouched.
+        self.assertTrue(
+            (ckconfig.GLOBAL_CONFIG_DIR / "spaces" / "prod-only.md").is_file())
 
 
 # --------------------------------------------------------------------------- #
@@ -2813,15 +2823,17 @@ class TestSpaceManagement(_IsolatedHome):
         """In a sandbox session the whole lifecycle stays in .sandbox/."""
         self._run(["space", "create", "work"])
         production = spaces.space_path("work")
+        production_before = production.read_text(encoding="utf-8")
+        production_dir = spaces.spaces_dir()
         os.environ["CK_SANDBOX"] = "1"
         self.addCleanup(os.environ.pop, "CK_SANDBOX", None)
 
         code, _ = self._run(["space", "create", "sandboxed"])
         self.assertEqual(code, 0)
         sandboxed = spaces.space_path("sandboxed")
-        self.assertFalse(sandboxed.exists())       # production untouched
-        self.assertTrue(cksandbox.is_within_sandbox(
-            spaces._write_path("sandboxed")))
+        self.assertTrue(sandboxed.is_file())
+        self.assertTrue(cksandbox.is_within_sandbox(sandboxed))
+        self.assertFalse((production_dir / "sandboxed.md").exists())
 
         # A sandboxed space is NOT free: create must not overwrite it.
         code, out = self._run(["space", "create", "sandboxed"])
@@ -2831,12 +2843,15 @@ class TestSpaceManagement(_IsolatedHome):
         # Rename + delete both stay inside the sandbox too.
         code, _ = self._run(["space", "rename", "sandboxed", "moved"])
         self.assertEqual(code, 0)
-        self.assertFalse(spaces.space_path("moved").exists())
+        self.assertTrue(spaces.space_path("moved").is_file())
+        self.assertFalse((production_dir / "moved.md").exists())
         code, _ = self._run(["space", "delete", "moved", "-y"])
         self.assertEqual(code, 0)
+        self.assertFalse(spaces.space_path("moved").exists())
         # The production space is untouched throughout.
         self.assertTrue(production.is_file())
-        self.assertIn("a", self._run(["work", "list"])[1])
+        self.assertEqual(production.read_text(encoding="utf-8"),
+                         production_before)
 
 
 # --------------------------------------------------------------------------- #
@@ -2962,8 +2977,10 @@ class TestDefaultSpacesAutoInit(_IsolatedHome):
             encoding="utf-8"), before)
         self.assertTrue(spaces.space_path("local").is_file())
 
-    def test_dev_mode_session_skips_auto_init(self):
-        """A sandbox session never materializes global config."""
+    def test_dev_mode_session_seeds_only_sandbox_defaults(self):
+        """A sandbox session materializes defaults in .sandbox/ only."""
+        production_dir = spaces.spaces_dir()
+        self.assertFalse((production_dir / "local.md").exists())
         os.environ["CK_SANDBOX"] = "1"
         self.addCleanup(os.environ.pop, "CK_SANDBOX", None)
         from cklib.cli import _ensure_default_spaces
@@ -2972,7 +2989,13 @@ class TestDefaultSpacesAutoInit(_IsolatedHome):
         with redirect_stdout(buf):
             _ensure_default_spaces()
         self.assertEqual(buf.getvalue(), "")
-        self.assertFalse(spaces.spaces_dir().exists())
+
+        sandbox_dir = spaces.spaces_dir()
+        self.assertTrue(sandbox_dir.is_dir())
+        self.assertTrue(cksandbox.is_within_sandbox(sandbox_dir))
+        for name in ("local", "remote"):
+            self.assertTrue((sandbox_dir / f"{name}.md").is_file())
+            self.assertFalse((production_dir / f"{name}.md").exists())
 
 
 if __name__ == "__main__":

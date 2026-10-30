@@ -264,8 +264,12 @@ class TestCkDevWrapperNested(_WrapperBase):
         self.assertEqual(result.returncode, 0,
                          f"stderr: {result.stderr}")
         self.assertNotIn("Traceback", result.stderr + result.stdout)
-        # Read-only st: no sandbox needed.
-        self.assertFalse(self.copy_sandbox.exists())
+        # Startup seeds the sandboxed default spaces only; the read-only
+        # `st` itself never mirrors the checkout or touches production.
+        sandbox_spaces = self.copy_sandbox / "config" / "spaces"
+        self.assertTrue((sandbox_spaces / "local.md").is_file())
+        self.assertTrue((sandbox_spaces / "remote.md").is_file())
+        self.assertFalse(list(self.copy_sandbox.rglob("PLAN.md")))
 
     def test_st_from_unrelated_project_anchors_sandbox_at_checkout(self):
         """A project OUTSIDE the checkout renders normally, while its

@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.8.20-blue)]()
+[![version](https://img.shields.io/badge/version-0.8.21-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -50,7 +50,8 @@ Context Keeper (ck) acts as a bridge between your brain, AI agents, and Git, per
 - Global Registry: Cross-project dashboard (ck dashboard) backed by `~/.config/ck/projects.json`; registration is explicit
 - Fail-Closed Locking: Cross-process file locking guards registry, PLAN.md, HISTORY.md and state.json writes
 - Full Plan View: ck st --all
-- Dev Sandbox: `ck-dev` runs any command against real data read-only, redirecting all writes into a git-ignored `.sandbox/` (`ck-clean` resets it); `ck-dev sandbox setup` builds a disposable mock environment with bulk test data; entry keeps `ROADMAP.md -> .ck/PLAN.md` safely symlinked
+- Dev Sandbox: `ck-dev` runs any command against real project data read-only, redirecting all writes into a git-ignored `.sandbox/` (`ck-clean` resets it); global spaces are strictly isolated under `.sandbox/config/spaces/`; `ck-dev sandbox setup` builds a disposable mock environment with bulk test data; entry keeps `ROADMAP.md -> .ck/PLAN.md` safely symlinked
+- Shell Completion: `ck completion bash|zsh` for commands, flags, registered projects and global spaces (no filename fallback; honors an executable `CK_BIN`)
 
 ---
 
@@ -103,7 +104,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.8.20
+ck -v    # → ck version 0.8.21
 ```
 
 ---
@@ -139,7 +140,7 @@ ck -v    # → ck version 0.8.20
 | ck delete \<ID\> [-s \<space\>] / ck rm \<ID\> | Permanently remove ONE task and re-index the remaining task IDs 1..N. The default target is the active project (`project`); `-s` / `--space <name>` targets a global space instead, mutating only that space file and leaving the project's `.ck/state.json` and `PLAN.md` untouched. Prints `Task #<ID>: <title>` and asks `Permanently delete task #<ID> from space '<space>'? [y/N]`; `-f` / `--force` skips the prompt — a non-interactive run without `-f` refuses (exit 2). Notes are archived to the target's `HISTORY.md`; a targeted space archives to `~/.config/ck/spaces/<space>.HISTORY.md`. Whole spaces are removed with the separate `ck space delete <name>` |
 | ck note \<text\> | Attach/update a process note on the active task (shown in `ck st`; archived to HISTORY.md by `ck done`) |
 | ck edit | Open PLAN.md in your editor (see [Editor Resolution](#editor-resolution)) |
-| ck save | Task completion workflow: optional note + optional **local** commit |
+| ck save | Checkpoint workflow (does **not** complete the task): append an optional note + short summary to HISTORY.md, then optionally create a **local** Git commit. Completion stays a separate `ck done <ID>` action |
 | ck log | Open HISTORY.md in your editor (see [Editor Resolution](#editor-resolution)) |
 | ck log --all | View the full history: every rotation archive (`.md.gz` decompressed / legacy `.md.bak`, oldest first) concatenated with the current HISTORY.md |
 | ck st | Status overview (tri-state: Previous / Focus / Next); an explicit focus is duplicated at the top as `-> CURRENT FOCUS: [#<id>] <title>` (with its note). WORK CONTEXT shows `<< Done`, a conditional `[!] Skipped` (only on a real execution gap), `[>] Focus` / `Next`, `>> Upcoming`, and a highlighted bottom banner `>> Backlog: N task(s) remaining` |
@@ -188,6 +189,13 @@ ck -v    # → ck version 0.8.20
 | ck remote edit | Open the infrastructure space file (`~/.config/ck/spaces/remote.md`) in the editor |
 | ck remote dashboard | Alias for `ck dashboard` |
 | ck \<space\> \<command\> | Dynamic space routing: ANY space file placed in `~/.config/ck/spaces/<name>.md` is automatically routable with the same commands (`add` / `list` / `st` / `done` / `focus` / `start` / `note` / `notes` / `edit` / `dashboard`), rendered uniformly in the `SPACES (GLOBAL CONTEXTS)` dashboard table |
+
+> **Dev-mode path isolation.** While a sandbox session is active
+> (`ck-dev` / `CK_SANDBOX=1` / `CK_DEV=1` / cwd under `.sandbox/`), every
+> `~/.config/ck/spaces/...` path and the space order in
+> `~/.config/ck/state.json` are replaced by `.sandbox/config/spaces/...` and
+> `.sandbox/config/state.json`. Host spaces are never read, discovered or
+> written; the sandbox starts with its own `local` / `remote` scaffolds.
 
 The `ck dashboard` / `ck -g` output always opens with a unified
 `SPACES (GLOBAL CONTEXTS)` table (`Space | Focus Task | Progress | Last
@@ -574,10 +582,19 @@ ID, invalid space name, missing argument.
 ---
 
 ## ck save Workflow
-- Display current active task
-- Enter commit description + optional note (inline or via your editor — see [Editor Resolution](#editor-resolution))
-- Optional **local** Git commit (never pushes; skips gracefully if Git is unavailable or declined)
-- Auto-archive HISTORY.md when limit reached (gapless rotation, original preserved as a compressed `.md.gz` archive by default)
+`ck save` records a **checkpoint**; it does not complete the active task.
+Task completion remains the explicit `ck done <ID>` action (which also
+archives that task's note into HISTORY.md).
+
+1. Show the current active task and state plainly that it stays open.
+2. **Step 1 — local history (no Git):** enter an optional note body (inline
+   or via your editor), then a short summary; a dated entry is appended to
+   `.ck/HISTORY.md`.
+3. **Step 2 — optional local Git commit:** choose a commit message and
+   confirm. Only the Context Keeper artifacts are staged; `ck` never pushes.
+   If Git is unavailable or you decline, the history entry stays saved.
+4. Auto-archive HISTORY.md when the limit is reached (gapless rotation,
+   original preserved as a compressed `.md.gz` archive by default).
 
 ---
 
@@ -855,19 +872,21 @@ Local commits only. `ck save` commits if you confirm; `ck` never pushes. `ck upd
 ├── projects/            # redirected per-project writes
 │   └── <name>-<hash>/   # one sandbox dir per real project
 │       └── .ck/         # PLAN.md, HISTORY.md, state.json, locks …
-├── config/              # sandboxed global registry / state copies
+├── config/              # sandboxed global registry / state / spaces
+│   └── spaces/          # local/, remote/, custom spaces (isolated)
 └── dev.log              # debug log (see below)
 ```
 
 - Created automatically on the first dev-mode write; never committed (`.gitignore`).
-- Sandbox copies are **seeded from the real state** (e.g. appends to a sandboxed `HISTORY.md` start from the real history), so a dev session mirrors production without mutating it.
+- Project sandbox copies are **seeded from the real state** (e.g. appends to a sandboxed `HISTORY.md` start from the real history), so a dev session mirrors production without mutating it.
+- **Global spaces are the exception: they are strictly isolated.** `~/.config/ck/spaces/` is replaced by `.sandbox/config/spaces/` for the whole session, so host spaces are never read or discovered; the sandbox seeds its own empty `local` / `remote` scaffolds.
 
 ### Safe Development Binary (`ck-dev`)
 
 `ck-dev` is the sandbox entrypoint. It activates `CK_SANDBOX=1` (the `--sandbox` flag and `CK_DEV=1` do the same) and then behaves like `ck`, with one crucial difference:
 
-- **Reads are real** (with sandbox read-your-writes): dashboards, status, and task lists reflect your actual projects — unless a sandboxed copy exists (seeded by a previous dev-mode write or `sandbox setup`), in which case that copy is read so chained dev commands compose.
-- **Writes are intercepted**: ALL write operations — task mutations (`add` / `start` / `done`), `PLAN.md` edits, `state.json` updates, lock files, backups, registry changes — are redirected strictly into `.sandbox/`.
+- **Reads are real for projects** (with sandbox read-your-writes): dashboards, status, and task lists reflect your actual projects — unless a project sandbox copy exists (seeded by a previous dev-mode write or `sandbox setup`), in which case that copy is read so chained dev commands compose. **Global spaces read only the sandbox copy** — production spaces never leak into the session.
+- **Writes are intercepted**: ALL write operations — task mutations (`add` / `start` / `done`), `PLAN.md` edits, `state.json` updates, lock files, backups, spaces (`add` / `focus` / `done` / `note` / `space create|rename|delete`), registry changes — are redirected strictly into `.sandbox/`.
 
 Bare `ck-dev` enters an interactive **session subshell**. On entry the warning banner reports the **active binary**, resolved dynamically at runtime (`command -v ck` semantics — never hardcoded), and after you leave by typing `exit` (or pressing Ctrl+D) the exit handler reports the global binary that takes over:
 
@@ -968,7 +987,7 @@ cd .sandbox/projects/sandbox_stress && ck log --all    # full merged history
 
 ### Manual Testing Walkthrough (Contributors)
 
-**Safety first — zero host impact.** The moment a sandbox session starts, every global registry interaction — `register` / `unregister` / `prune` mutations and dashboard reads alike — is re-routed from your host machine's `~/.config/ck/projects.json` to `.sandbox/config/projects.json`, and every project write (`PLAN.md`, `state.json`, `HISTORY.md`, lock files, rotation archives) lands under `.sandbox/projects/`. The host registry is never opened for writing, never created, and never quarantined — the test suite verifies it stays byte-identical (content and mtime) across full dev sessions. `sandbox setup` writes only inside `.sandbox/` by construction, and `sandbox clean` removes only `.sandbox/` itself.
+**Safety first — zero host impact.** The moment a sandbox session starts, every global registry interaction — `register` / `unregister` / `prune` mutations and dashboard reads alike — is re-routed from your host machine's `~/.config/ck/projects.json` to `.sandbox/config/projects.json`, every project write (`PLAN.md`, `state.json`, `HISTORY.md`, lock files, rotation archives) lands under `.sandbox/projects/`, and every global space (files, note sidecars, histories and `spaces_order`) is confined to `.sandbox/config/spaces/` plus `.sandbox/config/state.json`. The host registry and host spaces are never opened, read or written — the test suite verifies they stay byte-identical (content and mtime) across full dev sessions. `sandbox setup` writes only inside `.sandbox/` by construction, and `sandbox clean` removes only `.sandbox/` itself.
 
 The sandbox infrastructure is the fastest way to exercise `ck` by hand — every command below runs against the mock environment, and your real registry (`~/.config/ck/`) and projects stay untouched. Use it before submitting changes to reproduce dashboard layouts, registry flows, and edge cases (missing projects, task-ID gaps, history rotation) in seconds.
 
@@ -1042,8 +1061,6 @@ Logs go **exclusively** to `stderr` and `.sandbox/dev.log` — `stdout` stays co
 - [ ] `ck undo`: safely undo the last `ck save` and revert the commit
 - [ ] AI-summary (`ck suggest` / `ck summarize`): AI-generated commit messages / notes
 - [ ] Interactive Plan: manage PLAN.md tasks directly from the CLI / TUI
-- [ ] Shell Completion: command autocompletion for Bash / Zsh
-- [ ] Unit Testing: baseline pytest coverage (`cklib/core.py`, `cklib/history.py`)
 
 ### Completed
 - [x] Basic project structure (`.ck/`) initialization
@@ -1061,6 +1078,9 @@ Logs go **exclusively** to `stderr` and `.sandbox/dev.log` — `stdout` stays co
 - [x] Isolated dev mode (`ck-dev`), sandbox (`.sandbox/`) and fixtures (`ck dev setup`)
 - [x] Interactive history-rotation stress emulator (`ck dev emulate`)
 - [x] Install and update utilities (`ck install`, `ck update`, `ck uninstall`)
+- [x] Shell Completion for Bash / Zsh: commands, flags, registered projects and spaces (`ck completion bash|zsh`, executable `CK_BIN` fallback)
+- [x] Baseline pytest coverage (`cklib/core.py`, `cklib/history.py` and the full CLI/sandbox suite)
+- [x] Strict sandbox isolation for global spaces (`.sandbox/config/spaces/`) and `ck save` history-vs-Git wording audit (`v0.8.21`)
 
 ---
 
@@ -1099,7 +1119,8 @@ Context Keeper (ck) служит мостом между вашим разумо
 - Поддержка AI
 - Глобальный реестр проектов и панель мониторинга
 - Fail-closed блокировка файлов, атомарная запись
-- Дев-режим с песочницей: `ck-dev` выполняет команды в режиме «только чтение» реальных данных, все записи уходят в git-ignored `.sandbox/` (`ck-clean` очищает её); `ck-dev sandbox setup` строит одноразовое окружение-макет с объёмными тестовыми данными, `ck dev emulate` — интерактивный стресс-эмулятор ротации истории (3 цикла, `.md.gz`-архивы, FIFO-очистка) внутри `.sandbox/projects/sandbox_stress`
+- Дев-режим с песочницей: `ck-dev` выполняет команды в режиме «только чтение» реальных данных, все записи уходят в git-ignored `.sandbox/` (`ck-clean` очищает её); глобальные пространства строго изолированы в `.sandbox/config/spaces/`; `ck-dev sandbox setup` строит одноразовое окружение-макет с объёмными тестовыми данными, `ck dev emulate` — интерактивный стресс-эмулятор ротации истории (3 цикла, `.md.gz`-архивы, FIFO-очистка) внутри `.sandbox/projects/sandbox_stress`
+- Автодополнение shell: `ck completion bash|zsh` для команд, флагов, зарегистрированных проектов и глобальных пространств (без filename-fallback; учитывает исполняемый `CK_BIN`)
 
 ---
 
@@ -1145,6 +1166,14 @@ chmod +x ck
 
 ## 🛠 Команды
 (полный список аналогичен английской версии выше)
+
+> **Изоляция путей в dev-режиме.** Пока активна песочница (`ck-dev` /
+> `CK_SANDBOX=1` / `CK_DEV=1` / cwd внутри `.sandbox/`), все пути
+> `~/.config/ck/spaces/...` и порядок пространств в
+> `~/.config/ck/state.json` заменяются на `.sandbox/config/spaces/...` и
+> `.sandbox/config/state.json`. Пространства хоста не читаются, не
+> обнаруживаются и не изменяются; песочница начинает с собственными
+> пустыми шаблонами `local` / `remote`.
 
 ### Инициализация и регистрация
 
@@ -1308,10 +1337,20 @@ $ echo $?
 ---
 
 ## Сценарий работы ck save
-- Отображение задачи
-- Ввод коммита и опциональной заметки
-- Локальный коммит (push не выполняется никогда)
-- Авто-архивация HISTORY.md при превышении лимита (бесшовная ротация, оригинал сохраняется как сжатый `.md.gz`-архив)
+`ck save` фиксирует **чекпоинт** и **не завершает** активную задачу.
+Завершение остаётся отдельным явным действием `ck done <ID>` (оно же
+архивирует заметку этой задачи в HISTORY.md).
+
+1. Показать активную задачу и явно сообщить, что она остаётся открытой.
+2. **Шаг 1 — локальная история (без Git):** ввести опциональный текст
+   заметки (inline или в редакторе), затем короткое резюме; датированная
+   запись добавляется в `.ck/HISTORY.md`.
+3. **Шаг 2 — опциональный локальный Git-коммит:** выбрать сообщение
+   коммита и подтвердить. Индексируются только артефакты Context Keeper;
+   `ck` никогда не выполняет push. Если Git недоступен или вы отказались,
+   запись истории остаётся сохранённой.
+4. Авто-архивация HISTORY.md при превышении лимита (бесшовная ротация,
+   оригинал сохраняется как сжатый `.md.gz`-архив).
 
 ---
 
@@ -1359,19 +1398,21 @@ export EDITOR="nano"  # используется, если VISUAL не зада�
 ├── projects/            # перенаправленные записи проектов
 │   └── <имя>-<hash>/    # своя песочница на каждый реальный проект
 │       └── .ck/         # PLAN.md, HISTORY.md, state.json, lock-файлы …
-├── config/              # песочные копии глобального реестра и state
+├── config/              # песочные реестр, state и пространства
+│   └── spaces/          # local/, remote/, кастомные пространства (изолированы)
 └── dev.log              # отладочный лог
 ```
 
 - Создаётся автоматически при первой dev-записи; в Git не попадает (`.gitignore`).
-- Песочные копии **наследуют реальное состояние** (например, запись в песочный `HISTORY.md` начинается с реальной истории), поэтому dev-сессия отражает продакшен, не изменяя его.
+- Песочные копии **проектов наследуют реальное состояние** (например, запись в песочный `HISTORY.md` начинается с реальной истории), поэтому dev-сессия отражает продакшен, не изменяя его.
+- **Глобальные пространства — исключение: они строго изолированы.** На всю сессию `~/.config/ck/spaces/` заменяется на `.sandbox/config/spaces/`, поэтому пространства хоста не читаются и не обнаруживаются; песочница создаёт собственные пустые шаблоны `local` / `remote`.
 
 ### Безопасный бинарник разработки (`ck-dev`)
 
 `ck-dev` — точка входа в песочницу. Он устанавливает `CK_SANDBOX=1` (аналогично работают флаг `--sandbox` и `CK_DEV=1`) и ведёт себя как `ck` с одним ключевым отличием:
 
-- **Чтение реальное** (с read-your-writes в песочнице): статус, дашборды и списки задач показывают настоящие проекты — если нет песочной копии (созданной предыдущей dev-записью или `sandbox setup`); при её наличии читается копия, чтобы цепочки dev-команд корректно складывались.
-- **Записи перехватываются**: ВСЕ операции записи — мутации задач (`add` / `start` / `done`), правки `PLAN.md`, обновления `state.json`, lock-файлы, бэкапы, изменения реестра — строго перенаправляются в `.sandbox/`.
+- **Чтение проектов реальное** (с read-your-writes в песочнице): статус, дашборды и списки задач показывают настоящие проекты — если нет песочной копии проекта (созданной предыдущей dev-записью или `sandbox setup`); при её наличии читается копия, чтобы цепочки dev-команд корректно складывались. **Глобальные пространства читаются только из песочной копии** — продакшен-пространства не попадают в сессию.
+- **Записи перехватываются**: ВСЕ операции записи — мутации задач (`add` / `start` / `done`), правки `PLAN.md`, обновления `state.json`, lock-файлы, бэкапы, пространства (`add` / `focus` / `done` / `note` / `space create|rename|delete`), изменения реестра — строго перенаправляются в `.sandbox/`.
 
 Пока активен `IS_DEV`, продакшен остаётся неизменным: реальный `~/.config/context-keeper/` и реальные `PLAN.md` не модифицируются (проверяется побайтно, включая mtime, в тестах). Дополнительные защитные барьеры в dev-режиме:
 
@@ -1437,7 +1478,7 @@ cd .sandbox/projects/sandbox_stress && ck log --all    # полная объед
 
 ### Ручное тестирование (для контрибьюторов)
 
-**Безопасность прежде всего — нулевое воздействие на хост.** С момента начала песочной сессии каждое взаимодействие с глобальным реестром — мутации `register` / `unregister` / `prune` и чтения дашбордов — перенаправляется из `~/.config/ck/projects.json` вашей машины в `.sandbox/config/projects.json`, а каждая запись проекта (`PLAN.md`, `state.json`, `HISTORY.md`, lock-файлы, архивы ротации) попадает в `.sandbox/projects/`. Реестр хоста никогда не открывается на запись, не создаётся и не помещается в карантин — тестовый набор проверяет, что он остаётся побайтово идентичным (содержимое и mtime) на протяжении полных dev-сессий. `sandbox setup` пишет только внутри `.sandbox/` по построению, а `sandbox clean` удаляет только сам `.sandbox/`.
+**Безопасность прежде всего — нулевое воздействие на хост.** С момента начала песочной сессии каждое взаимодействие с глобальным реестром — мутации `register` / `unregister` / `prune` и чтения дашбордов — перенаправляется из `~/.config/ck/projects.json` вашей машины в `.sandbox/config/projects.json`, каждая запись проекта (`PLAN.md`, `state.json`, `HISTORY.md`, lock-файлы, архивы ротации) попадает в `.sandbox/projects/`, а все глобальные пространства (файлы, sidecar-заметки, истории и `spaces_order`) ограничены `.sandbox/config/spaces/` и `.sandbox/config/state.json`. Реестр и пространства хоста никогда не открываются, не читаются и не изменяются — тестовый набор проверяет, что они остаются побайтово идентичными (содержимое и mtime) на протяжении полных dev-сессий. `sandbox setup` пишет только внутри `.sandbox/` по построению, а `sandbox clean` удаляет только сам `.sandbox/`.
 
 Инфраструктура песочницы — самый быстрый способ опробовать `ck` вручную: все команды ниже работают с окружением-макетом, а реальный реестр (`~/.config/ck/`) и ваши проекты остаются нетронутыми. Используйте её перед отправкой изменений, чтобы за секунды воспроизводить макеты дашбордов, сценарии реестра и граничные случаи (отсутствующие проекты, пропуски в ID задач, ротацию истории).
 
@@ -1511,8 +1552,6 @@ CK_DEBUG=1 ./ck-dev add "traced"    # или: ./ck-dev -v add "traced"
 - [ ] `ck undo`: безопасная отмена последнего `ck save` и откат коммита
 - [ ] AI-summary (`ck suggest` / `ck summarize`): генерация commit message / заметки через ИИ
 - [ ] Interactive Plan: управление задачами в PLAN.md прямо из CLI / TUI
-- [ ] Shell Completion: автодополнение команд в Bash / Zsh
-- [ ] Unit Testing: базовое покрытие тестами через pytest (`cklib/core.py`, `cklib/history.py`)
 
 ### Завершённые
 - [x] Инициализировать базовую структуру проекта (.ck/)
@@ -1530,3 +1569,6 @@ CK_DEBUG=1 ./ck-dev add "traced"    # или: ./ck-dev -v add "traced"
 - [x] Изолированный dev-режим (`ck-dev`), песочница (`.sandbox/`) и фикстуры (`ck dev setup`)
 - [x] Интерактивный стресс-эмулятор ротации истории (`ck dev emulate`)
 - [x] Утилиты установки и обновления (`ck install`, `ck update`, `ck uninstall`)
+- [x] Shell Completion (автодополнение) для Bash / Zsh: команды, флаги, зарегистрированные проекты и пространства (`ck completion bash|zsh`, fallback на исполняемый `CK_BIN`)
+- [x] Базовое покрытие pytest (`cklib/core.py`, `cklib/history.py` и полный набор тестов CLI/песочницы)
+- [x] Строгая изоляция глобальных пространств в песочнице (`.sandbox/config/spaces/`) и аудит формулировок `ck save` про историю и Git (`v0.8.21`)

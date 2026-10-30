@@ -23,10 +23,15 @@ subcommand:
 - global-config writes are intercepted to
   ``$REPO_ROOT/.sandbox/config/projects.json`` (reads prefer the
   sandbox copy once it exists, mirroring the production registry
-  otherwise).
+  otherwise);
+- global spaces are strictly isolated in
+  ``$REPO_ROOT/.sandbox/config/spaces/`` (production
+  ``~/.config/ck/spaces/`` is never read or written inside a
+  session).
 
-Reads still come from the real state, so dashboards and status
-reflect production while mutations land in the sandbox.
+Reads still come from the real project state, so dashboards and
+status reflect production while mutations land in the sandbox. The
+one exception is global spaces: those are sandbox-only end to end.
 
 Subcommands are delegated verbatim: ``ck-dev st``, ``ck-dev add ...``,
 ``ck-dev dashboard``, ... Run as:

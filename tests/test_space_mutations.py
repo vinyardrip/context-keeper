@@ -486,13 +486,19 @@ class TestDevModeOrderIsolation(_IsolatedHome):
 
     def test_order_write_lands_in_the_sandbox_state(self):
         self.make_spaces("work")
+        production_space = spaces.space_path("work")
+        production_text = production_space.read_text(encoding="utf-8")
         with mock.patch.dict(os.environ, {"CK_SANDBOX": "1"}):
+            # Strict isolation: the sandbox has its OWN work space.
+            spaces.create_space("work")
             order = spaces.move_space("work", 1)
             # Read-your-writes: the sandboxed order wins immediately.
             self.assertEqual(spaces.space_order(include_project=True),
                              order)
         self.assertFalse(self.state_file.exists(),
                          "dev mode must not write the real state file")
+        self.assertEqual(production_space.read_text(encoding="utf-8"),
+                         production_text)
         sandbox_state = (cksandbox.sandbox_root() / "config" / "state.json")
         self.assertTrue(sandbox_state.exists())
         self.assertEqual(

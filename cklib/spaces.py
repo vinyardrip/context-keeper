@@ -80,8 +80,25 @@ def spaces_dir() -> Path:
     Computed on every call from the *current* ``GLOBAL_CONFIG_DIR`` so
     tests that pin a temporary config root (and any future runtime
     relocation) observe the change.
+
+    STRICT DEV-MODE ISOLATION: while a sandbox context is active
+    (``CK_SANDBOX`` / ``CK_DEV`` / ``ck-dev`` / cwd inside
+    ``.sandbox/``), the whole spaces tree is redirected to
+    ``.sandbox/config/spaces/``. Production spaces are neither read
+    nor written in that mode — the sandbox owns its own space files,
+    note sidecars, histories and ordering state. The mapping is pure
+    (``create=False``), so merely asking for the directory never
+    materializes ``.sandbox/``.
     """
-    return config.GLOBAL_CONFIG_DIR / config.SPACES_DIR_NAME
+    production = config.GLOBAL_CONFIG_DIR / config.SPACES_DIR_NAME
+    try:
+        from .sandbox import dev_context_active, resolve_write_path
+        if dev_context_active():
+            return resolve_write_path(
+                production, create=False, force=True)
+    except Exception:
+        pass
+    return production
 
 
 def space_path(space: str) -> Path:
@@ -150,36 +167,22 @@ def _is_safe_space_name(name: str) -> bool:
 def spaces_dirs() -> list[Path]:
     """Every directory that can hold space files RIGHT NOW.
 
-    The production spaces dir first, then — when a dev-mode session is
-    active — its sandboxed counterpart (``.sandbox/config/spaces/``),
-    because dev-mode writes are redirected there by :func:`_write_path`.
+    In production this is exactly ``~/.config/ck/spaces/``. In a
+    dev-mode session :func:`spaces_dir` already resolves to
+    ``.sandbox/config/spaces/``, so the list contains ONLY that
+    sandbox directory: production space files are deliberately
+    invisible to the session and can never leak into discovery,
+    validation, listings or the dashboard.
 
-    Every PROBE of the space tree (discovery, validity, duplicate
-    checks) must scan all of these: probing only the production dir
-    makes a space created inside a sandbox session invisible to
-    ``ck space list`` / the dashboard AND reports it as "not found" to
-    ``ck <space> …`` — the space exists, it simply lives in the
-    sandbox copy the current session writes to. The read path already
-    preferred the sandbox copy (``_read_path``); discovery now matches
-    that contract exactly.
+    Kept as a list-returning API because every probe historically
+    iterated over it; there is exactly one authoritative directory
+    per context.
     """
-    dirs: list[Path] = [spaces_dir()]
-    try:
-        from .sandbox import dev_context_active, resolve_write_path
-        if dev_context_active():
-            # create=False: a probe is PURE — never materialise the
-            # sandbox skeleton just to look for space files.
-            sandboxed = resolve_write_path(
-                spaces_dir(), create=False, force=True)
-            if sandboxed not in dirs:
-                dirs.append(sandboxed)
-    except Exception:
-        pass
-    return dirs
+    return [spaces_dir()]
 
 
 def existing_space_names() -> list[str]:
-    """Discovered space names — every ``*.md`` file in the spaces dir(s).
+    """Discovered space names — every ``*.md`` file in the spaces dir.
 
     DYNAMIC DISCOVERY: any space file placed in
     ``~/.config/ck/spaces/`` is automatically a routable space with
@@ -188,10 +191,9 @@ def existing_space_names() -> list[str]:
     no allow-list update. A brand-new, still-empty space file counts:
     discovery keys off the FILE, never off its task count.
 
-    Scans every directory of :func:`spaces_dirs` (production + the
-    dev-mode sandbox copy), so a space created in either place is
-    discovered exactly once. Only structurally safe names are
-    reported.
+    In dev mode the scan is strictly limited to the sandbox copy
+    (``.sandbox/config/spaces/``); production spaces are never
+    probed. Only structurally safe names are reported.
     """
     names: set = set()
     for directory in spaces_dirs():
@@ -211,9 +213,9 @@ def existing_space_names() -> list[str]:
 def is_valid_space(space: str) -> bool:
     """True for the built-in defaults and every discovered space file.
 
-    Probes the same directory set as :func:`existing_space_names`, so
-    a space living in the dev-mode sandbox copy is as valid as one in
-    production.
+    Probes the same directory as :func:`existing_space_names`, so in
+    dev mode only sandbox spaces are valid — a production-only space
+    is intentionally unknown to the sandbox session.
     """
     if is_builtin_space(space):
         return True
@@ -315,67 +317,37 @@ def validate_new_space_name(name: str) -> str:
 
 
 def _read_path(space: str) -> Path:
-    """Read-side path, preferring a sandbox copy in dev mode.
+    """Read-side path for a space (already dev-mode aware).
 
-    Mirrors the registry / PLAN.md read-your-writes contract: once a
-    dev-mode session has written a sandboxed space file, reads come
-    from that copy; with no sandbox copy the real file is read. The
-    probe uses ``create=False`` so a read never materialises the
-    ``.sandbox/`` skeleton.
+    :func:`space_path` resolves through the strict :func:`spaces_dir`
+    mapping, so a dev session reads ONLY ``.sandbox/config/spaces/``.
+    There is deliberately no production fallback: exposing host space
+    content inside the sandbox would defeat isolation.
     """
-    path = space_path(space)
-    try:
-        from .sandbox import dev_context_active, resolve_write_path
-        if dev_context_active():
-            sandboxed = resolve_write_path(path, create=False, force=True)
-            if sandboxed.exists():
-                return sandboxed
-    except Exception:
-        pass
-    return path
+    return space_path(space)
 
 
 def _write_path(space: str) -> Path:
-    """Write-side path, redirected into the sandbox in dev mode.
+    """Write-side path for a space (already dev-mode aware).
 
     Parent directories are created lazily here — this is the only
-    place that ever creates ``~/.config/ck/spaces``, and dev mode
-    redirects the creation so the real config tree stays untouched.
+    place that ever creates the active spaces directory, and dev mode
+    redirects it into ``.sandbox/config/spaces/`` so the real config
+    tree stays untouched.
     """
     path = space_path(space)
-    try:
-        from .sandbox import dev_context_active, resolve_write_path
-        if dev_context_active():
-            path = resolve_write_path(path, force=True)
-    except Exception:
-        pass
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
 
 
 def _state_read_path(space: str) -> Path:
     """Read-side path of the note-state sidecar (dev-mode aware)."""
-    path = state_path(space)
-    try:
-        from .sandbox import dev_context_active, resolve_write_path
-        if dev_context_active():
-            sandboxed = resolve_write_path(path, create=False, force=True)
-            if sandboxed.exists():
-                return sandboxed
-    except Exception:
-        pass
-    return path
+    return state_path(space)
 
 
 def _state_write_path(space: str) -> Path:
     """Write-side path of the note-state sidecar (dev-mode aware)."""
     path = state_path(space)
-    try:
-        from .sandbox import dev_context_active, resolve_write_path
-        if dev_context_active():
-            path = resolve_write_path(path, force=True)
-    except Exception:
-        pass
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -383,12 +355,6 @@ def _state_write_path(space: str) -> Path:
 def _history_write_path(space: str) -> Path:
     """Write-side path of the space's history file (dev-mode aware)."""
     path = history_path(space)
-    try:
-        from .sandbox import dev_context_active, resolve_write_path
-        if dev_context_active():
-            path = resolve_write_path(path, force=True)
-    except Exception:
-        pass
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -396,23 +362,13 @@ def _history_write_path(space: str) -> Path:
 def _append_space_history(space: str, entry: Notes) -> None:
     """Append a rendered ``Notes`` entry to the space's HISTORY.md.
 
-    The write is serialised on the history file's ``*.lock`` and uses
-    the same dev-mode redirect as every other space write. On the
-    first dev-mode append the real history is copied into the sandbox
-    first, so entering a sandbox never presents an empty audit trail
-    and the real file stays untouched.
+    The write is serialised on the history file's ``*.lock``. The
+    path follows the standard dev-mode redirect, so a sandbox append
+    lands in ``.sandbox/config/spaces/`` and never seeds itself from
+    (or touches) the production history file.
     """
     path = _history_write_path(space)
     with file_lock(path):
-        if not path.exists():
-            real = history_path(space)
-            if path != real and real.is_file():
-                try:
-                    path.write_text(
-                        real.read_text(encoding="utf-8"),
-                        encoding="utf-8")
-                except OSError:
-                    pass
         with path.open("a", encoding="utf-8") as fh:
             fh.write(entry.render())
 
@@ -422,12 +378,12 @@ def _append_space_history(space: str, entry: Notes) -> None:
 # ---------------------------------------------------------------------- #
 
 def _space_exists_anywhere(name: str) -> bool:
-    """True when ``<name>.md`` exists in ANY space directory.
+    """True when ``<name>.md`` exists in the active spaces directory.
 
-    Existence checks must cover the dev-mode write target too: a space
-    created inside a sandbox session lives in ``.sandbox/``, so a
-    production-only probe would wrongly report "free" and let a second
-    ``create`` silently overwrite the first.
+    The active directory is resolved by :func:`spaces_dir` and is
+    already dev-mode aware: in a sandbox session only
+    ``.sandbox/config/spaces/`` is probed, so a production-only space
+    can never block or shadow a sandbox create.
     """
     return any(
         (directory / f"{name}.md").exists()
@@ -456,20 +412,18 @@ def global_state_path() -> Path:
 
 
 def _global_state_read_path() -> Path:
-    """Read-side state path, preferring a sandbox copy in dev mode.
+    """Read-side state path, strictly sandboxed in dev mode.
 
-    Mirrors the registry / PLAN read-your-writes contract: a sandbox
-    copy written by this session is read back, otherwise the real
-    file is. The probe never materialises ``.sandbox/``.
+    The path follows the same redirect as :func:`_global_state_write_path`.
+    There is no production fallback: host space ordering (including
+    custom space names) must not leak into a sandbox session. The
+    probe never materialises ``.sandbox/``.
     """
     path = global_state_path()
     try:
         from .sandbox import dev_context_active, resolve_write_path
         if dev_context_active():
-            sandboxed = resolve_write_path(
-                path, create=False, force=True)
-            if sandboxed.exists():
-                return sandboxed
+            return resolve_write_path(path, create=False, force=True)
     except Exception:
         pass
     return path
@@ -694,18 +648,21 @@ def ensure_default_spaces() -> list[str]:
 
     Idempotent, strictly non-destructive initialization (v0.8.12):
 
-    - probes the SAME directory set every space read uses
+    - probes the SAME dev-aware directory every space read uses
       (:func:`_space_exists_anywhere`); a space whose file exists in
-      ANY of them is PRESERVED byte-for-byte — never rewritten,
-      reset or deleted, so user tasks and process notes survive;
+      the active directory is PRESERVED byte-for-byte — never
+      rewritten, reset or deleted, so user tasks and process notes
+      survive;
     - a missing space is materialized from the canonical scaffold
       (byte-identical to the lazy first-write file), with the
       existence check REPEATED inside the fail-closed lock so a
       concurrent first ``ck <space> add`` can never be overwritten;
     - only the built-in names (:data:`cklib.config.SPACE_NAMES`)
       are ever touched — custom spaces are never created or modified;
-    - follows the standard dev-mode redirect (:func:`_write_path`),
-      so a sandboxed session never mutates the real config tree;
+    - follows the strict dev-mode redirect (:func:`_write_path`): a
+      sandboxed session seeds ONLY ``.sandbox/config/spaces/`` with
+      the built-in defaults and never mutates or reads the real
+      config tree;
     - never raises: a read-only or broken config tree must not break
       the command being started.
 
@@ -813,9 +770,9 @@ def validate_deletable_space(name: str) -> Path:
     1. a built-in default (``local`` / ``remote``) is PROTECTED and can
        never be deleted;
     2. the name must be structurally safe;
-    3. the space file must actually exist — probed across every
-       directory of :func:`spaces_dirs`, so a dev-mode space is found
-       where it actually lives.
+    3. the space file must actually exist in the active spaces
+       directory — in a dev session that is the sandbox copy
+       (``.sandbox/config/spaces/``), never production.
 
     Raises :class:`ValueError` with a user-facing message on any
     failure; the CLI turns that into a clean ``ERROR:`` line WITHOUT

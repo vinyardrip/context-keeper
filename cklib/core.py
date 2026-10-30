@@ -2566,6 +2566,10 @@ class ContextKeeper:
         task_id, task_title = active.id, active.title
         history_rel = f"{CK_DIR_NAME}/{HISTORY_FILENAME}"
         printer(f"-> Active task: [{task_id}] {task_title}")
+        printer(ui.notice(
+            ui.INFO,
+            "Checkpoint only: the task stays open. "
+            f"Complete it with `ck done {task_id}`."))
 
         note_recorded = False
         try:

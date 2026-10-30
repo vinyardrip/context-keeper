@@ -99,7 +99,10 @@ Local (current project):
   notes                      List all active process notes: the focused
                              task's note plus every paused task's bound note
                              ([i] No active process notes found. when none)
-  save                       Two-step save: optional note, then local commit
+  save                       Checkpoint workflow (does NOT complete the
+                             task): append a note/summary to HISTORY.md,
+                             then optionally create a LOCAL Git commit.
+                             Complete tasks separately with `ck done <ID>`
   edit                       Open PLAN.md in your editor
   log                        Open HISTORY.md in your editor
   info                       Diagnostic information about this installation
@@ -409,7 +412,9 @@ def build_parser() -> "argparse.ArgumentParser":
     sub.add_parser(
         "notes", help="List all active process notes (focus + paused)")
 
-    sub.add_parser("save", help="Two-step save + local commit")
+    sub.add_parser(
+        "save", help="Checkpoint to HISTORY.md + optional local commit "
+                     "(does not complete the task; use `ck done`)")
     sub.add_parser("edit", help="Open PLAN.md in $EDITOR")
     p_log = sub.add_parser(
         "log", help="Open HISTORY.md in $EDITOR (--all: view the "
@@ -860,7 +865,8 @@ def _dispatch(argv: Optional[List[str]] = None) -> int:
         return _run_completion(raw[1:])
     # AUTO-INIT: default global spaces (local/remote) materialize on
     # the first CLI use, from any working directory; existing space
-    # files are strictly preserved and dev-mode sessions are skipped.
+    # files are strictly preserved. In dev mode the hook seeds the
+    # sandbox copy (`.sandbox/config/spaces/`) only.
     _ensure_default_spaces()
     # LIGHTWEIGHT STARTUP VERSION CHECK (standalone installs only):
     # one throttled GitHub API probe per day, a single stderr line
@@ -1124,15 +1130,13 @@ def _ensure_default_spaces() -> None:
       rewritten, reset or deleted;
     - custom spaces are never touched; only the built-ins are
       probed;
-    - dev-mode sessions are skipped entirely (the sandbox never
-      materializes global config, and global state is never mutated
-      from a session);
+    - dev-mode sessions seed the SANDBOX copy
+      (``.sandbox/config/spaces/``) only — production global config
+      is never created or mutated from a session;
     - any failure is swallowed so initialization can never break the
       command being started, and the hook itself prints nothing.
     """
     try:
-        if is_dev_mode():
-            return
         from . import spaces
         spaces.ensure_default_spaces()
     except Exception:

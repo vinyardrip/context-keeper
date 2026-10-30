@@ -362,6 +362,27 @@ class TestSaveUxWording(IsolatedHomeMixin, unittest.TestCase):
             )
             self.assertIn("LOCAL Git commit", confirm_prompt)
 
+    def test_save_is_a_checkpoint_and_does_not_complete_task(self):
+        """`ck save` must leave the task open; completion is `ck done`."""
+        with tempfile.TemporaryDirectory() as td:
+            ck = self._make_ck(Path(td))
+
+            result, captured = self._run_save(
+                ck, ["s", "checkpoint", "n"])
+
+            self.assertIsNone(result)
+            self.assertTrue(any(
+                "Checkpoint only" in line and "ck done 1" in line
+                for line in captured
+            ))
+            tl = parse_plan_file(ck.plan_file)
+            self.assertEqual(tl.by_id(1).status, TaskStatus.OPEN)
+
+            ck.done("1")
+
+            tl = parse_plan_file(ck.plan_file)
+            self.assertEqual(tl.by_id(1).status, TaskStatus.DONE)
+
 
 class TestAddTaskIsAstBased(IsolatedHomeMixin, unittest.TestCase):
     def test_add_returns_id_and_writes_canonical(self):
