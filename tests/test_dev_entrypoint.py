@@ -605,6 +605,37 @@ class TestPhysicalInstallEndToEnd(unittest.TestCase):
         self.assertIn(f"install_dir: {self.snapshot}", result.stdout)
         self.assertNotIn(f"install_dir: {self.checkout}", result.stdout)
 
+    def test_info_reports_physical_copy_mode(self):
+        """After `ck install` the regular launcher is a physical copy."""
+        self._run(["install"], self.ck_copy, self.checkout)
+        result = self._run(["info"], self.bin_ck, self.fake_home)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("install_mode: physical copy", result.stdout)
+        self.assertNotIn("install_mode: symlink", result.stdout)
+        self.assertIn(f"launcher_path: {self.bin_ck}", result.stdout)
+
+    def test_info_reports_symlink_mode(self):
+        """A one-liner-style symlink must be reported as a symlink."""
+        self.bin_ck.parent.mkdir(parents=True, exist_ok=True)
+        self.bin_ck.symlink_to(self.ck_copy)
+        result = self._run(["info"], self.bin_ck, self.fake_home)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("install_mode: symlink (one-liner tree)", result.stdout)
+        self.assertIn(f"launcher_path: {self.bin_ck}", result.stdout)
+        self.assertIn(f"launcher_target: {self.ck_copy}", result.stdout)
+        self.assertNotIn("install_mode: physical copy", result.stdout)
+
+    def test_info_reports_standalone_dev_launcher_mode(self):
+        """A direct checkout launcher is neither symlink nor copy."""
+        result = self._run(["info"], self.ck_copy, self.checkout)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(
+            "install_mode: standalone/dev launcher (git checkout)",
+            result.stdout,
+        )
+        self.assertIn(f"launcher_path: {self.ck_copy}", result.stdout)
+        self.assertIn("in_git_repo: True", result.stdout)
+
     def test_repo_edits_do_not_alter_installed_behavior_until_reinstall(self):
         self._run(["install"], self.ck_copy, self.checkout)
         before = self._run(["info"], self.bin_ck, self.fake_home)

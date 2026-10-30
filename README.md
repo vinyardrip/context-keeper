@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.8.18-blue)]()
+[![version](https://img.shields.io/badge/version-0.8.19-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -103,7 +103,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.8.18
+ck -v    # → ck version 0.8.19
 ```
 
 ---
@@ -218,7 +218,7 @@ hierarchy; the active project in `ck space list` is bold cyan. With
 treatment registered projects get, and the compact table is not repeated
 above the cards.
 | ck completion bash\|zsh | Print the matching shell completion script to STDOUT: `eval "$(ck completion zsh)"`. Completions cover the core commands plus registered project names (`~/.config/ck/projects.json`) and space names for `ck space move|swap|rename|delete` (from the persisted `spaces_order`). `ck st <TAB>` / `ck list <TAB>` suggest projects; after the `st` project or a flag, completion switches to valid flags/options. Space completion keeps the sequence order and filters protected contexts (`project` for rename/delete, built-ins for delete) plus the first `swap` operand. Helper calls use `${CK_BIN:-ck}`, so a `ck-dev` session completes through its local launcher. A missing, empty or unreadable source simply yields no names (never a traceback) |
-| ck info | Installation diagnostics (version, branch, paths) |
+| ck info | Installation diagnostics (version, branch, paths, `launcher_path`) plus an accurate `install_mode`: `symlink (one-liner tree)`, `physical copy` after `ck install`, or `standalone/dev launcher` for a direct checkout |
 | ck install | Copy ck to ~/.local/bin/ck (physical executable file, no symlink) + cklib snapshot to ~/.local/share/ck; no sudo |
 | ck uninstall | Remove ~/.local/bin/ck, the cklib snapshot and any legacy ~/.local/bin/ck-dev |
 | ck update | Self-update via git fetch + pull --ff-only (refuses if dirty); standalone installs refresh in place via `install.sh` (`.ck/` preserved) |

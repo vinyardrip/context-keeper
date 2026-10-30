@@ -1,6 +1,6 @@
 # ROADMAP / PLAN
 
-Current version: v0.8.18
+Current version: v0.8.19
 
 ## Backlog
 - [x] Инициализировать базовую структуру проекта (.ck/)
@@ -64,5 +64,6 @@ Current version: v0.8.18
 - [x] автодополнение проектов для `ck st <TAB>` в Bash / Zsh: регистр проектов через `--list-projects`, флаги после первого позиционного аргумента, паритет с `ck list <TAB>` (`v0.8.16`)
 - [x] автодополнение пространств для `ck space move|swap|rename|delete` в Bash / Zsh: `--list-spaces` из `spaces_order`, фильтрация `project` и защищённых built-in пространств (`v0.8.17`)
 - [x] поддержка `CK_BIN` в автодополнении Bash / Zsh (`${CK_BIN:-ck}`), экспорт локального launcher-пути из `ck-dev` (`v0.8.18`)
+- [x] точное определение `install_mode` в `ck info`: symlink one-liner, physical copy после `ck install`, standalone/dev launcher; проверка `os.path.islink()` до разрешения пути (`v0.8.19`)
 - [ ] добавить link между проектами(один хостинг - space remote), между пространством и проектами(space today задача общая, срочная починка уязвимости) может еще что
 - [ ] сделать линкованные задачи(одинаковые для link projects/spaces) при связи - пишем в одном проекте, дописываются в связанные(хостингом, пример закрыть уязвимость, действия одинаковые, задачи тоже)

@@ -3122,7 +3122,15 @@ class ContextKeeper:
         )
 
     def info(self) -> str:
-        """Diagnostic information about the installation."""
+        """Diagnostic information about the installation.
+
+        The executable path is inspected WITHOUT resolving the final
+        launcher link: ``sys.argv[0]`` preserves how ``ck`` was invoked,
+        so a one-liner symlink is reported as a symlink while the
+        regular launcher written by ``ck install`` is reported as a
+        physical copy. A direct checkout/standalone launcher gets the
+        third mode.
+        """
         lines: list[str] = []
         lines.append(f"ck version: {VERSION}")
         lines.append(f"install_dir: {self.install_dir}")
@@ -3134,10 +3142,18 @@ class ContextKeeper:
             lines.append(f"branch: {br}")
             lines.append(f"head: {sha[:12]}")
         lines.append(f"user_install_path: {USER_INSTALL_PATH}")
-        lines.append(
-            "install_mode: physical copy (never a symlink; refreshed "
-            "only by `ck install` / `ck update`)"
-        )
+        launcher = _invoked_launcher_path()
+        if launcher is not None:
+            lines.append(f"launcher_path: {launcher}")
+            try:
+                if os.path.islink(launcher):
+                    target = os.path.realpath(launcher)
+                    if target and target != str(launcher):
+                        lines.append(f"launcher_target: {target}")
+            except (OSError, ValueError):
+                pass
+        mode = _install_mode(self.install_dir, launcher, in_repo=in_repo)
+        lines.append(f"install_mode: {mode}")
         lines.append(f"package_snapshot: {SNAPSHOT_INSTALL_DIR / 'cklib'}")
         return "\n".join(lines)
 
@@ -3314,6 +3330,101 @@ def is_standalone_install(directory: Path) -> bool:
                 and (directory / "cklib" / "__init__.py").is_file())
     except OSError:
         return False
+
+
+def _invoked_launcher_path() -> Optional[Path]:
+    """Best-effort path of the ``ck`` launcher that started this process.
+
+    ``sys.argv[0]`` is the path the OS used to exec the script — unlike
+    ``__file__`` it preserves a symlink path, so :meth:`ContextKeeper.info`
+    can report how the command was actually invoked. Relative names are
+    resolved through ``PATH`` (the usual shell execution). When the
+    process was not started from a ``ck`` launcher (pytest, embedded
+    use), fall back to the launcher bundled next to the executing
+    ``cklib`` tree.
+
+    Never raises; returns None when no plausible launcher exists.
+    """
+    raw = ""
+    if sys.argv:
+        try:
+            raw = str(sys.argv[0] or "").strip()
+        except (TypeError, ValueError):
+            raw = ""
+    if raw:
+        try:
+            candidate = Path(raw).expanduser()
+        except (OSError, RuntimeError, ValueError):
+            candidate = None
+        if (candidate is not None
+                and candidate.name.lower() in ("ck", "ck-dev")):
+            if not candidate.is_absolute():
+                located = shutil.which(raw)
+                if located:
+                    candidate = Path(located)
+                if not candidate.is_absolute():
+                    try:
+                        candidate = Path.cwd() / candidate
+                    except OSError:
+                        return None
+            return candidate
+    try:
+        bundled = Path(__file__).resolve().parent.parent / "ck"
+    except (OSError, RuntimeError):
+        return None
+    if bundled.exists() or bundled.is_symlink():
+        return bundled
+    return None
+
+
+def _install_mode(install_dir: Path, launcher: Optional[Path], *,
+                  in_repo: bool) -> str:
+    """Classify how this ``ck`` process was launched.
+
+    Three user-facing modes:
+
+    - ``symlink (one-liner tree)`` — the ``install.sh`` layout, where
+      ``~/.local/bin/ck`` links to the real launcher;
+    - ``physical copy`` — the regular executable written by
+      ``ck install`` (backed by the ``cklib`` snapshot);
+    - ``standalone/dev launcher`` — a regular launcher running from a
+      git checkout or an unpacked standalone tree.
+
+    The launcher path is checked with :func:`os.path.islink` BEFORE any
+    resolution, because resolving it would erase exactly the symlink
+    fact this diagnostic needs to report. Never raises.
+    """
+    if launcher is not None:
+        try:
+            if os.path.islink(launcher):
+                return "symlink (one-liner tree)"
+        except (OSError, ValueError):
+            pass
+
+    try:
+        install_real = Path(install_dir).resolve()
+        snapshot_real = Path(SNAPSHOT_INSTALL_DIR).resolve()
+    except (OSError, RuntimeError):
+        install_real = Path(install_dir)
+        snapshot_real = Path(SNAPSHOT_INSTALL_DIR)
+    physical = (
+        "physical copy (regular executable; refreshed only by "
+        "`ck install` / `ck update`)"
+    )
+    if install_real == snapshot_real:
+        return physical
+    if launcher is not None:
+        try:
+            launcher_real = Path(launcher).resolve()
+            if install_real not in launcher_real.parents:
+                return physical
+        except (OSError, RuntimeError):
+            pass
+    if in_repo:
+        return "standalone/dev launcher (git checkout)"
+    if is_standalone_install(install_dir):
+        return "standalone/dev launcher (standalone tree)"
+    return "standalone/dev launcher"
 
 
 def maybe_notify_update_for(install_dir: Path, *,
