@@ -459,6 +459,26 @@ class TestCliDispatch(_IsolatedHome, unittest.TestCase):
                 self.assertNotEqual(code, 0, f"argv={argv!r}")
                 self.assertNotIn("[ ] 1.", buf.getvalue())
 
+    def test_unknown_command_error_stays_one_readable_line(self):
+        """`ck status` must not dump the whole argparse choice list.
+
+        The stock argparse wording inlines every command, wraps at 80
+        columns, and its tail (`... dev, s`) looks like a stray `s`
+        alias. The compact message names only the bad command and
+        points at `ck --help`; the exit code stays 2.
+        """
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            code = main(["status"])
+        self.assertEqual(code, 2)
+        err = buf.getvalue()
+        self.assertIn("unknown command 'status'", err)
+        self.assertIn("ck --help", err)
+        self.assertNotIn("choose from", err)
+        self.assertNotRegex(err, r",\s*s\s*\)")
+        for line in err.splitlines():
+            self.assertLessEqual(len(line), 79, line)
+
 
 # ---------------------------------------------------------------------------
 # `ck done` implicit focus target (bare `ck done`)

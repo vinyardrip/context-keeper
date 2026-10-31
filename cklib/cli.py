@@ -303,7 +303,31 @@ def build_parser() -> "argparse.ArgumentParser":
     """
     import argparse
 
-    parser = argparse.ArgumentParser(
+    class _CkParser(argparse.ArgumentParser):
+        """Parser with a one-line unknown-command error.
+
+        The stock argparse wording inlines EVERY registered command
+        (``invalid choice: 'status' (choose from init, st, ...``).
+        That line overflows an 80-column terminal, and the wrapped
+        tail (``... dev, s`` = the first character of ``sandbox``)
+        reads like a stray one-letter alias. Name just the offending
+        command and point at the help text instead; exit code 2 is
+        unchanged.
+        """
+
+        def error(self, message: str) -> None:
+            prefix = "argument <command>: invalid choice: "
+            if message.startswith(prefix):
+                bad = message[len(prefix):].split(" (choose from", 1)[0]
+                self.print_usage(sys.stderr)
+                self.exit(
+                    2,
+                    f"{self.prog}: error: unknown command {bad} "
+                    f"(run `{self.prog} --help` for the full list)\n",
+                )
+            super().error(message)
+
+    parser = _CkParser(
         prog="ck",
         description="Context Keeper CLI",
         add_help=False,

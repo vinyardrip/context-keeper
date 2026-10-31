@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.9.1-blue)]()
+[![version](https://img.shields.io/badge/version-0.9.2-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -104,7 +104,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.9.1
+ck -v    # → ck version 0.9.2
 ```
 
 ---
@@ -312,7 +312,7 @@ step and no bare `-` insertion before the flag list.
 | `ck <space> <TAB>` | `add`, `list`, `st`, `status`, `done`, `focus`, `start`, `note`, `notes`, `edit`, `dashboard` |
 | `ck space <TAB>` | `list`, `create`, `rename`, `move`, `swap`, `reorder`, `delete` |
 | `ck space move <TAB>` | existing spaces, including `project` |
-| `ck space swap <TAB>` | existing spaces; the second operand excludes the first |
+| `ck space swap <TAB>` | existing spaces, including `project`; the second operand excludes the first |
 | `ck space rename <TAB>` | existing spaces minus `project` |
 | `ck space delete <TAB>` | existing spaces minus the protected `project`, `local`, `remote` |
 | `ck local <TAB>` | the same space actions (`ck remote` and every custom space too) |
@@ -334,6 +334,24 @@ virtual `project` row is surfaced for `move` / `swap` but filtered from
 `rename` / `delete`; `delete` also hides the protected built-ins
 (`local` / `remote`). A missing, empty or unreadable state file or registry
 degrades to plain command completion — no traceback, no noise in the prompt.
+
+**The virtual `project` space.** `project` is not a space file: it stands for
+the current directory-based project. Completion offers it exactly where it is
+a valid target — `ck <TAB>` and `ck space move` / `ck space swap` — so it can
+be positioned in the global space order like any other entry. It is
+intentionally absent from `ck space rename` and `ck space delete` (the
+virtual row can never be renamed or deleted) and from `ck space create`
+(which takes a new name); `ck space reorder` takes no operand. Because
+`project` is a sentinel rather than a file, `ck project …` routes to a space
+that does not exist and fails instead of switching projects — address a
+project by name from any directory instead (`ck list <project>`,
+`ck st <project>`).
+
+**`status` is a space-only alias.** `ck <space> status` is a synonym for
+`ck <space> st`, and `ck <space> start` is a synonym for `ck <space> focus`.
+There is no top-level `ck status` — use `ck st`. The top-level
+`ck start <ID>` focuses a task in the active project, exactly what
+`<space> start` does inside its own space.
 
 Both scripts resolve the helper per TAB press through a small `_ck_bin`
 function: a non-empty **executable `CK_BIN`** wins (a `ck-dev` session exports
@@ -881,7 +899,7 @@ When `HISTORY.md` reaches `HISTORY_LIMIT` entries it is rotated into a timestamp
 
 `CK_CONFIG_DIR` has the highest precedence: the registry (`projects.json`), `state.json` and the whole spaces tree move with it. The test suite points it at a throwaway directory for every test, so `pytest` never reads or writes your real `~/.config/ck/`.
 
-> **Upgrading from <0.9.1 with stale `[MISSING]` entries?** Run `ck prune` once in production. From 0.9.1 onward, `pytest` no longer writes to `~/.config/ck/projects.json`, so this situation cannot recur. `ck dashboard` never prunes automatically on purpose: a temporarily unavailable folder (network mount, unplugged USB stick) must not silently delete user data.
+> **Upgrading from a release that predates the pytest isolation and seeing stale `[MISSING]` entries?** Run `ck prune` once in production. Since testing moved to a throwaway `CK_CONFIG_DIR`, `pytest` no longer writes to `~/.config/ck/projects.json`, so this situation cannot recur. `ck dashboard` never prunes automatically on purpose: a temporarily unavailable folder (network mount, unplugged USB stick) must not silently delete user data.
 
 ### VCS Integration
 Local commits only. `ck save` commits if you confirm; `ck` never pushes. `ck update` fast-forwards the installation itself only when the work tree is clean, then refreshes an installed copy (`~/.local/bin/ck`) so production stays in sync with the checkout. Standalone (one-line installer) deployments have no `.git` metadata: there `ck update` re-runs the remote installer in place (`curl | tar`), preserving `.ck/`. Standalone installs also get a throttled startup version check against the GitHub releases API — a single stderr line prompting `ck update` when a newer release exists (opt out: `CK_DISABLE_UPDATE_CHECK=1`).
@@ -1109,9 +1127,10 @@ Logs go **exclusively** to `stderr` and `.sandbox/dev.log` — `stdout` stays co
 - [x] Install and update utilities (`ck install`, `ck update`, `ck uninstall`)
 - [x] Shell Completion for Bash / Zsh: commands, flags, registered projects and spaces (`ck completion bash|zsh`, executable `CK_BIN` fallback)
 - [x] Baseline pytest coverage (`cklib/core.py`, `cklib/history.py` and the full CLI/sandbox suite)
-- [x] Strict sandbox isolation for global spaces (`.sandbox/config/spaces/`) and `ck save` history-vs-Git wording audit (`v0.9.1`)
-- [x] Zsh completion redesign: the menu appears on the FIRST `<TAB>` at every position (flags after `ck st <project>` / `ck st -l`, spaces and projects in `ck <TAB>`), dynamic `ck <space> <TAB>` routing, no prefix-then-menu `-` insertion, and `ck-dev` exports `CK_BIN` (`v0.9.1`)
-- [x] pytest isolation: every test runs against a throwaway `CK_CONFIG_DIR`, so the real `~/.config/ck/` (registry, `state.json`, spaces, locks) is never written by the suite (`v0.9.1`)
+- [x] Strict sandbox isolation for global spaces (`.sandbox/config/spaces/`) and `ck save` history-vs-Git wording audit (`v0.9.2`)
+- [x] Zsh completion redesign: the menu appears on the FIRST `<TAB>` at every position (flags after `ck st <project>` / `ck st -l`, spaces and projects in `ck <TAB>`), dynamic `ck <space> <TAB>` routing, no prefix-then-menu `-` insertion, and `ck-dev` exports `CK_BIN` (`v0.9.2`)
+- [x] pytest isolation: every test runs against a throwaway `CK_CONFIG_DIR`, so the real `~/.config/ck/` (registry, `state.json`, spaces, locks) is never written by the suite (`v0.9.2`)
+- [x] Completion docs for the virtual `project` space (offered for `move`/`swap`, never `rename`/`delete`) and the space-only `status` alias; unknown-command errors are one readable line instead of a wrapped choice dump (`v0.9.2`)
 
 ---
 
@@ -1328,7 +1347,7 @@ eval "$(ck completion zsh)"
 | `ck <space> <TAB>` | `add`, `list`, `st`, `status`, `done`, `focus`, `start`, `note`, `notes`, `edit`, `dashboard` |
 | `ck space <TAB>` | `list`, `create`, `rename`, `move`, `swap`, `reorder`, `delete` |
 | `ck space move <TAB>` | существующие пространства, включая `project` |
-| `ck space swap <TAB>` | существующие пространства; второй операнд исключает первый |
+| `ck space swap <TAB>` | существующие пространства, включая `project`; второй операнд исключает первый |
 | `ck space rename <TAB>` | существующие пространства без `project` |
 | `ck space delete <TAB>` | существующие пространства без защищённых `project`, `local`, `remote` |
 | `ck local <TAB>` | те же действия пространства (`ck remote` и любое кастомное пространство тоже) |
@@ -1352,6 +1371,24 @@ eval "$(ck completion zsh)"
 (`local` / `remote`). Отсутствующий, пустой или нечитаемый state-файл или
 реестр деградирует до обычного дополнения команд — без traceback и шума в
 приглашении.
+
+**Виртуальное пространство `project`.** `project` — не файл пространства, а
+текущий проект по каталогу. Автодополнение предлагает его только там, где он
+является допустимой целью: `ck <TAB>` и `ck space move` / `ck space swap` —
+чтобы его можно было поставить в глобальном порядке как любую другую запись.
+Он намеренно отсутствует в `ck space rename` и `ck space delete`
+(виртуальную строку нельзя переименовать или удалить) и в
+`ck space create` (там задаётся новое имя); `ck space reorder` не принимает
+аргументов. Поскольку `project` — это sentinel, а не файл, `ck project …`
+маршрутизируется в несуществующее пространство и падает, а не переключает
+проект; адресуйте проект по имени из любого каталога (`ck list <project>`,
+`ck st <project>`).
+
+**`status` — алиас только для пространств.** `ck <space> status` — синоним
+`ck <space> st`, а `ck <space> start` — синоним `ck <space> focus`.
+Верхнеуровневого `ck status` нет — используйте `ck st`. Верхнеуровневый
+`ck start <ID>` фокусирует задачу активного проекта — ровно то же, что
+`<space> start` делает внутри своего пространства.
 
 Оба скрипта разрешают helper на каждое нажатие TAB через `_ck_bin`:
 исполняемый `CK_BIN` имеет приоритет (сессия `ck-dev` экспортирует локальный
@@ -1492,7 +1529,7 @@ export EDITOR="nano"  # используется, если VISUAL не зада�
 
 `CK_CONFIG_DIR` имеет высший приоритет: реестр (`projects.json`), `state.json` и всё дерево пространств переезжают вместе с ним. Набор тестов выставляет переменную на одноразовый каталог для каждого теста, поэтому `pytest` никогда не читает и не изменяет реальный `~/.config/ck/`.
 
-> **Обновляетесь с версии <0.9.1 и видите устаревшие `[MISSING]`?** Один раз выполните `ck prune` в production. Начиная с 0.9.1 `pytest` не пишет в `~/.config/ck/projects.json`, поэтому ситуация не повторится. `ck dashboard` намеренно не запускает автоочистку: временно недоступный каталог (сетевой диск, отключённая USB-флешка) не должен молча удалять данные пользователя.
+> **Обновляетесь с версии, где ещё не было изоляции pytest, и видите устаревшие `[MISSING]`?** Один раз выполните `ck prune` в production. После перевода тестов на одноразовый `CK_CONFIG_DIR` `pytest` не пишет в `~/.config/ck/projects.json`, поэтому ситуация не повторится. `ck dashboard` намеренно не запускает автоочистку: временно недоступный каталог (сетевой диск, отключённая USB-флешка) не должен молча удалять данные пользователя.
 
 ---
 
@@ -1682,6 +1719,7 @@ CK_DEBUG=1 ./ck-dev add "traced"    # или: ./ck-dev -v add "traced"
 - [x] Утилиты установки и обновления (`ck install`, `ck update`, `ck uninstall`)
 - [x] Shell Completion (автодополнение) для Bash / Zsh: команды, флаги, зарегистрированные проекты и пространства (`ck completion bash|zsh`, fallback на исполняемый `CK_BIN`)
 - [x] Базовое покрытие pytest (`cklib/core.py`, `cklib/history.py` и полный набор тестов CLI/песочницы)
-- [x] Строгая изоляция глобальных пространств в песочнице (`.sandbox/config/spaces/`) и аудит формулировок `ck save` про историю и Git (`v0.9.1`)
-- [x] Редизайн Zsh-автодополнения: меню появляется на ПЕРВОМ `<TAB>` в каждой позиции (флаги после `ck st <project>` / `ck st -l`, пространства и проекты в `ck <TAB>`), динамическая маршрутизация `ck <space> <TAB>`, без подстановки `-`, и `ck-dev` экспортирует `CK_BIN` (`v0.9.1`)
-- [x] Изоляция pytest: каждый тест работает с одноразовым `CK_CONFIG_DIR`, поэтому реальные `~/.config/ck/` (реестр, `state.json`, пространства, локи) никогда не изменяются набором тестов (`v0.9.1`)
+- [x] Строгая изоляция глобальных пространств в песочнице (`.sandbox/config/spaces/`) и аудит формулировок `ck save` про историю и Git (`v0.9.2`)
+- [x] Редизайн Zsh-автодополнения: меню появляется на ПЕРВОМ `<TAB>` в каждой позиции (флаги после `ck st <project>` / `ck st -l`, пространства и проекты в `ck <TAB>`), динамическая маршрутизация `ck <space> <TAB>`, без подстановки `-`, и `ck-dev` экспортирует `CK_BIN` (`v0.9.2`)
+- [x] Изоляция pytest: каждый тест работает с одноразовым `CK_CONFIG_DIR`, поэтому реальные `~/.config/ck/` (реестр, `state.json`, пространства, локи) никогда не изменяются набором тестов (`v0.9.2`)
+- [x] Документация виртуального пространства `project` в автодополнении (предлагается для `move`/`swap`, никогда для `rename`/`delete`) и алиаса `status` только для пространств; ошибка неизвестной команды — одна читаемая строка вместо перенесённого списка выбора (`v0.9.2`)
