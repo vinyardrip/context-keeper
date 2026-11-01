@@ -150,8 +150,8 @@ Space Management (manage global spaces):
                              first, then `[y/N]` confirmation
                              (`-y` / `-f` / `--force` skip it). The
                              default `project` space and the
-                             built-in `local` / `remote` cannot be
-                             deleted
+                             built-in `local` / `remote` / `today`
+                             cannot be deleted
 
 Spaces (out-of-project task lists, ~/.config/ck/spaces/):
   local add <text>          Add a task to the workstation space
@@ -185,12 +185,16 @@ Spaces (out-of-project task lists, ~/.config/ck/spaces/):
                              (spaces are listed there too)
   remote ...                Same commands for the infrastructure
                              space (~/.config/ck/spaces/remote.md)
-  <space> ...               ANY space file placed in
+  today ...                 Same commands for the daily scratch
+                             space (~/.config/ck/spaces/today.md)
+  <space> ...               ANY EXISTING space file placed in
                              ~/.config/ck/spaces/<name>.md is
                              automatically routable with the same
                              commands (dynamic spaces); spaces
                              also render a detailed PREV/FOCUS/NEXT
-                             block under `ck dashboard -v`
+                             block under `ck dashboard -v`.
+                             Registered projects are NEVER routed
+                             here: `ck <project> <command>` exits 1
 
 Editor resolution (ck edit / ck log):
   1. "editor" key in .ck.json at the project root
@@ -559,7 +563,7 @@ _LEGACY_CHOICES = (
     "list", "register", "unregister", "prune", "info",
     "move", "swap", "reorder",
     "delete", "rm",
-    "local", "remote", "space",
+    "local", "remote", "today", "space",
     "completion",
     "dev", "sandbox", "ck-clean",
 )
@@ -599,7 +603,7 @@ _SPACE_MGMT_FLAGS: dict[str, frozenset] = {
 # EXCLUDED: `ck local …` / `ck remote …` route through the space
 # dispatcher (uniformly with every dynamic space) instead of the
 # generic command dispatch.
-_COMMAND_HEADS = frozenset(_LEGACY_CHOICES) - {"local", "remote"}
+_COMMAND_HEADS = frozenset(_LEGACY_CHOICES) - {"local", "remote", "today"}
 
 # Top-level shorthands for the ``st`` view flags: ``ck -l`` is an
 # exact synonym for ``ck st -l``, ``ck -e`` for ``ck st -e`` and
@@ -637,6 +641,7 @@ _LEGACY_FLAGS: dict[str, frozenset] = {
     "prune": frozenset(),
     "local": frozenset(),
     "remote": frozenset(),
+    "today": frozenset(),
     "completion": frozenset({"--list-projects", "--list-spaces"}),
     "install": frozenset({"--dev"}),
     "uninstall": frozenset(),
@@ -694,6 +699,47 @@ def _reject_unknown_flags(cmd: str, rest: List[str],
     return out
 
 
+def _validate_space_route(space: str) -> Optional[int]:
+    """Enforce STRICT space routing before any write or lock.
+
+    ``ck <name> <command>`` addresses SPACES ONLY:
+
+    1. an existing space file (or a built-in default) proceeds;
+    2. a registered project name/path basename is refused with an
+       actionable hint (``ck list <name>`` / ``cd <path> && ck …``);
+    3. anything else is an unknown space.
+
+    Branches 2 and 3 return exit code 1 and print to STDERR. They run
+    before :func:`_run_space_command`, so a rejected invocation never
+    creates a ``*.lock`` file, mutates ``spaces_order`` or emits
+    ``[ok]``.
+    """
+    from . import spaces
+
+    if spaces.is_valid_space(space):
+        return None
+
+    project = spaces.registered_project_for(space)
+    if project is not None:
+        print(ui.notice(
+            ui.ERR,
+            f"'{space}' is a registered project, not a space."),
+            file=sys.stderr)
+        print(ui.notice(
+            ui.INFO,
+            f"Use 'ck list {space}' to view its tasks, or "
+            f"`cd {project.path} && ck <command>` to operate on it."),
+            file=sys.stderr)
+        return 1
+
+    available = ", ".join(spaces.space_order())
+    print(ui.notice(ui.ERR, f"Unknown space: '{space}'."),
+          file=sys.stderr)
+    print(ui.notice(ui.INFO, f"Available spaces: {available}."),
+          file=sys.stderr)
+    return 1
+
+
 def _dispatch_space(space: str, rest: List[str]) -> int:
     """Run a space command with the shared CLI error translation.
 
@@ -704,6 +750,9 @@ def _dispatch_space(space: str, rest: List[str]) -> int:
     errors (unknown task ID, bad spec, missing space) print a clean
     ``ERROR:`` line and exit 2 instead of raising a traceback.
     """
+    route_error = _validate_space_route(space)
+    if route_error is not None:
+        return route_error
     try:
         return _run_space_command(space, rest)
     except KeyError as e:
@@ -739,12 +788,12 @@ def _space_routed_command(raw: List[str]) -> Optional[str]:
     space's Markdown file whenever the head token is NOT a known
     command (or is a built-in space name) and the second token is a
     space action (``add`` / ``list`` / ``done`` / ``focus`` /
-    ``note``). The space itself may be a built-in default
-    (``local`` / ``remote``), any file discovered in
-    ``~/.config/ck/spaces/``, or a brand-new name whose file the
-    ``add`` action creates lazily on first write (read/mutate
-    actions on a missing space file fail with a clean
-    ``Space '<name>' not found`` error).
+    ``note``). The space itself must be a built-in default
+    (``local`` / ``remote`` / ``today``) or an EXISTING file in
+    ``~/.config/ck/spaces/``. STRICT routing (v0.9.3) validates the
+    target in :func:`_dispatch_space`: a registered project or an
+    unknown name is refused before any lock/write, so a project can
+    never be mistaken for a space.
 
     Returns None for every non-space invocation so command dispatch
     is completely unaffected.
@@ -887,8 +936,8 @@ def _dispatch(argv: Optional[List[str]] = None) -> int:
     # must stay fast AND silent — its STDOUT is parsed by the shell.
     if raw[0] == "completion":
         return _run_completion(raw[1:])
-    # AUTO-INIT: default global spaces (local/remote) materialize on
-    # the first CLI use, from any working directory; existing space
+    # AUTO-INIT: default global spaces (local/remote/today) materialize
+    # on the first CLI use, from any working directory; existing space
     # files are strictly preserved. In dev mode the hook seeds the
     # sandbox copy (`.sandbox/config/spaces/`) only.
     _ensure_default_spaces()
@@ -1143,7 +1192,7 @@ _NO_STARTUP_CHECK_COMMANDS = frozenset({
 
 
 def _ensure_default_spaces() -> None:
-    """Materialize the default global spaces (``local`` / ``remote``).
+    """Materialize the default spaces (``local`` / ``remote`` / ``today``).
 
     Startup auto-init (v0.8.12): the first ``ck`` invocation — from
     ANY working directory — creates the missing built-in space files
@@ -1954,7 +2003,7 @@ def _legacy_dispatch(raw: List[str]) -> int:
                           "purged from the global registry.")
             else:
                 _notice(ui.OK, "Nothing to prune.")
-        elif cmd in ("local", "remote"):
+        elif cmd in ("local", "remote", "today"):
             return _run_space_command(cmd, rest)
         elif cmd == "space":
             return _run_space_mgmt(rest)

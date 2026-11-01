@@ -1,12 +1,14 @@
 """Documentation consistency: version bump and roadmap hygiene.
 
-Guards the v0.9.2 documentation cleanup:
+Guards the v0.9.3 documentation update:
 
 - every version source agrees (package, pyproject, README, ROADMAP);
 - completed features (Shell Completion) never reappear in the
   README backlog sections;
 - the English and Russian roadmap sections stay in sync (same number
-  of pending / completed entries).
+  of pending / completed entries);
+- the strict space-routing rule and the dev-session ``ck info`` note
+  are documented in both languages (v0.9.3).
 """
 
 from __future__ import annotations
@@ -68,6 +70,15 @@ class TestDocumentationConsistency(unittest.TestCase):
         russian = _section(self.readme, "### Завершённые")
         self.assertIn("Shell Completion", english)
         self.assertIn("Shell Completion", russian)
+
+    def test_strict_routing_and_dev_info_are_documented_bilingually(self):
+        """v0.9.3: both notes must exist in the EN and RU sections."""
+        self.assertGreaterEqual(
+            self.readme.count("routes only to spaces"), 2)
+        self.assertGreaterEqual(
+            self.readme.count("Why strict, not magical"), 2)
+        self.assertGreaterEqual(
+            self.readme.count("`ck info` in a dev session"), 2)
 
     def test_bilingual_roadmap_checklists_have_parity(self):
         pairs = (

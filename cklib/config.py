@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-VERSION = "0.9.2"
+VERSION = "0.9.3"
 CK_DIR_NAME = ".ck"
 # Traversal-boundary markers. Kept in sync with
 # ``cklib.sandbox.SANDBOX_DIR_NAME`` (".sandbox") and Git's ".git".
@@ -98,12 +98,13 @@ GLOBAL_REGISTRY_FILE = GLOBAL_CONFIG_DIR / "projects.json"
 GLOBAL_STATE_FILE = GLOBAL_CONFIG_DIR / "state.json"
 LEGACY_GLOBAL_CONFIG_FILE = Path.home() / ".ckrc"
 
-# Out-of-project task spaces (``ck local`` / ``ck remote``). Stored
-# as plain Markdown plans under ``~/.config/ck/spaces/<name>.md``.
+# Out-of-project task spaces (``ck local`` / ``ck remote`` / ``ck today``).
+# Stored as plain Markdown plans under ``~/.config/ck/spaces/<name>.md``.
 SPACES_DIR_NAME = "spaces"
-SPACE_NAMES: tuple[str, ...] = ("local", "remote")
+SPACE_NAMES: tuple[str, ...] = ("local", "remote", "today")
 SPACE_LOCAL = "local"
 SPACE_REMOTE = "remote"
+SPACE_TODAY = "today"
 
 # STRUCTURAL PLACEHOLDER MARKER. The ``ck init`` seed task carries
 # this literal HTML comment appended to its raw Markdown line. The very

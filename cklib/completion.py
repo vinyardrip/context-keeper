@@ -14,7 +14,7 @@ exactly one positional project: after a project name or flag is
 present, both shells switch to valid flags/options instead of
 repeating projects. ``ck <space> <TAB>`` routes through the persisted
 space sequence, so custom spaces complete their actions just like the
-built-in ``local`` / ``remote``.
+built-in ``local`` / ``remote`` / ``today``.
 
 FIRST-TAB MENU: in Zsh every multi-match position shows its list on
 the FIRST <TAB>. Plain ``compadd`` / ``_describe`` insertion would
@@ -371,9 +371,9 @@ _ck_completion() {
                         continue
                     fi
                     # `project` is virtual and cannot be renamed or
-                    # deleted; local/remote are protected built-ins.
+                    # deleted; local/remote/today are protected built-ins.
                     case "$__ck_action:$__ck_line" in
-                        rename:project|delete:project|delete:local|delete:remote)
+                        rename:project|delete:project|delete:local|delete:remote|delete:today)
                             continue
                             ;;
                     esac
@@ -685,8 +685,9 @@ _ck() {
                 return 0
             fi
             # SPACE ARGUMENTS follow the persisted spaces_order. The
-            # virtual `project` cannot be renamed/deleted, local/remote
-            # are protected built-ins, and swap excludes its first pick.
+            # virtual `project` cannot be renamed/deleted,
+            # local/remote/today are protected built-ins, and swap
+            # excludes its first pick.
             case $words[3] in
                 move)
                     if (( CURRENT == 4 )); then
@@ -707,7 +708,7 @@ _ck() {
                     ;;
                 delete)
                     if (( CURRENT == 4 )); then
-                        _ck_spaces project local remote
+                        _ck_spaces project local remote today
                     fi
                     ;;
             esac

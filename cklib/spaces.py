@@ -8,6 +8,7 @@ list for activity that belongs to no single Git repository:
   reorganisation, …);
 - ``remote`` — virtual / remote infrastructure (hosting, VPS,
   Proxmox/KVM, Docker hosts, …);
+- ``today``  — the current day's scratch list (no reset logic yet);
 - custom   — ANY Markdown file placed in ``~/.config/ck/spaces/``
   is automatically a routable space (dynamic discovery — no
   registration step, no config change).
@@ -16,9 +17,9 @@ Storage is deliberately boring: one plain Markdown plan per space
 at ``~/.config/ck/spaces/<name>.md``, using the exact same
 ``- [ ]`` / ``- [>]`` / ``- [x]`` task syntax as ``PLAN.md`` so
 the same parser and renderer apply. The BUILT-IN defaults
-(``local`` / ``remote``) are materialized from the canonical
-scaffold at CLI startup (:func:`ensure_default_spaces`) — an
-existing file is strictly preserved, never rewritten. Custom
+(``local`` / ``remote`` / ``today``) are materialized from the
+canonical scaffold at CLI startup (:func:`ensure_default_spaces`) —
+an existing file is strictly preserved, never rewritten. Custom
 spaces and their parent directories still appear lazily — no
 ``~/.config/ck/spaces`` tree for them until the first write.
 
@@ -40,8 +41,10 @@ same grid pipeline as the Git projects table).
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -68,6 +71,11 @@ _EMPTY_SPACE = "# {space}\n\n## Current Sprint\n\n## Completed\n"
 # start with an alphanumeric, and never ``.``/``..`` — this
 # structurally excludes path separators and traversal attempts.
 _SAFE_SPACE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+# Process start time (monotonic wall clock). A space ``*.lock`` file
+# whose mtime is OLDER than this process began belongs to a previous
+# invocation and is stale — startup cleanup may remove it.
+_PROCESS_START_TIME = time.time()
 
 
 # ---------------------------------------------------------------------- #
@@ -148,7 +156,7 @@ def history_path(space: str) -> Path:
 
 
 def is_builtin_space(space: str) -> bool:
-    """True for the built-in default spaces (``local``/``remote``)."""
+    """True for the built-in default spaces (``local``/``remote``/``today``)."""
     return space in config.SPACE_NAMES
 
 
@@ -228,25 +236,96 @@ def is_valid_space(space: str) -> bool:
 
 
 def routable_space_name(name: str) -> Optional[str]:
-    """Space name when ``name`` routes to a space command.
+    """Structurally safe space name for ``ck <name> <command>``.
 
-    DYNAMIC ROUTING: every structurally safe name routes —
+    DYNAMIC ROUTING: this helper only rejects unsafe tokens — path
+    separators, traversal attempts, empty names, history archives.
+    Whether the name actually resolves to a space is decided by the
+    dispatcher (v0.9.3 strict routing): an existing space file or a
+    built-in default proceeds, while a registered project or an
+    unknown name is refused before any lock or write.
 
-    1. the built-in defaults (``local`` / ``remote``) always;
-    2. any discovered space file in the spaces directory;
-    3. any other safe name — the ``add`` write action
-       materializes a brand-new dynamic space lazily on its
-       first write (mirroring the built-ins' lazy directory
-       creation), while read/mutate actions on a space file
-       that does not exist fail with a clean
-       ``Space '<name>' not found`` error.
-
-    Returns None for unsafe names (path separators, traversal
-    attempts, empty) so they can never become filenames.
+    Returns None for unsafe names so they can never become filenames.
     """
     if not _is_safe_space_name(name) or is_space_history_name(name):
         return None
     return name
+
+
+def registered_project_for(name: str):
+    """Registered project matching ``name``, or None.
+
+    STRICT SPACE ROUTING: ``ck <name> <command>`` never resolves to a
+    project. This helper lets the dispatcher detect the collision and
+    refuse with an actionable message instead of lazily creating a
+    same-named space file. Matching is by registry ``name`` or the
+    project path's basename (so both spellings of the folder work).
+    """
+    if not name:
+        return None
+    try:
+        from . import registry
+        for entry in registry.list_projects():
+            if entry.name == name:
+                return entry
+            try:
+                if Path(entry.path).name == name:
+                    return entry
+            except (TypeError, ValueError):
+                continue
+    except Exception:
+        # A broken registry must never make routing fail with a
+        # traceback; fall through to the unknown-space branch.
+        return None
+    return None
+
+
+def cleanup_stale_space_locks() -> list[Path]:
+    """Best-effort removal of stale ``*.lock`` files in the spaces dir.
+
+    A lock file older than the CURRENT process is a leftover from an
+    interrupted invocation. Cleanup never creates the spaces directory
+    or any file, and it skips a lock still held by a live process: the
+    unlink happens only after a non-blocking ``flock`` succeeds (POSIX;
+    on platforms without ``fcntl`` the age check is the only guard).
+    Returns the paths actually removed.
+    """
+    try:
+        directory = spaces_dir()
+        if not directory.is_dir():
+            return []
+        locks = list(directory.glob("*.lock"))
+    except OSError:
+        return []
+
+    removed: list[Path] = []
+    for lock in locks:
+        try:
+            if lock.stat().st_mtime >= _PROCESS_START_TIME:
+                continue
+            fd = os.open(str(lock), os.O_RDWR)
+        except OSError:
+            continue
+        try:
+            try:
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except ImportError:
+                pass
+            except OSError:
+                # Held by a live writer: leave it alone.
+                continue
+            try:
+                lock.unlink()
+                removed.append(lock)
+            except OSError:
+                pass
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    return removed
 
 
 # The DEFAULT, directory-based project space. It is not a file: it
@@ -259,9 +338,9 @@ PROJECT_SPACE = "project"
 # Names that must NEVER become a space, even though they are
 # structurally safe filenames:
 #
-# - ``local`` / ``remote`` — the built-in defaults are permanent
-#   contexts (always listed by the dashboard); a same-named file
-#   would shadow the default;
+# - ``local`` / ``remote`` / ``today`` — the built-in defaults are
+#   permanent contexts (always listed by the dashboard); a same-named
+#   file would shadow the default;
 # - ``project`` — the sentinel the management list uses for the
 #   active project row;
 # - ``list`` / ``create`` / ``rename`` / ``delete`` — the
@@ -269,8 +348,8 @@ PROJECT_SPACE = "project"
 #   top-level command. A space named after one of them makes
 #   ``ck <name> <verb>`` ambiguous for the reader.
 RESERVED_SPACE_NAMES = frozenset({
-    "local", "remote", PROJECT_SPACE, "list", "create", "rename", "delete",
-    "move", "swap", "reorder",
+    "local", "remote", "today", PROJECT_SPACE, "list", "create", "rename",
+    "delete", "move", "swap", "reorder",
 })
 
 
@@ -510,8 +589,9 @@ def space_order(*, include_project: bool = False) -> list[str]:
     actually exists: stale entries are dropped, safe unknown names
     are ignored, new spaces are appended in canonical order and
     duplicates collapse. With no persisted order the canonical
-    default applies (``project``, then ``local``/``remote``, then
-    custom spaces sorted).
+    default applies (``project``, then ``local``/``remote``/``today``,
+    then custom spaces sorted). Existing persisted orders are never
+    rewritten by this read-only reconciliation.
     """
     available = available_space_names()
     if include_project:
@@ -644,7 +724,7 @@ def create_space(name: str) -> Path:
 
 
 def ensure_default_spaces() -> list[str]:
-    """Create missing default spaces (``local`` / ``remote``) at startup.
+    """Create missing defaults (``local`` / ``remote`` / ``today``).
 
     Idempotent, strictly non-destructive initialization (v0.8.12):
 
@@ -669,6 +749,13 @@ def ensure_default_spaces() -> list[str]:
     Returns the list of names actually created (empty when every
     default already existed).
     """
+    # Best-effort housekeeping BEFORE seeding: locks left by an
+    # interrupted earlier invocation are safe to drop, while locks
+    # this process is about to create are newer than the cutoff.
+    try:
+        cleanup_stale_space_locks()
+    except Exception:
+        pass
     created: list[str] = []
     for name in config.SPACE_NAMES:
         try:
@@ -1492,6 +1579,8 @@ __all__ = [
     "available_space_names",
     "is_valid_space",
     "routable_space_name",
+    "registered_project_for",
+    "cleanup_stale_space_locks",
     "RESERVED_SPACE_NAMES",
     "read_space_order",
     "write_space_order",

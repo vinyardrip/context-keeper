@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.9.2-blue)]()
+[![version](https://img.shields.io/badge/version-0.9.3-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -104,7 +104,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.9.2
+ck -v    # → ck version 0.9.3
 ```
 
 ---
@@ -159,13 +159,13 @@ ck -v    # → ck version 0.9.2
 | ck unregister [--path PATH \| NAME] | Remove a project from the registry |
 | ck prune | Purge registry entries whose folders no longer exist; reports each purged path and a summary count |
 | ck space list / ls | Space management view: every discovered global space (dynamically scanned from `~/.config/ck/spaces/*.md`, including empty ones) plus the active project — the virtual `project` space, highlighted with bold accent on its name (no text tag), i.e. the context un-prefixed commands (`ck st`, `ck list`) resolve against. Rows follow the persisted `spaces_order` sequence (default: `project` first). Rendered as a thin box-drawing table (`┌─┬┐ │ ├─┼┤ └─┴┘`) with quiet hairline borders |
-| ck space create \<name\> / new | Create a new space from the default template (`## Current Sprint` / `## Completed`); rejects unsafe, reserved (`list`/`create`/`rename`/`delete`/`project`/`local`/`remote`) and taken names |
+| ck space create \<name\> / new | Create a new space from the default template (`## Current Sprint` / `## Completed`); rejects unsafe, reserved (`list`/`create`/`rename`/`delete`/`project`/`local`/`remote`/`today`) and taken names |
 | ck space rename \<old\> \<new\> / mv | Rename a space, carrying its `.json` note sidecar and `.HISTORY.md` archive along so no process notes or audit history are lost; a persisted position is carried over to the new name |
 | ck space move \<name\> \<position\> | Move a space to a 1-based position in the persisted `spaces_order` sequence (the virtual `project` space is a valid target). The order is stored in `~/.config/ck/state.json` and drives both `ck space list` and the dashboard's `SPACES` table |
 | ck space swap \<name1\> \<name2\> | Exchange the positions of two spaces (any two entries of the sequence, including `project`) |
 | ck space reorder | Normalize/re-index the persisted sequence against the spaces that currently exist: stale names are dropped, new spaces appended, duplicates collapsed, and the `project` sentinel keeps its slot. Prints the numbered result |
-| ck space delete \<name\> [-f] | Permanently delete a space **and** its note sidecar / `.HISTORY.md`, then drop it from the persisted order. The target is validated **first** (a missing space reports `ERROR:` with exit 1 immediately — no stdin read, no prompt; invalid input exits 2), and an existing space asks `Permanently delete …? [y/N]` on a terminal and refuses without confirmation when non-interactive; `-f` / `--force` (or `-y` / `--yes`) skips the prompt. The virtual `project` space and the built-in `local` / `remote` can never be deleted. No `rm` alias — the verb is spelled out, and task deletion stays the separate top-level `ck delete <ID>` |
-| ck local add \<text\> | Add a task to the workstation space (`~/.config/ck/spaces/local.md`; `local`/`remote` are auto-initialized at startup — an existing space file is never overwritten) |
+| ck space delete \<name\> [-f] | Permanently delete a space **and** its note sidecar / `.HISTORY.md`, then drop it from the persisted order. The target is validated **first** (a missing space reports `ERROR:` with exit 1 immediately — no stdin read, no prompt; invalid input exits 2), and an existing space asks `Permanently delete …? [y/N]` on a terminal and refuses without confirmation when non-interactive; `-f` / `--force` (or `-y` / `--yes`) skips the prompt. The virtual `project` space and the built-in `local` / `remote` / `today` can never be deleted. No `rm` alias — the verb is spelled out, and task deletion stays the separate top-level `ck delete <ID>` |
+| ck local add \<text\> | Add a task to the workstation space (`~/.config/ck/spaces/local.md`; `local`/`remote`/`today` are auto-initialized at startup — an existing space file is never overwritten) |
 | ck local list | List workstation space tasks in the project `ck list` layout (`##` section headers, `[ ]`/`[>]`/`[x]` markers), with attached process notes rendered as `* Note:` lines under their tasks |
 | ck local st / ck local status | Detailed workstation space status view — same layout as `ck st` (header bar, progress, CURRENT FOCUS with its process note, WORK CONTEXT: Done / Skipped / Focus / Next / Upcoming / Unfocused-Paused / Backlog) |
 | ck local st -l / --list | Space task listing (synonym of `ck local list`) |
@@ -188,14 +188,20 @@ ck -v    # → ck version 0.9.2
 | ck remote notes | List every active process note of the infrastructure space |
 | ck remote edit | Open the infrastructure space file (`~/.config/ck/spaces/remote.md`) in the editor |
 | ck remote dashboard | Alias for `ck dashboard` |
+| ck today \<command\> | Same commands for the daily scratch space (`~/.config/ck/spaces/today.md`), seeded at startup with the empty template; no daily-reset logic yet |
 | ck \<space\> \<command\> | Dynamic space routing: ANY space file placed in `~/.config/ck/spaces/<name>.md` is automatically routable with the same commands (`add` / `list` / `st` / `done` / `focus` / `start` / `note` / `notes` / `edit` / `dashboard`), rendered uniformly in the `SPACES (GLOBAL CONTEXTS)` dashboard table |
+
+**`ck <name>` routes only to spaces.** A registered project is never a dynamic space, even if its name matches. Running `ck <project-name> <command>` prints `[err] '<name>' is a registered project, not a space.` and exits 1 — no `.lock`, no `[ok]`, no silent loss. To operate on a project from another directory, either `cd` into it, or use `ck list <name>` for a read-only view.
+
+**Why strict, not magical.** A file manager or TUI with a project sidebar (e.g. a terminal workspace with a left-hand project tree) already gives one-keystroke project switching. Making `ck <name>` silently resolve to a project would duplicate that with a second, invisible rule — and would collide the moment a real space and a project share a name. Strict routing keeps `<name>` predictable: it is always a space, never a project.
 
 > **Dev-mode path isolation.** While a sandbox session is active
 > (`ck-dev` / `CK_SANDBOX=1` / `CK_DEV=1` / cwd under `.sandbox/`), every
 > `~/.config/ck/spaces/...` path and the space order in
 > `~/.config/ck/state.json` are replaced by `.sandbox/config/spaces/...` and
 > `.sandbox/config/state.json`. Host spaces are never read, discovered or
-> written; the sandbox starts with its own `local` / `remote` scaffolds.
+> written; the sandbox starts with its own `local` / `remote` / `today`
+> scaffolds.
 
 The `ck dashboard` / `ck -g` output always opens with a unified
 `SPACES (GLOBAL CONTEXTS)` table (`Space | Focus Task | Progress | Last
@@ -910,6 +916,15 @@ Local commits only. `ck save` commits if you confirm; `ck` never pushes. `ck upd
 
 `ck` ships with a Zero-Trust development mode: everything you do against real project data is **read-only**, and every write lands in a disposable sandbox. It is impossible for a dev session to corrupt production user data.
 
+### `ck info` in a dev session
+
+**`ck info` in a dev session.** Inside `./ck-dev`, `ck info` reports the **resolved** config path, e.g. `config_dir: /home/you/.config/ck`, not the sandbox path. This is intentional: sandbox mode is *write interception*, not *read isolation* — reads transparently fall through to production until a sandbox copy exists (the documented dev read-through). To see the effective sandbox root, check `CK_SANDBOX_ROOT`:
+
+```bash
+echo "$CK_SANDBOX_ROOT"
+# /path/to/checkout/.sandbox
+```
+
 ### Isolated Sandbox (`.sandbox/`)
 
 `.sandbox/` is a git-ignored directory at the repository root. It safely stores dev-mode artifacts — sandboxed project copies, pseudo-configs, and debug logs — without dirtying the main working tree:
@@ -920,13 +935,13 @@ Local commits only. `ck save` commits if you confirm; `ck` never pushes. `ck upd
 │   └── <name>-<hash>/   # one sandbox dir per real project
 │       └── .ck/         # PLAN.md, HISTORY.md, state.json, locks …
 ├── config/              # sandboxed global registry / state / spaces
-│   └── spaces/          # local/, remote/, custom spaces (isolated)
+│   └── spaces/          # local/, remote/, today/, custom spaces (isolated)
 └── dev.log              # debug log (see below)
 ```
 
 - Created automatically on the first dev-mode write; never committed (`.gitignore`).
 - Project sandbox copies are **seeded from the real state** (e.g. appends to a sandboxed `HISTORY.md` start from the real history), so a dev session mirrors production without mutating it.
-- **Global spaces are the exception: they are strictly isolated.** `~/.config/ck/spaces/` is replaced by `.sandbox/config/spaces/` for the whole session, so host spaces are never read or discovered; the sandbox seeds its own empty `local` / `remote` scaffolds.
+- **Global spaces are the exception: they are strictly isolated.** `~/.config/ck/spaces/` is replaced by `.sandbox/config/spaces/` for the whole session, so host spaces are never read or discovered; the sandbox seeds its own empty `local` / `remote` / `today` scaffolds.
 
 ### Safe Development Binary (`ck-dev`)
 
@@ -1127,6 +1142,9 @@ Logs go **exclusively** to `stderr` and `.sandbox/dev.log` — `stdout` stays co
 - [x] Install and update utilities (`ck install`, `ck update`, `ck uninstall`)
 - [x] Shell Completion for Bash / Zsh: commands, flags, registered projects and spaces (`ck completion bash|zsh`, executable `CK_BIN` fallback)
 - [x] Baseline pytest coverage (`cklib/core.py`, `cklib/history.py` and the full CLI/sandbox suite)
+- [x] Strict space routing: `ck <name>` addresses only spaces; registered projects and unknown names exit 1 before any lock or write (`v0.9.3`)
+- [x] Default `today` space auto-seeded alongside `local` / `remote`, with the default order `project, local, remote, today`; existing state is never rewritten (`v0.9.3`)
+- [x] Dev docs (EN+RU): resolved `ck info` config path in sandbox sessions and the strict-routing rule with its rationale (`v0.9.3`)
 - [x] Strict sandbox isolation for global spaces (`.sandbox/config/spaces/`) and `ck save` history-vs-Git wording audit (`v0.9.2`)
 - [x] Zsh completion redesign: the menu appears on the FIRST `<TAB>` at every position (flags after `ck st <project>` / `ck st -l`, spaces and projects in `ck <TAB>`), dynamic `ck <space> <TAB>` routing, no prefix-then-menu `-` insertion, and `ck-dev` exports `CK_BIN` (`v0.9.2`)
 - [x] pytest isolation: every test runs against a throwaway `CK_CONFIG_DIR`, so the real `~/.config/ck/` (registry, `state.json`, spaces, locks) is never written by the suite (`v0.9.2`)
@@ -1223,7 +1241,22 @@ chmod +x ck
 > `~/.config/ck/state.json` заменяются на `.sandbox/config/spaces/...` и
 > `.sandbox/config/state.json`. Пространства хоста не читаются, не
 > обнаруживаются и не изменяются; песочница начинает с собственными
-> пустыми шаблонами `local` / `remote`.
+> пустыми шаблонами `local` / `remote` / `today`.
+
+**`ck <name>` routes only to spaces.** Зарегистрированный проект никогда не
+становится динамическим пространством, даже если имя совпадает. Команда
+`ck <project-name> <command>` печатает `[err] '<name>' is a registered
+project, not a space.` и завершается с кодом 1 — без `.lock`, без `[ok]` и без
+молчаливой потери задачи. Чтобы работать с проектом из другого каталога,
+перейдите в него (`cd`) или используйте `ck list <name>` для просмотра только
+на чтение.
+
+**Why strict, not magical.** Файловый менеджер или TUI с боковой панелью
+проектов (например, терминальный воркспейс с деревом проектов слева) уже даёт
+переключение проекта одним нажатием. Молчаливое разрешение `ck <name>` в проект
+дублировало бы это вторым, невидимым правилом — и ломалось бы в момент, когда
+реальное пространство и проект получают одинаковое имя. Строгая маршрутизация
+сохраняет `<name>` предсказуемым: это всегда пространство, никогда проект.
 
 ### Инициализация и регистрация
 
@@ -1537,6 +1570,21 @@ export EDITOR="nano"  # используется, если VISUAL не зада�
 
 В `ck` встроен режим разработки Zero-Trust: работа с реальными данными проекта ведётся **только на чтение**, а все записи попадают в одноразовую песочницу. Dev-сессия физически не может испортить пользовательские данные.
 
+### `ck info` in a dev session
+
+**`ck info` in a dev session.** Внутри `./ck-dev` команда `ck info` показывает
+**разрешённый** путь конфигурации, например `config_dir: /home/you/.config/ck`,
+а не путь песочницы. Это сделано намеренно: режим песочницы — это
+*перехват записей*, а не *изоляция чтения* — чтения прозрачно уходят в
+продакшен, пока не появится песочная копия (документированный dev
+read-through). Чтобы увидеть фактический корень песочницы, проверьте
+`CK_SANDBOX_ROOT`:
+
+```bash
+echo "$CK_SANDBOX_ROOT"
+# /path/to/checkout/.sandbox
+```
+
 ### Изолированная песочница (`.sandbox/`)
 
 `.sandbox/` — игнорируемый Git каталог в корне репозитория. В нём безопасно хранятся артефакты dev-режима: песочные копии проектов, псевдо-конфиги и отладочные логи — рабочее дерево остаётся чистым:
@@ -1547,13 +1595,13 @@ export EDITOR="nano"  # используется, если VISUAL не зада�
 │   └── <имя>-<hash>/    # своя песочница на каждый реальный проект
 │       └── .ck/         # PLAN.md, HISTORY.md, state.json, lock-файлы …
 ├── config/              # песочные реестр, state и пространства
-│   └── spaces/          # local/, remote/, кастомные пространства (изолированы)
+│   └── spaces/          # local/, remote/, today/, кастомные пространства (изолированы)
 └── dev.log              # отладочный лог
 ```
 
 - Создаётся автоматически при первой dev-записи; в Git не попадает (`.gitignore`).
 - Песочные копии **проектов наследуют реальное состояние** (например, запись в песочный `HISTORY.md` начинается с реальной истории), поэтому dev-сессия отражает продакшен, не изменяя его.
-- **Глобальные пространства — исключение: они строго изолированы.** На всю сессию `~/.config/ck/spaces/` заменяется на `.sandbox/config/spaces/`, поэтому пространства хоста не читаются и не обнаруживаются; песочница создаёт собственные пустые шаблоны `local` / `remote`.
+- **Глобальные пространства — исключение: они строго изолированы.** На всю сессию `~/.config/ck/spaces/` заменяется на `.sandbox/config/spaces/`, поэтому пространства хоста не читаются и не обнаруживаются; песочница создаёт собственные пустые шаблоны `local` / `remote` / `today`.
 
 ### Безопасный бинарник разработки (`ck-dev`)
 
@@ -1719,6 +1767,9 @@ CK_DEBUG=1 ./ck-dev add "traced"    # или: ./ck-dev -v add "traced"
 - [x] Утилиты установки и обновления (`ck install`, `ck update`, `ck uninstall`)
 - [x] Shell Completion (автодополнение) для Bash / Zsh: команды, флаги, зарегистрированные проекты и пространства (`ck completion bash|zsh`, fallback на исполняемый `CK_BIN`)
 - [x] Базовое покрытие pytest (`cklib/core.py`, `cklib/history.py` и полный набор тестов CLI/песочницы)
+- [x] Строгая маршрутизация пространств: `ck <name>` адресует только пространства; зарегистрированные проекты и неизвестные имена завершаются с кодом 1 до любого lock или записи (`v0.9.3`)
+- [x] Пространство `today` по умолчанию создаётся вместе с `local` / `remote`; порядок по умолчанию `project, local, remote, today`, существующее состояние не перезаписывается (`v0.9.3`)
+- [x] Документация dev-режима (EN+RU): разрешённый путь `ck info` в песочнице и правило строгой маршрутизации с обоснованием (`v0.9.3`)
 - [x] Строгая изоляция глобальных пространств в песочнице (`.sandbox/config/spaces/`) и аудит формулировок `ck save` про историю и Git (`v0.9.2`)
 - [x] Редизайн Zsh-автодополнения: меню появляется на ПЕРВОМ `<TAB>` в каждой позиции (флаги после `ck st <project>` / `ck st -l`, пространства и проекты в `ck <TAB>`), динамическая маршрутизация `ck <space> <TAB>`, без подстановки `-`, и `ck-dev` экспортирует `CK_BIN` (`v0.9.2`)
 - [x] Изоляция pytest: каждый тест работает с одноразовым `CK_CONFIG_DIR`, поэтому реальные `~/.config/ck/` (реестр, `state.json`, пространства, локи) никогда не изменяются набором тестов (`v0.9.2`)

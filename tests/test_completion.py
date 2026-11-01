@@ -343,7 +343,8 @@ class TestSpaceNameListing(IsolatedRegistry):
         rc, out, err = _run_main(["completion", "--list-spaces"])
         self.assertEqual(rc, 0, err)
         self.assertEqual(
-            out.splitlines(), ["project", "local", "remote", "work"])
+            out.splitlines(),
+            ["project", "local", "remote", "today", "work"])
 
     def test_persisted_spaces_order_is_respected(self):
         self.write_spaces(
@@ -354,7 +355,7 @@ class TestSpaceNameListing(IsolatedRegistry):
         self.assertEqual(rc, 0, err)
         self.assertEqual(
             out.splitlines(),
-            ["project", "office", "local", "remote", "work"],
+            ["project", "office", "local", "remote", "work", "today"],
         )
 
     def test_missing_state_is_silent_and_unmaterialized(self):
@@ -362,7 +363,8 @@ class TestSpaceNameListing(IsolatedRegistry):
         self.assertFalse(self.spaces_dir.exists())
         rc, out, err = _run_main(["completion", "--list-spaces"])
         self.assertEqual(rc, 0, err)
-        self.assertEqual(out.splitlines(), ["project", "local", "remote"])
+        self.assertEqual(
+            out.splitlines(), ["project", "local", "remote", "today"])
         self.assertNotIn("Traceback", err)
         self.assertFalse(self.state_file.exists())
         self.assertFalse(self.spaces_dir.exists())
@@ -506,7 +508,7 @@ class TestBashCompletionBehaviour(_ShellHarness):
             ["work", "office"],
             order=["project", "office", "local", "remote", "work"],
         )
-        ordered = ["project", "office", "local", "remote", "work"]
+        ordered = ["project", "office", "local", "remote", "work", "today"]
 
         self.assertEqual(
             self._complete(["ck", "space", "move", ""]), ordered)
@@ -516,7 +518,7 @@ class TestBashCompletionBehaviour(_ShellHarness):
         # old names for the current command semantics.
         self.assertEqual(
             self._complete(["ck", "space", "rename", ""]),
-            ["office", "local", "remote", "work"])
+            ["office", "local", "remote", "work", "today"])
         # Only custom spaces can be deleted: project + built-ins are
         # protected by `ck space delete` pre-flight validation.
         self.assertEqual(
@@ -527,7 +529,7 @@ class TestBashCompletionBehaviour(_ShellHarness):
         # still applies.
         self.assertEqual(
             self._complete(["ck", "space", "swap", "office", ""]),
-            ["project", "local", "remote", "work"])
+            ["project", "local", "remote", "work", "today"])
         self.assertEqual(
             self._complete(["ck", "space", "delete", "o"]), ["office"])
 
@@ -787,7 +789,7 @@ class TestZshCompletionBehaviour(_ShellHarness):
         self._registry()
         self._spaces()
         offered, insert = self._offer("ck", "space", "delete", "")
-        self.assertEqual(sorted(offered), ["agent", "airlock", "today"])
+        self.assertEqual(sorted(offered), ["agent", "airlock"])
         self.assertEqual(insert, "")
 
     @unittest.skipUnless(ZSH, "zsh is not installed")
@@ -856,7 +858,7 @@ class TestZshCompletionBehaviour(_ShellHarness):
         )
         self.assertEqual(
             sorted(offered),
-            ["local", "project", "remote", "work"])
+            ["local", "project", "remote", "today", "work"])
 
     @unittest.skipUnless(ZSH, "zsh is not installed")
     def test_projects_are_parsed_from_registry_mock(self):

@@ -202,15 +202,16 @@ class TestSpaceOrderBasics(_IsolatedHome):
         self.make_spaces("work", "blog")
         self.assertEqual(
             spaces.space_order(include_project=True),
-            ["project", "local", "remote", "blog", "work"])
+            ["project", "local", "remote", "today", "blog", "work"])
 
     def test_dashboard_order_excludes_project(self):
         self.make_spaces("work")
         self.assertEqual(
             spaces.space_order(include_project=False),
-            ["local", "remote", "work"])
+            ["local", "remote", "today", "work"])
         from cklib.core import _space_order
-        self.assertEqual(_space_order(), ["local", "remote", "work"])
+        self.assertEqual(
+            _space_order(), ["local", "remote", "today", "work"])
 
     def test_reads_do_not_create_the_state_file(self):
         self.assertEqual(spaces.read_space_order(), [])
@@ -230,7 +231,7 @@ class TestSpaceOrderBasics(_IsolatedHome):
             "work", "ghost", "local", "work", 7, "remote"]})
         self.assertEqual(
             spaces.space_order(include_project=True),
-            ["project", "work", "local", "remote"])
+            ["project", "work", "local", "remote", "today"])
 
 
 class TestSpaceMove(_IsolatedHome):
@@ -239,7 +240,7 @@ class TestSpaceMove(_IsolatedHome):
         self.make_spaces("work", "blog")
         order = spaces.move_space("work", 1)
         self.assertEqual(order, ["work", "project", "local", "remote",
-                                 "blog"])
+                                 "today", "blog"])
         self.assertEqual(self.state()["spaces_order"], order)
         self.assertEqual(spaces.space_order(include_project=True), order)
 
@@ -304,12 +305,12 @@ class TestSpaceSwap(_IsolatedHome):
 
     def test_swap_persists(self):
         order = spaces.swap_spaces("local", "remote")
-        self.assertEqual(order, ["project", "remote", "local"])
+        self.assertEqual(order, ["project", "remote", "local", "today"])
         self.assertEqual(self.state()["spaces_order"], order)
 
     def test_swap_with_project(self):
         order = spaces.swap_spaces("project", "remote")
-        self.assertEqual(order, ["remote", "local", "project"])
+        self.assertEqual(order, ["remote", "local", "project", "today"])
 
     def test_swap_same_space_is_noop(self):
         order = spaces.space_order(include_project=True)
@@ -325,7 +326,7 @@ class TestSpaceSwap(_IsolatedHome):
         self.assertEqual(rc, 0, err)
         self.assertIn("Swapped spaces 'local' <-> 'remote'", out)
         self.assertEqual(spaces.read_space_order(),
-                         ["project", "remote", "local"])
+                         ["project", "remote", "local", "today"])
 
 
 class TestSpaceReorder(_IsolatedHome):
@@ -336,13 +337,13 @@ class TestSpaceReorder(_IsolatedHome):
             "work", "ghost", "project", "work"]})
         order = spaces.reorder_spaces()
         self.assertEqual(
-            order, ["work", "project", "local", "remote", "blog"])
+            order, ["work", "project", "local", "remote", "today", "blog"])
         self.assertEqual(self.state()["spaces_order"], order)
 
     def test_reorder_adds_the_project_sentinel_first_when_missing(self):
         self.write_state({"spaces_order": ["remote", "local"]})
         order = spaces.reorder_spaces()
-        self.assertEqual(order, ["project", "remote", "local"])
+        self.assertEqual(order, ["project", "remote", "local", "today"])
 
     def test_reorder_leaves_plan_tasks_untouched(self):
         self.ck.add_task("keep me")
@@ -356,7 +357,7 @@ class TestSpaceReorder(_IsolatedHome):
         self.assertEqual(rc, 0, err)
         self.assertIn("Normalized space order:", out)
         self.assertIn("1. project", out)
-        self.assertIn("4. work", out)
+        self.assertIn("5. work", out)
 
     def test_cli_reorder_rejects_arguments(self):
         rc, out, _ = _run_main(["space", "reorder", "work"])

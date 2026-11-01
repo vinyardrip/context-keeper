@@ -34,7 +34,7 @@ import json
 import os
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -523,11 +523,14 @@ class TestSpaceCommandRouting(_IsolatedHome):
 
     def _run(self, argv) -> tuple[int, str]:
         buf = io.StringIO()
-        with redirect_stdout(buf):
+        with redirect_stdout(buf), redirect_stderr(buf):
             code = main(argv)
         return code, buf.getvalue()
 
     def _seed(self, space: str, *titles: str) -> None:
+        if not spaces.is_valid_space(space):
+            code, out = self._run(["space", "create", space])
+            self.assertEqual(code, 0, out)
         for title in titles:
             code, out = self._run([space, "add", title])
             self.assertEqual(code, 0, out)
@@ -894,7 +897,7 @@ class TestDynamicSpaceRouting(_IsolatedHome):
 
     def _run(self, argv) -> tuple[int, str]:
         buf = io.StringIO()
-        with redirect_stdout(buf):
+        with redirect_stdout(buf), redirect_stderr(buf):
             code = main(argv)
         return code, buf.getvalue()
 
@@ -916,6 +919,8 @@ class TestDynamicSpaceRouting(_IsolatedHome):
         self.assertIn("[ ] 1. pre-existing task", out)
 
     def test_dynamic_space_full_command_surface(self):
+        self.assertEqual(self._run(["space", "create", "custom"])[0], 0)
+
         code, out = self._run(["custom", "add", "dynamic task"])
         self.assertEqual(code, 0)
         self.assertIn("[ok] Added task to custom space (id=1)", out)
@@ -947,26 +952,76 @@ class TestDynamicSpaceRouting(_IsolatedHome):
 
     def test_missing_space_file_is_clean_error(self):
         code, out = self._run(["nosuchspace", "list"])
-        self.assertEqual(code, 2)
-        self.assertIn("ERROR", out)
-        self.assertIn("not found", out)
+        self.assertEqual(code, 1)
+        self.assertIn("Unknown space", out)
 
         code, out = self._run(["nosuchspace", "done", "1"])
-        self.assertEqual(code, 2)
-        self.assertIn("ERROR", out)
-        self.assertIn("not found", out)
+        self.assertEqual(code, 1)
+        self.assertIn("Unknown space", out)
 
-    def test_add_creates_dynamic_space_lazily(self):
+    def test_add_requires_an_existing_space(self):
+        """STRICT routing: `add` no longer materializes a space lazily."""
         self.assertFalse(spaces.space_path("fresh").exists())
 
         code, out = self._run(["fresh", "add", "brand new space"])
 
-        self.assertEqual(code, 0)
-        self.assertTrue(spaces.space_path("fresh").is_file())
-        self.assertIn("- [ ] brand new space",
-                      spaces.space_path("fresh").read_text(encoding="utf-8"))
+        self.assertEqual(code, 1)
+        self.assertIn("Unknown space", out)
+        self.assertFalse(spaces.space_path("fresh").exists())
+        self.assertFalse(
+            spaces.space_path("fresh").with_name("fresh.md.lock").exists())
+
+    def test_strict_routing_three_branches_leave_no_lock(self):
+        """v0.9.3: project/unknown refusal happens BEFORE any lock.
+
+        Branch 1 (existing space) still works; branch 2 (registered
+        project) and branch 3 (unknown name) exit 1 and must not
+        create ``spaces/<name>.md.lock`` or rewrite ``spaces_order``.
+        """
+        project = Path(self._tmp.name) / "projects" / "alpha"
+        project.mkdir(parents=True)
+        with redirect_stdout(io.StringIO()):
+            ContextKeeper(root=project).init()
+        ckregistry.register_project(project, name="alpha")
+
+        state_path = spaces.global_state_path()
+        state_before = (
+            state_path.read_bytes() if state_path.exists() else None)
+
+        code, out = self._run(["alpha", "add", "must not be lost"])
+        self.assertEqual(code, 1)
+        self.assertIn("registered project", out)
+        self.assertIn("ck list alpha", out)
+        self.assertFalse(spaces.space_path("alpha").exists())
+        self.assertFalse(
+            spaces.space_path("alpha").with_name("alpha.md.lock").exists())
+
+        code, out = self._run(["nonexistent", "add", "probe"])
+        self.assertEqual(code, 1)
+        self.assertIn("Unknown space", out)
+        self.assertFalse(
+            spaces.space_path("nonexistent").with_name(
+                "nonexistent.md.lock").exists())
+
+        if state_before is None:
+            self.assertFalse(state_path.exists(),
+                             "rejected routing must not create state.json")
+        else:
+            self.assertEqual(state_path.read_bytes(), state_before,
+                             "rejected routing must not rewrite spaces_order")
+
+        # Read-only project inspection is unchanged.
+        code, out = self._run(["list", "alpha"])
+        self.assertEqual(code, 0, out)
+
+        # Existing spaces keep the full command surface.
+        code, out = self._run(["local", "add", "existing space"])
+        self.assertEqual(code, 0, out)
+        self.assertIn("existing space",
+                      spaces.space_path("local").read_text(encoding="utf-8"))
 
     def test_dynamic_space_renders_in_dashboard(self):
+        self.assertEqual(self._run(["space", "create", "custom"])[0], 0)
         self._run(["custom", "add", "dynamic task"])
         self._run(["custom", "focus", "1"])
 
@@ -1115,11 +1170,14 @@ class TestSpaceListViewAlignment(_IsolatedHome):
 
     def _run(self, argv) -> tuple[int, str]:
         buf = io.StringIO()
-        with redirect_stdout(buf):
+        with redirect_stdout(buf), redirect_stderr(buf):
             code = main(argv)
         return code, buf.getvalue()
 
     def _seed(self, space: str, *titles: str) -> None:
+        if not spaces.is_valid_space(space):
+            code, out = self._run(["space", "create", space])
+            self.assertEqual(code, 0, out)
         for title in titles:
             code, out = self._run([space, "add", title])
             self.assertEqual(code, 0, out)
@@ -1275,11 +1333,14 @@ class TestSpaceStatusEditStart(_IsolatedHome):
 
     def _run(self, argv) -> tuple[int, str]:
         buf = io.StringIO()
-        with redirect_stdout(buf):
+        with redirect_stdout(buf), redirect_stderr(buf):
             code = main(argv)
         return code, buf.getvalue()
 
     def _seed(self, space: str, *titles: str) -> None:
+        if not spaces.is_valid_space(space):
+            code, out = self._run(["space", "create", space])
+            self.assertEqual(code, 0, out)
         for title in titles:
             code, out = self._run([space, "add", title])
             self.assertEqual(code, 0, out)
@@ -1594,10 +1655,8 @@ class TestSpaceStatusEditStart(_IsolatedHome):
     def test_missing_space_errors_for_st_and_edit(self):
         for action in ("st", "status", "edit", "start"):
             code, out = self._run(["ghost", action])
-            self.assertEqual(code, 2, out)
-            self.assertIn(
-                "ERROR: Space 'ghost' not found", out)
-            self.assertIn("ck ghost add <text>", out)
+            self.assertEqual(code, 1, out)
+            self.assertIn("Unknown space: 'ghost'", out)
 
     # ---- usage / help guidance ---------------------------------------- #
 
@@ -1656,11 +1715,14 @@ class TestSpaceNotesAndFlags(_IsolatedHome):
 
     def _run(self, argv) -> tuple[int, str]:
         buf = io.StringIO()
-        with redirect_stdout(buf):
+        with redirect_stdout(buf), redirect_stderr(buf):
             code = main(argv)
         return code, buf.getvalue()
 
     def _seed(self, space: str, *titles: str) -> None:
+        if not spaces.is_valid_space(space):
+            code, out = self._run(["space", "create", space])
+            self.assertEqual(code, 0, out)
         for title in titles:
             code, out = self._run([space, "add", title])
             self.assertEqual(code, 0, out)
@@ -1861,8 +1923,8 @@ class TestSpaceNotesAndFlags(_IsolatedHome):
     def test_missing_space_errors_for_notes_and_dashboard(self):
         for action in ("notes", "dashboard", "st"):
             code, out = self._run(["ghost", action])
-            self.assertEqual(code, 2, out)
-            self.assertIn("ERROR: Space 'ghost' not found", out)
+            self.assertEqual(code, 1, out)
+            self.assertIn("Unknown space: 'ghost'", out)
 
 
 # --------------------------------------------------------------------------- #
@@ -1899,12 +1961,12 @@ class TestSpacesVerboseDashboard(_IsolatedHome):
 
         section = self._spaces_section(self._dashboard())
 
-        # Heading + one CARD per space (both built-ins), framed by
+        # Heading + one CARD per space (all three built-ins), framed by
         # ONE shared rule: two openings + one closing.
-        self.assertIn("MY SPACES (2)", section)
+        self.assertIn("MY SPACES (3)", section)
         self.assertIn(" > LOCAL", section)
         self.assertIn(" > REMOTE", section)
-        self.assertEqual(section.count(self.RULE), 3)
+        self.assertEqual(section.count(self.RULE), 4)
         # Path line, progress and the triad, inside the card.
         self.assertIn(f"@ {spaces.space_path('local')}", section)
         self.assertIn("[%] Progress: 1/3 tasks done (33.3%)", section)
@@ -2018,7 +2080,7 @@ class TestSpacesVerboseDashboard(_IsolatedHome):
 
         section = self._spaces_section(self._dashboard())
 
-        self.assertIn("MY SPACES (3)", section)
+        self.assertIn("MY SPACES (4)", section)
         self.assertIn(" > CUSTOM", section)
 
     def test_compact_dashboard_has_no_space_blocks(self):
@@ -2266,7 +2328,7 @@ class TestSpaceManagement(_IsolatedHome):
 
     def _run(self, argv) -> tuple[int, str]:
         self._buf = _TtyBuffer()
-        with redirect_stdout(self._buf):
+        with redirect_stdout(self._buf), redirect_stderr(self._buf):
             code = main(argv)
         return code, self._buf.getvalue()
 
@@ -2421,10 +2483,10 @@ class TestSpaceManagement(_IsolatedHome):
                 self.assertIn("ERROR", out)
         # None of the REJECTED names materialised a file. (The dir
         # legitimately holds the startup auto-initialized defaults
-        # local.md / remote.md since v0.8.12.)
+        # local.md / remote.md / today.md since v0.9.3.)
         leftovers = [
             p for p in spaces.spaces_dir().glob("*.md")
-            if p.stem not in ("local", "remote")
+            if p.stem not in ("local", "remote", "today")
         ]
         self.assertEqual(leftovers, [],
                          f"rejected names created files: {leftovers}")
@@ -2437,7 +2499,7 @@ class TestSpaceManagement(_IsolatedHome):
                 self.assertIn("Reserved names", out)
         # None of them materialised a file.
         for name in spaces.RESERVED_SPACE_NAMES:
-            if name in ("local", "remote"):
+            if name in ("local", "remote", "today"):
                 continue
             self.assertFalse(spaces.space_path(name).exists())
 
@@ -2487,8 +2549,8 @@ class TestSpaceManagement(_IsolatedHome):
         # The new name is routable, the old one is not.
         self.assertEqual(self._run(["office", "list"])[0], 0)
         code, out = self._run(["work", "list"])
-        self.assertEqual(code, 2)
-        self.assertIn("not found", out)
+        self.assertEqual(code, 1)
+        self.assertIn("Unknown space: 'work'", out)
 
     def test_rename_carries_the_sidecar(self):
         self._run(["space", "create", "work"])
@@ -2863,15 +2925,15 @@ class TestDefaultSpacesAutoInit(_IsolatedHome):
     """Startup auto-init creates missing built-ins, preserves existing.
 
     ``ensure_default_spaces`` must be idempotent, strictly
-    non-destructive (an existing ``local.md`` / ``remote.md`` is kept
-    byte-for-byte, sidecar included), limited to the built-in names,
-    silent, and it must never raise.
+    non-destructive (an existing ``local.md`` / ``remote.md`` /
+    ``today.md`` is kept byte-for-byte, sidecar included), limited to
+    the built-in names, silent, and it must never raise.
     """
 
     def test_missing_defaults_created_from_scaffold(self):
         self.assertEqual(spaces.ensure_default_spaces(),
-                         ["local", "remote"])
-        for name in ("local", "remote"):
+                         ["local", "remote", "today"])
+        for name in ("local", "remote", "today"):
             path = spaces.space_path(name)
             self.assertTrue(path.is_file())
             self.assertEqual(
@@ -2881,14 +2943,44 @@ class TestDefaultSpacesAutoInit(_IsolatedHome):
 
     def test_second_run_is_a_noop(self):
         self.assertEqual(spaces.ensure_default_spaces(),
-                         ["local", "remote"])
+                         ["local", "remote", "today"])
         stamps = {name: spaces.space_path(name).stat().st_mtime_ns
-                  for name in ("local", "remote")}
+                  for name in ("local", "remote", "today")}
         self.assertEqual(spaces.ensure_default_spaces(), [])
-        for name in ("local", "remote"):
+        for name in ("local", "remote", "today"):
             self.assertEqual(spaces.space_path(name).stat().st_mtime_ns,
                              stamps[name],
                              f"{name}.md was rewritten on re-run")
+
+    def test_startup_cleans_only_stale_space_locks(self):
+        """Old ``*.lock`` leftovers are dropped; current ones survive."""
+        directory = spaces.spaces_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        stale = directory / "abandoned.md.lock"
+        stale.write_text("", encoding="utf-8")
+        os.utime(stale, (0, 0))
+        live = directory / "current.md.lock"
+        live.write_text("", encoding="utf-8")
+
+        spaces.ensure_default_spaces()
+
+        self.assertFalse(stale.exists())
+        self.assertTrue(live.exists())
+
+    def test_existing_spaces_order_is_never_rewritten(self):
+        """v0.9.3: seeding ``today`` leaves persisted state byte-identical."""
+        spaces.write_space_order(["project", "local", "remote"])
+        state_file = spaces.global_state_path()
+        before = state_file.read_bytes()
+
+        spaces.ensure_default_spaces()
+
+        self.assertEqual(state_file.read_bytes(), before)
+        self.assertNotIn("today", spaces.read_space_order())
+        # The default order still surfaces today in memory.
+        self.assertEqual(
+            spaces.space_order(include_project=True),
+            ["project", "local", "remote", "today"])
 
     def test_existing_space_preserved_byte_for_byte(self):
         """A populated space file AND its note sidecar survive."""
@@ -2906,13 +2998,14 @@ class TestDefaultSpacesAutoInit(_IsolatedHome):
 
         created = spaces.ensure_default_spaces()
 
-        # Only the MISSING default is created; local is untouched.
-        self.assertEqual(created, ["remote"])
+        # Only the MISSING defaults are created; local is untouched.
+        self.assertEqual(created, ["remote", "today"])
         self.assertEqual(spaces.space_path("local").read_text(
             encoding="utf-8"), original)
         self.assertEqual(sidecar.read_text(encoding="utf-8"),
                          '{"notes": {"7": "keep me"}}')
         self.assertTrue(spaces.space_path("remote").is_file())
+        self.assertTrue(spaces.space_path("today").is_file())
 
     def test_custom_spaces_never_created_or_touched(self):
         alpha = spaces.space_path("alpha")
@@ -2921,7 +3014,7 @@ class TestDefaultSpacesAutoInit(_IsolatedHome):
 
         created = spaces.ensure_default_spaces()
 
-        self.assertEqual(created, ["local", "remote"])
+        self.assertEqual(created, ["local", "remote", "today"])
         self.assertEqual(alpha.read_text(encoding="utf-8"),
                          "# alpha\n\n- [ ] mine\n")
 
@@ -2930,6 +3023,7 @@ class TestDefaultSpacesAutoInit(_IsolatedHome):
         answers = {
             "local": iter([False, True]),    # 2nd probe: file appeared
             "remote": iter([False, False]),
+            "today": iter([True, True]),
         }
         with mock.patch.object(
                 spaces, "_space_exists_anywhere",
@@ -2962,8 +3056,12 @@ class TestDefaultSpacesAutoInit(_IsolatedHome):
         self.assertEqual(code, 0, buf.getvalue())
         self.assertTrue(spaces.space_path("local").is_file())
         self.assertTrue(spaces.space_path("remote").is_file())
+        self.assertTrue(spaces.space_path("today").is_file())
+        listing = buf.getvalue()
+        for name in ("LOCAL", "REMOTE", "TODAY"):
+            self.assertIn(name, listing)
         # The hook is transparent: no auto-init chatter on stdout.
-        self.assertNotIn("auto-init", buf.getvalue().lower())
+        self.assertNotIn("auto-init", listing.lower())
 
     def test_cli_startup_preserves_existing_space(self):
         spaces.add_space_task("remote", "prod server pinned")
@@ -2993,7 +3091,7 @@ class TestDefaultSpacesAutoInit(_IsolatedHome):
         sandbox_dir = spaces.spaces_dir()
         self.assertTrue(sandbox_dir.is_dir())
         self.assertTrue(cksandbox.is_within_sandbox(sandbox_dir))
-        for name in ("local", "remote"):
+        for name in ("local", "remote", "today"):
             self.assertTrue((sandbox_dir / f"{name}.md").is_file())
             self.assertFalse((production_dir / f"{name}.md").exists())
 

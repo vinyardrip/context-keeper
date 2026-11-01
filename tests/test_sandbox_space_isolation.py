@@ -126,8 +126,8 @@ class TestSandboxSpaceIsolation(unittest.TestCase):
 
         created = spaces.ensure_default_spaces()
 
-        self.assertEqual(sorted(created), ["local", "remote"])
-        for name in ("local", "remote"):
+        self.assertEqual(sorted(created), ["local", "remote", "today"])
+        for name in ("local", "remote", "today"):
             self.assertTrue((self.sandbox_spaces / f"{name}.md").is_file())
             self.assertFalse((self.prod_spaces / f"{name}.md").exists())
         self.assertTrue((self.prod_spaces / "secret.md").is_file())
@@ -144,10 +144,13 @@ class TestSandboxSpaceIsolation(unittest.TestCase):
         self.assertNotIn("SECRET", out)
         self.assertIn("LOCAL", out)
         self.assertIn("REMOTE", out)
+        self.assertIn("TODAY", out)
         self.assertTrue((self.sandbox_spaces / "local.md").is_file())
         self.assertTrue((self.sandbox_spaces / "remote.md").is_file())
+        self.assertTrue((self.sandbox_spaces / "today.md").is_file())
         self.assertFalse((self.prod_spaces / "local.md").exists())
         self.assertFalse((self.prod_spaces / "remote.md").exists())
+        self.assertFalse((self.prod_spaces / "today.md").exists())
 
     def test_production_mode_still_reads_host_spaces(self):
         os.environ.pop("CK_SANDBOX", None)
