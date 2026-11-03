@@ -1660,8 +1660,9 @@ class ContextKeeper:
 
         The canonical ledger lives in ``.ck/state.json`` under
         ``notes`` as ``{task_id: [{"text", "created"}, ...]}``. The
-        legacy ``active_task.note`` / ``paused_tasks[].note`` string
-        fields are kept in sync with the newest text for backward
+        legacy ``active_task.note`` scalar is never written (it is
+        migrated into the ledger and removed on load); the
+        ``paused_tasks[].note`` string stays in sync for backward
         compatibility. Returns the stored note metadata dict.
 
         Aborts with a clear error when no project plan is bound (no
@@ -1700,7 +1701,6 @@ class ContextKeeper:
             state["active_task"] = {
                 "id": target.id,
                 "title": target.title,
-                "note": note,
                 "updated_at": datetime.now().isoformat(timespec="seconds"),
             }
         paused = state.get("paused_tasks")
@@ -1710,31 +1710,43 @@ class ContextKeeper:
                     item["note"] = note
         self._write_state(state)
 
-        if active is not None and active.id == target.id:
-            return state["active_task"]
         return {
             "id": target.id,
             "title": target.title,
             "note": note,
             "created": entry["created"],
+            "notes": entries,
         }
 
     def get_note(self) -> Optional[dict]:
         """Return the stored active-task note dict, or None.
 
-        Only a structurally valid entry counts: ``note`` must be a
-        non-empty string and ``id`` an int. Anything else (missing,
-        corrupt, hand-edited) is treated as "no note".
+        The note text is derived from the canonical ``notes`` ledger
+        for the task recorded in ``active_task``. The legacy
+        ``active_task.note`` scalar is migrated by the state loader,
+        so callers never read it directly.
         """
-        data = self._read_state().get("active_task")
+        state = self._read_state()
+        data = state.get("active_task")
         if not isinstance(data, dict):
             return None
-        note = data.get("note")
         tid = data.get("id")
-        if isinstance(note, str) and note and isinstance(tid, int) \
-                and not isinstance(tid, bool):
-            return data
-        return None
+        if not isinstance(tid, int) or isinstance(tid, bool):
+            return None
+        entries = state.get("notes")
+        value = entries.get(str(tid)) if isinstance(entries, dict) else None
+        if not isinstance(value, list) or not value:
+            return None
+        last = value[-1]
+        if not isinstance(last, dict):
+            return None
+        note = last.get("text")
+        if not isinstance(note, str) or not note:
+            return None
+        result = dict(data)
+        result["note"] = note
+        result["notes"] = value
+        return result
 
     def get_note_entries(self, task_id: int) -> list[dict]:
         """All timestamped note entries bound to ``task_id``, in order.
@@ -1824,7 +1836,7 @@ class ContextKeeper:
             return notice(INFO, f"No process notes found for task [{task_id}].")
         lines = [f"[{target.id}] {target.title}"]
         for entry in entries:
-            stamp = note_store.note_datetime(entry["created"])
+            stamp = format_note_time(entry["created"])
             lines.append(f"   * Note ({stamp}): {entry['text']}")
         return "\n".join(lines)
 
@@ -1934,11 +1946,12 @@ class ContextKeeper:
             kept.append(entry)
         if restored is None:
             return
-        if restored.get("note"):
+        ledger = state.get("notes")
+        entries = ledger.get(str(task_id)) if isinstance(ledger, dict) else None
+        if isinstance(entries, list) and entries:
             state["active_task"] = {
                 "id": task_id,
                 "title": restored.get("title", ""),
-                "note": restored["note"],
                 "updated_at": datetime.now().isoformat(timespec="seconds"),
             }
         state["paused_tasks"] = kept
@@ -2022,10 +2035,11 @@ class ContextKeeper:
         task is completed or removed: the notes are user data — they
         graduate into the durable history instead of vanishing with
         the task context. A single note keeps the historical
-        ``- <text>`` line; multiple notes share one dated entry with
-        one ``* Note`` line per entry, in append order. Goes through
-        ``_open_history_append`` so DEV MODE appends land in the
-        sandboxed copy (the real HISTORY.md is never touched).
+        ``* Note: <text>`` line; multiple notes share one dated entry
+        with one timestamped ``* Note`` line per entry, in append
+        order. Goes through ``_open_history_append`` so DEV MODE
+        appends land in the sandboxed copy (the real HISTORY.md is
+        never touched).
         """
         if isinstance(notes, str):
             entries = [{"text": notes, "created": ""}]
@@ -2039,19 +2053,17 @@ class ContextKeeper:
                 task_id=task.id,
                 task_title=task.title,
                 timestamp=ts,
-                comment=entries[0]["text"],
+                comment="",
                 body="",
+                note_lines=[f"  * Note: {entries[0]['text']}"],
             )
         else:
             lines: list[str] = []
-            for index, item in enumerate(entries):
-                if index == 0:
-                    lines.append(f"  * Note: {item['text']}")
-                else:
-                    stamp = note_store.note_stamp(
-                        item.get("created") or "")
-                    lines.append(
-                        f"  * Note ({stamp}): {item['text']}")
+            for item in entries:
+                stamp = format_note_time(item.get("created") or "")
+                suffix = f" ({stamp})" if stamp else ""
+                lines.append(
+                    f"  * Note{suffix}: {item['text']}")
             entry = Notes(
                 task_id=task.id,
                 task_title=task.title,
@@ -4053,6 +4065,32 @@ def _coerce_note_entries(value) -> list[dict]:
     return []
 
 
+def format_note_time(created_iso: str,
+                     now: Optional[datetime] = None) -> str:
+    """Render a note timestamp as ``HH:MM UTC`` for today's notes.
+
+    Older notes keep the full ``YYYY-MM-DD HH:MM UTC`` form so a
+    cross-day entry stays unambiguous. ``now`` is injectable for
+    deterministic tests and defaults to the current UTC time.
+    """
+    if not isinstance(created_iso, str) or not created_iso:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(created_iso.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return created_iso
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    parsed = parsed.astimezone(timezone.utc)
+    current = now if now is not None else datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    current = current.astimezone(timezone.utc)
+    if parsed.date() == current.date():
+        return parsed.strftime("%H:%M UTC")
+    return parsed.strftime("%Y-%m-%d %H:%M UTC")
+
+
 def _note_display_lines(entries, indent: str, palette) -> list[str]:
     """Render one ``* Note`` line per entry (single note keeps old form)."""
     items = _coerce_note_entries(entries)
@@ -4062,7 +4100,7 @@ def _note_display_lines(entries, indent: str, palette) -> list[str]:
         return [palette.bold_cyan(f"{indent}* Note: {items[0]['text']}")]
     lines: list[str] = []
     for item in items:
-        stamp = note_store.note_stamp(item.get("created", ""))
+        stamp = format_note_time(item.get("created", ""))
         suffix = f" ({stamp})" if stamp else ""
         lines.append(
             palette.bold_cyan(f"{indent}* Note{suffix}: {item['text']}"))
@@ -4795,9 +4833,10 @@ def read_active_task_note(project_root: Path) -> Optional[dict]:
 
     Standalone reader for cross-project rendering (``ck dashboard
     -v``): loads ``<project>/.ck/state.json`` directly and returns
-    the structurally valid ``active_task`` entry (non-empty string
-    ``note``, int ``id``), or None when absent, corrupt, or
-    hand-edited. Mirrors :meth:`ContextKeeper.get_note` validation.
+    the structurally valid ``active_task`` entry (int ``id``) with
+    its newest note text derived from the canonical ledger, or None
+    when absent, corrupt, hand-edited, or noteless. Mirrors
+    :meth:`ContextKeeper.get_note` validation.
     """
     state_file = Path(project_root) / CK_DIR_NAME / STATE_FILENAME
     try:
@@ -4811,28 +4850,29 @@ def read_active_task_note(project_root: Path) -> Optional[dict]:
     active = data.get("active_task")
     if not isinstance(active, dict):
         return None
-    note = active.get("note")
     tid = active.get("id")
-    if isinstance(note, str) and note and isinstance(tid, int) \
-            and not isinstance(tid, bool):
-        entries: list[dict] = []
-        ledger = data.get("notes")
-        if isinstance(ledger, dict):
-            value = ledger.get(str(tid))
-            if isinstance(value, list):
-                entries = [
-                    {"text": entry["text"], "created": entry["created"]}
-                    for entry in value
-                    if isinstance(entry, dict)
-                    and isinstance(entry.get("text"), str)
-                    and entry.get("text")
-                    and isinstance(entry.get("created"), str)
-                    and entry.get("created")
-                ]
-        result = dict(active)
-        result["notes"] = entries
-        return result
-    return None
+    if not isinstance(tid, int) or isinstance(tid, bool):
+        return None
+    entries: list[dict] = []
+    ledger = data.get("notes")
+    if isinstance(ledger, dict):
+        value = ledger.get(str(tid))
+        if isinstance(value, list):
+            entries = [
+                {"text": entry["text"], "created": entry["created"]}
+                for entry in value
+                if isinstance(entry, dict)
+                and isinstance(entry.get("text"), str)
+                and entry.get("text")
+                and isinstance(entry.get("created"), str)
+                and entry.get("created")
+            ]
+    if not entries:
+        return None
+    result = dict(active)
+    result["note"] = entries[-1]["text"]
+    result["notes"] = entries
+    return result
 
 
 # ---------------------------------------------------------------------- #

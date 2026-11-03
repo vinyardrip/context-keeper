@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.10.0-blue)]()
+[![version](https://img.shields.io/badge/version-0.10.1-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -104,7 +104,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.10.0
+ck -v    # → ck version 0.10.1
 ```
 
 ---
@@ -650,19 +650,27 @@ to, and follow a strict lifecycle:
 - **Display** — `ck st` shows one `* Note:` line per entry under the task that
   owns it, and `ck dashboard -v` shows them per project (including for
   registered projects viewed from another directory). With two or more entries
-  each line carries a `(HH:MM UTC)` marker so the sequence is readable.
+  each line carries an `(HH:MM UTC)` marker so the sequence is readable.
 - **Complete** — `ck done <ID>` archives every note entry into `HISTORY.md` in
   append order, then clears them from the task state. A single note keeps the
-  historical `- <text>` line; multiple notes share one dated entry with one
-  `* Note` line per note. Notes are user data: they graduate into history, they
-  are never silently dropped.
+  historical `* Note: <text>` line; multiple notes share one dated entry with
+  one timestamped `* Note` line per note. Notes are user data: they graduate
+  into history, they are never silently dropped.
+
+**Note timestamps.** `ck note <ID> --list`, `ck st`, and `ck notes`
+render timestamps uniformly as `HH:MM UTC` for today's notes, and
+`YYYY-MM-DD HH:MM UTC` for older ones. `HISTORY.md` timestamps every
+note when the task has two or more; single-note tasks keep the
+legacy `* Note: <text>` form.
 
 **Storage and migration.** Notes are stored as ordered arrays of
 `{"text": ..., "created": ...}` entries, where `created` is ISO-8601 UTC with a
 `+00:00` offset. Existing single-string notes from earlier versions are
 converted in memory on load; the array shape is persisted on the next write to
-that file. Read-only commands (including `ck notes`) never modify
-`state.json`.
+that file. The deprecated `active_task.note` scalar is migrated into the
+ledger only when that task has no array entry (the array always wins) and is
+removed from every subsequent write. Read-only commands (including `ck notes`)
+never modify `state.json`.
 
 ### Switching focus
 
@@ -1175,6 +1183,8 @@ Logs go **exclusively** to `stderr` and `.sandbox/dev.log` — `stdout` stays co
 - [x] pytest isolation: every test runs against a throwaway `CK_CONFIG_DIR`, so the real `~/.config/ck/` (registry, `state.json`, spaces, locks) is never written by the suite (`v0.9.2`)
 - [x] Completion docs for the virtual `project` space (offered for `move`/`swap`, never `rename`/`delete`) and the space-only `status` alias; unknown-command errors are one readable line instead of a wrapped choice dump (`v0.9.2`)
 - [x] Append-only process notes: `ck note <ID> <text>` stores a timestamped entry per call (never overwrites), `--list` / `--clear`, in-memory migration of legacy string notes, space parity, and full HISTORY archiving in append order (`v0.10.0`)
+- [x] Unified note timestamps: `ck note --list`, `ck st` and `ck notes` render `HH:MM UTC` for today and `YYYY-MM-DD HH:MM UTC` for older notes; `HISTORY.md` timestamps every note when a task has two or more, while single-note tasks keep `* Note: <text>` (`v0.10.1`)
+- [x] Deprecated `active_task.note`: migrated into the `notes` ledger only when the array is absent (the array wins), never persisted again after the next state write; read-only commands keep `state.json` byte-identical (`v0.10.1`)
 
 ---
 
@@ -1564,15 +1574,24 @@ $ echo $?
   каждая строка получает маркер `(HH:MM UTC)`, чтобы порядок читался.
 - **Завершение** — `ck done <ID>` архивирует все записи в `HISTORY.md` в
   порядке добавления, затем очищает состояние задачи. Одна заметка сохраняет
-  исторический формат `- <text>`; несколько заметок попадают в одну датированную
-  запись, по строке `* Note` на каждую. Заметки — это пользовательские данные:
-  они переходят в историю и никогда не теряются молча.
+  исторический формат `* Note: <text>`; несколько заметок попадают в одну
+  датированную запись, по строке `* Note` с меткой времени на каждую. Заметки —
+  это пользовательские данные: они переходят в историю и никогда не теряются
+  молча.
+
+**Метки времени заметок.** `ck note <ID> --list`, `ck st` и `ck notes`
+единообразно показывают метки времени: `HH:MM UTC` для сегодняшних заметок и
+`YYYY-MM-DD HH:MM UTC` для более старых. `HISTORY.md` проставляет метку каждой
+заметке, если у задачи две или больше; задачи с одной заметкой сохраняют
+устаревший формат `* Note: <text>`.
 
 **Хранение и миграция.** Заметки хранятся как упорядоченные массивы
 `{"text": ..., "created": ...}`, где `created` — ISO-8601 UTC с суффиксом
 `+00:00`. Старые заметки-строки из предыдущих версий преобразуются в памяти при
-загрузке; массив сохраняется при следующей записи файла. Команды только для
-чтения (включая `ck notes`) никогда не изменяют `state.json`.
+загрузке; массив сохраняется при следующей записи файла. Устаревшее поле
+`active_task.note` переносится в ledger только если у задачи ещё нет массива
+(массив всегда главнее) и удаляется при каждой последующей записи. Команды
+только для чтения (включая `ck notes`) никогда не изменяют `state.json`.
 
 ---
 
@@ -1832,3 +1851,5 @@ CK_DEBUG=1 ./ck-dev add "traced"    # или: ./ck-dev -v add "traced"
 - [x] Изоляция pytest: каждый тест работает с одноразовым `CK_CONFIG_DIR`, поэтому реальные `~/.config/ck/` (реестр, `state.json`, пространства, локи) никогда не изменяются набором тестов (`v0.9.2`)
 - [x] Документация виртуального пространства `project` в автодополнении (предлагается для `move`/`swap`, никогда для `rename`/`delete`) и алиаса `status` только для пространств; ошибка неизвестной команды — одна читаемая строка вместо перенесённого списка выбора (`v0.9.2`)
 - [x] Заметки только с добавлением: `ck note <ID> <text>` сохраняет запись с меткой времени на каждый вызов (без перезаписи), `--list` / `--clear`, миграция старых строк в памяти, паритет пространств и полная архивация в HISTORY в порядке добавления (`v0.10.0`)
+- [x] Единые метки времени заметок: `ck note --list`, `ck st` и `ck notes` показывают `HH:MM UTC` для сегодняшних и `YYYY-MM-DD HH:MM UTC` для старых заметок; `HISTORY.md` проставляет метку каждой заметке при двух и более, а задача с одной заметкой сохраняет `* Note: <text>` (`v0.10.1`)
+- [x] Устаревшее поле `active_task.note`: переносится в ledger только при отсутствии массива (массив главнее) и больше не записывается после следующей мутации; read-only команды оставляют `state.json` побайтово неизменным (`v0.10.1`)

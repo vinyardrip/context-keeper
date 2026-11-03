@@ -1,6 +1,6 @@
 """Documentation consistency: version bump and roadmap hygiene.
 
-Guards the v0.10.0 documentation update:
+Guards the v0.10.1 documentation update:
 
 - every version source agrees (package, pyproject, README, ROADMAP);
 - completed features (Shell Completion) never reappear in the
@@ -11,7 +11,9 @@ Guards the v0.10.0 documentation update:
   are documented in both languages (v0.9.3);
 - append-only process notes (``ck note <ID>``, ``--list``,
   ``--clear``, array storage and legacy migration) are documented in
-  both languages (v0.10.0).
+  both languages (v0.10.0);
+- the unified note timestamp format and HISTORY multi-note rule are
+  documented in both languages (v0.10.1).
 """
 
 from __future__ import annotations
@@ -95,6 +97,20 @@ class TestDocumentationConsistency(unittest.TestCase):
             self.assertIn("--clear", section)
             self.assertIn("ISO-8601", section)
             self.assertIn("state.json", section)
+
+    def test_note_timestamp_rule_is_documented_bilingually(self):
+        """v0.10.1: timestamp format and HISTORY multi-note rule."""
+        english = _section(
+            self.readme, "## Process Notes & Unfocused / Paused Context")
+        russian = _section(
+            self.readme, "## Процессные заметки и Unfocused / Paused Context")
+        for section in (english, russian):
+            self.assertIn("HH:MM UTC", section)
+            self.assertIn("YYYY-MM-DD HH:MM UTC", section)
+            self.assertIn("* Note: <text>", section)
+            self.assertIn("active_task.note", section)
+        self.assertIn("**Note timestamps.**", english)
+        self.assertIn("**Метки времени заметок.**", russian)
 
     def test_bilingual_roadmap_checklists_have_parity(self):
         pairs = (

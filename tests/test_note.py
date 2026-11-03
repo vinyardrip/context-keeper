@@ -3,8 +3,9 @@
 Covers:
 
 - ``ck note <text>`` persists the note in ``.ck/state.json`` under
-  ``active_task`` (id, title, note, updated_at) for the CURRENT
-  active task (focused, else first open).
+  the ``notes`` ledger, with ``active_task`` carrying only id, title
+  and updated_at, for the CURRENT active task (focused, else first
+  open).
 - ``ck st`` displays the note as a prominent ``* Note: <text>``
   line — in both plain and colored modes.
 - ``ck done`` on the noted task purges the note completely; done on
@@ -123,30 +124,43 @@ class TestNotePersistence(_NoteHarness):
         # The note attaches to the FOCUSED task (active task).
         self.assertEqual(active["id"], 2)
         self.assertEqual(active["title"], "implement API mapping")
-        self.assertEqual(active["note"], "checking API mapping")
+        self.assertNotIn("note", active)
         self.assertTrue(active["updated_at"])
-        self.assertEqual(info, active)
+        self.assertEqual(
+            state["notes"]["2"][-1]["text"], "checking API mapping")
+        self.assertEqual(info["id"], 2)
+        self.assertEqual(info["note"], "checking API mapping")
 
     def test_note_attaches_to_first_open_when_no_focus(self):
         ck = self._ck("# P\n- [ ] alpha\n- [ ] beta\n")
         ck.set_note("scratch")
-        active = self._read_state_file(ck)["active_task"]
+        state = self._read_state_file(ck)
+        active = state["active_task"]
         self.assertEqual(active["id"], 1)
         self.assertEqual(active["title"], "alpha")
+        self.assertNotIn("note", active)
+        self.assertEqual(state["notes"]["1"][-1]["text"], "scratch")
 
-    def test_note_update_overwrites(self):
+    def test_note_update_appends_newest_entry(self):
         ck = self._ck()
         ck.set_note("first draft")
         ck.set_note("stopped at line 42 before lunch")
-        active = self._read_state_file(ck)["active_task"]
-        self.assertEqual(active["note"], "stopped at line 42 before lunch")
+        state = self._read_state_file(ck)
+        active = state["active_task"]
+        self.assertNotIn("note", active)
+        self.assertEqual(
+            [e["text"] for e in state["notes"]["2"]],
+            ["first draft", "stopped at line 42 before lunch"],
+        )
 
     def test_note_text_is_sanitized(self):
         """ANSI noise pasted into ck note can never corrupt state."""
         ck = self._ck()
         ck.set_note("\x1b[31mred\x1b[0m   spaced\t\tout\nnewline")
-        active = self._read_state_file(ck)["active_task"]
-        self.assertEqual(active["note"], "red spaced out newline")
+        state = self._read_state_file(ck)
+        self.assertNotIn("note", state["active_task"])
+        self.assertEqual(
+            state["notes"]["2"][-1]["text"], "red spaced out newline")
 
     def test_empty_note_rejected(self):
         ck = self._ck()
@@ -244,7 +258,9 @@ class TestNotePurgeOnDone(_NoteHarness):
         ck.done("3")  # complete the NEXT task, not the noted one
 
         state = self._read_state_file(ck)
-        self.assertEqual(state["active_task"]["note"], "note on focused task")
+        self.assertNotIn("note", state["active_task"])
+        self.assertEqual(
+            state["notes"]["2"][-1]["text"], "note on focused task")
         self.assertIn("* Note: note on focused task", ck.status())
 
     def test_done_range_including_noted_task_purges(self):
@@ -345,7 +361,7 @@ class TestUnfocusedPausedContext(_NoteHarness):
         self.assertNotIn("active_task", self._read_state_file(ck))
         history = ck.history_file.read_text(encoding="utf-8")
         self.assertIn("[2] implement API mapping", history)
-        self.assertIn("- finish the mapping", history)
+        self.assertIn("* Note: finish the mapping", history)
 
     def test_done_of_other_task_keeps_note_and_history_untouched(self):
         ck = self._ck()
@@ -953,7 +969,9 @@ class TestNoteDevMode(_NoteHarness):
             sandbox_state = resolve_write_path(ck.state_file)
         self.assertTrue(sandbox_state.exists())
         data = json.loads(sandbox_state.read_text(encoding="utf-8"))
-        self.assertEqual(data["active_task"]["note"], "sandboxed note")
+        self.assertNotIn("note", data["active_task"])
+        self.assertEqual(
+            data["notes"]["2"][-1]["text"], "sandboxed note")
         # Production state.json was never created.
         self.assertFalse(ck.state_file.exists())
 

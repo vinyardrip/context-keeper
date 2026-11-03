@@ -1129,10 +1129,10 @@ class SpaceManager:
 
         Reuses the project history entry format (``Notes.render()``)
         so space and project audit trails look identical. A single
-        note keeps the historical ``- <text>`` line; multiple notes
-        share one dated entry with one ``* Note`` line per entry, in
-        append order. The task ID is the ID the user asked to delete
-        (before re-indexing).
+        note keeps the historical ``* Note: <text>`` line; multiple
+        notes share one dated entry with one timestamped ``* Note``
+        line per entry, in append order. The task ID is the ID the
+        user asked to delete (before re-indexing).
         """
         if isinstance(notes, str):
             entries = [{"text": notes, "created": ""}]
@@ -1146,18 +1146,17 @@ class SpaceManager:
                 task_id=task.id,
                 task_title=task.title,
                 timestamp=ts,
-                comment=entries[0]["text"],
+                comment="",
+                note_lines=[f"  * Note: {entries[0]['text']}"],
             )
         else:
+            from .core import format_note_time
             lines: list[str] = []
-            for index, item in enumerate(entries):
-                if index == 0:
-                    lines.append(f"  * Note: {item['text']}")
-                else:
-                    stamp = note_store.note_stamp(
-                        item.get("created") or "")
-                    lines.append(
-                        f"  * Note ({stamp}): {item['text']}")
+            for item in entries:
+                stamp = format_note_time(item.get("created") or "")
+                suffix = f" ({stamp})" if stamp else ""
+                lines.append(
+                    f"  * Note{suffix}: {item['text']}")
             entry = Notes(
                 task_id=task.id,
                 task_title=task.title,
@@ -1518,8 +1517,9 @@ class SpaceManager:
             return notice(
                 INFO, f"No process notes found for task [{task_id}].")
         lines = [f"[{target.id}] {target.title}"]
+        from .core import format_note_time
         for entry in entries:
-            stamp = note_store.note_datetime(entry["created"])
+            stamp = format_note_time(entry["created"])
             lines.append(f"   * Note ({stamp}): {entry['text']}")
         return "\n".join(lines)
 

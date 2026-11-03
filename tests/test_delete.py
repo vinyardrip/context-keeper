@@ -272,10 +272,13 @@ class TestDeleteStateReconciliation(_Harness):
         self.ck.set_note("gamma scratchpad")
         self.ck.delete_task(1)
 
-        active = self.state()["active_task"]
+        state = self.state()
+        active = state["active_task"]
         self.assertEqual(active["id"], 2)
         self.assertEqual(active["title"], "gamma")
-        self.assertEqual(active["note"], "gamma scratchpad")
+        self.assertNotIn("note", active)
+        self.assertEqual(
+            state["notes"]["2"][-1]["text"], "gamma scratchpad")
         # And the note still renders on the right (renumbered) task.
         self.assertIn("* Note: gamma scratchpad", self.ck.status())
 

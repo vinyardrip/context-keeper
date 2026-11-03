@@ -127,6 +127,10 @@ def migrate_notes(data: dict, fallback_created: Optional[str] = None) -> dict:
                 "text": note,
                 "created": fallback,
             }]
+        # The legacy scalar is deprecated. Drop it from the in-memory
+        # view in every case: the array ledger wins when present, and
+        # the next write must never persist the stale key.
+        active.pop("note", None)
 
     paused = data.get("paused_tasks")
     if isinstance(paused, list):
@@ -148,28 +152,6 @@ def migrate_notes(data: dict, fallback_created: Optional[str] = None) -> dict:
     elif "notes" in data:
         data["notes"] = {}
     return data
-
-
-def note_stamp(created: str) -> str:
-    """Short ``HH:MM UTC`` stamp for multi-note display lines."""
-    try:
-        parsed = datetime.fromisoformat(created.replace("Z", "+00:00"))
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc).strftime("%H:%M UTC")
-    except (TypeError, ValueError):
-        return created
-
-
-def note_datetime(created: str) -> str:
-    """Readable full UTC timestamp used by ``ck note --list``."""
-    try:
-        parsed = datetime.fromisoformat(created.replace("Z", "+00:00"))
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    except (TypeError, ValueError):
-        return created
 
 
 # The public spelling used by the state loaders; kept as an alias so
