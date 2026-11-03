@@ -1420,7 +1420,7 @@ class TestCliExitCommand(_SandboxAnchor):
         with mock.patch("sys.argv", ["ck"]), redirect_stdout(buf):
             code = main([])
         self.assertEqual(code, 0)
-        self.assertIn("Context Keeper CLI", buf.getvalue())
+        self.assertIn("--- CK - Context Keeper ---", buf.getvalue())
         self.assertNotIn("SANDBOX MODE ACTIVE", buf.getvalue())
 
 
@@ -1428,13 +1428,20 @@ class TestHelpDocumentsSession(unittest.TestCase):
     def test_help_documents_entry_and_exit(self):
         from cklib.cli import HELP_TEXT
 
-        self.assertIn("./ck-dev", HELP_TEXT)
-        self.assertIn("Enter sandbox mode", HELP_TEXT)
-        self.assertIn("To exit: type 'exit' or press Ctrl+D.", HELP_TEXT)
-        # Stale syntax is gone from the docs.
-        self.assertNotIn("ck-dev exit", HELP_TEXT)
-        self.assertIn("ck dev setup", HELP_TEXT)
-        self.assertIn("ck dev clean", HELP_TEXT)
+        # v0.11.0: the grouped help carries a condensed DEV row set;
+        # the sandbox entry/exit narrative lives in the README (the
+        # canonical spec).
+        self.assertIn("dev setup", HELP_TEXT)
+        self.assertIn("dev clean", HELP_TEXT)
+        readme = (Path(__file__).resolve().parent.parent
+                  / "README.md").read_text(encoding="utf-8")
+        self.assertIn("./ck-dev", readme)
+        self.assertIn("Enter sandbox mode", readme)
+        self.assertIn("Type 'exit' or press Cond+D".replace("Cond", "Ctrl"), readme)
+        # Stale syntax stays out of the grouped help: there is no
+        # `dev exit` row (exit is typed in the session subshell, and
+        # the `ck-dev exit` safeguard is documented in the README).
+        self.assertNotIn("dev exit", HELP_TEXT)
 
 
 if __name__ == "__main__":

@@ -417,7 +417,9 @@ class TestSandboxCli(_SandboxFixtureBase):
     def test_help_documents_sandbox_commands(self):
         code, out = self._run_cli(["--help"])
         self.assertEqual(code, 0)
-        self.assertIn("sandbox setup", out)
+        # v0.11.0: the grouped help condenses the dev rows; the alias
+        # keeps the `sandbox clean` spelling visible.
+        self.assertIn("dev setup", out)
         self.assertIn("sandbox clean", out)
 
 

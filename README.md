@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.10.1-blue)]()
+[![version](https://img.shields.io/badge/version-0.11.0-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -104,7 +104,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.10.1
+ck -v    # → ck version 0.11.0
 ```
 
 ---
@@ -125,6 +125,10 @@ ck -v    # → ck version 0.10.1
 ---
 
 ## 🛠 Commands
+
+> **Quick reference:** run `ck -h` for grouped help (same commands as
+> the table below, condensed and grouped by intent). Run `ck help
+> <command>` (or `ck <command> --help`) for per-command detail.
 
 | COMMAND | DESCRIPTION |
 |--------|------------|
@@ -1185,6 +1189,8 @@ Logs go **exclusively** to `stderr` and `.sandbox/dev.log` — `stdout` stays co
 - [x] Append-only process notes: `ck note <ID> <text>` stores a timestamped entry per call (never overwrites), `--list` / `--clear`, in-memory migration of legacy string notes, space parity, and full HISTORY archiving in append order (`v0.10.0`)
 - [x] Unified note timestamps: `ck note --list`, `ck st` and `ck notes` render `HH:MM UTC` for today and `YYYY-MM-DD HH:MM UTC` for older notes; `HISTORY.md` timestamps every note when a task has two or more, while single-note tasks keep `* Note: <text>` (`v0.10.1`)
 - [x] Deprecated `active_task.note`: migrated into the `notes` ledger only when the array is absent (the array wins), never persisted again after the next state write; read-only commands keep `state.json` byte-identical (`v0.10.1`)
+- [x] Grouped dpx-style help: `ck -h` / `ck --help` / `ck help` print a banner + USAGE + intent-grouped quick index (TASKS / NOTES / VIEW / SAVE / SPACES / PROJECTS / SHELL / SELF / DEV / SHORTHANDS / OPTIONS) with one global aligned column (`v0.11.0`)
+- [x] `ck help <command>` (or `ck <command> --help`) prints the argparse per-command usage; the 0.9.2 unknown-command one-liner and `ck -v` are unchanged (`v0.11.0`)
 
 ---
 
@@ -1271,6 +1277,11 @@ chmod +x ck
 
 ## 🛠 Команды
 (полный список аналогичен английской версии выше)
+
+> **Краткая справка:** запустите `ck -h` — сгруппированная помощь
+> (те же команды, что в таблице выше, сокращённые и сгруппированные по
+> смыслу). `ck help <команда>` (или `ck <команда> --help`) — детали
+> по конкретной команде.
 
 > **Изоляция путей в dev-режиме.** Пока активна песочница (`ck-dev` /
 > `CK_SANDBOX=1` / `CK_DEV=1` / cwd внутри `.sandbox/`), все пути
@@ -1853,3 +1864,5 @@ CK_DEBUG=1 ./ck-dev add "traced"    # или: ./ck-dev -v add "traced"
 - [x] Заметки только с добавлением: `ck note <ID> <text>` сохраняет запись с меткой времени на каждый вызов (без перезаписи), `--list` / `--clear`, миграция старых строк в памяти, паритет пространств и полная архивация в HISTORY в порядке добавления (`v0.10.0`)
 - [x] Единые метки времени заметок: `ck note --list`, `ck st` и `ck notes` показывают `HH:MM UTC` для сегодняшних и `YYYY-MM-DD HH:MM UTC` для старых заметок; `HISTORY.md` проставляет метку каждой заметке при двух и более, а задача с одной заметкой сохраняет `* Note: <text>` (`v0.10.1`)
 - [x] Устаревшее поле `active_task.note`: переносится в ledger только при отсутствии массива (массив главнее) и больше не записывается после следующей мутации; read-only команды оставляют `state.json` побайтово неизменным (`v0.10.1`)
+- [x] Сгруппированная помощь в стиле dpx: `ck -h` / `ck --help` / `ck help` выводят баннер + USAGE + краткий индекс по группам (TASKS / NOTES / VIEW / SAVE / SPACES / PROJECTS / SHELL / SELF / DEV / SHORTHANDS / OPTIONS) с одной общей колонкой (`v0.11.0`)
+- [x] `ck help <команда>` (или `ck <команда> --help`) печатает встроенную помощь argparse по команде; однострочник о неизвестной команде (0.9.2) и `ck -v` не изменились (`v0.11.0`)

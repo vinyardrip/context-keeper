@@ -846,8 +846,12 @@ class TestNotesCommand(_NoteHarness):
 
     def test_help_documents_notes(self):
         from cklib.cli import HELP_TEXT
+        # v0.11.0: the grouped help has a condensed NOTES row; the
+        # empty-state message lives in the README (canonical spec).
         self.assertIn("notes", HELP_TEXT)
-        self.assertIn("No active process notes found", HELP_TEXT)
+        readme = (Path(__file__).resolve().parent.parent
+                  / "README.md").read_text(encoding="utf-8")
+        self.assertIn("No active process notes found", readme)
 
     def test_notes_via_argparse_path(self):
         ck = self._ck()

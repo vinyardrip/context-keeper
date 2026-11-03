@@ -1691,10 +1691,15 @@ class TestSpaceStatusEditStart(_IsolatedHome):
     def test_help_documents_st_edit_and_start(self):
         from cklib.cli import HELP_TEXT
 
-        self.assertIn("local st", HELP_TEXT)
-        self.assertIn("status` is an exact alias", HELP_TEXT)
-        self.assertIn("local start <ID>", HELP_TEXT)
-        self.assertIn("local edit", HELP_TEXT)
+        # v0.11.0: the grouped help condenses per-space rows into a
+        # single "<space> <command>" entry; the detailed space surface
+        # (local status/start/edit rows) is documented in the README.
+        self.assertIn("<space> <command>", HELP_TEXT)
+        readme = (Path(__file__).resolve().parent.parent
+                  / "README.md").read_text(encoding="utf-8")
+        self.assertIn("ck local st", readme)
+        self.assertIn("ck local start", readme)
+        self.assertIn("ck local edit", readme)
 
     def test_status_ignores_error_exits(self):
         """Sanity: every happy-path command exits 0."""
@@ -2873,11 +2878,11 @@ class TestSpaceManagement(_IsolatedHome):
     def test_help_documents_space_management(self):
         from cklib.cli import HELP_TEXT
 
-        self.assertIn("Space Management", HELP_TEXT)
+        self.assertIn("SPACES (GLOBAL CONTEXTS):", HELP_TEXT)
         self.assertIn("space list", HELP_TEXT)
-        self.assertIn("space create <name>", HELP_TEXT)
-        self.assertIn("space rename <old> <new>", HELP_TEXT)
-        self.assertIn("space delete <name>", HELP_TEXT)
+        self.assertIn("space create <n>", HELP_TEXT)
+        self.assertIn("space rename <o> <n>", HELP_TEXT)
+        self.assertIn("space delete <n>", HELP_TEXT)
 
     def test_management_works_from_any_directory(self):
         """`ck space …` is global — no project root required."""

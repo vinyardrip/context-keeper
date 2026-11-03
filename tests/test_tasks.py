@@ -374,9 +374,12 @@ class TestCliDispatch(_IsolatedHome, unittest.TestCase):
             edit_plan.assert_called_once_with()
 
     def test_help_documents_top_level_shorthands(self):
-        self.assertIn("Shorthand for `ck st -l`", HELP_TEXT)
-        self.assertIn("Shorthand for `ck st -e`", HELP_TEXT)
-        self.assertIn("Shorthand for `ck st -g`", HELP_TEXT)
+        self.assertIn("-l, --list", HELP_TEXT)
+        self.assertIn("Same as st -l", HELP_TEXT)
+        self.assertIn("-e, --edit", HELP_TEXT)
+        self.assertIn("Same as st -e", HELP_TEXT)
+        self.assertIn("-g, --global", HELP_TEXT)
+        self.assertIn("Same as st -g", HELP_TEXT)
 
     def test_tasks_and_list_differ_from_dashboard(self):
         """Local and global views are genuinely different outputs."""
@@ -618,35 +621,46 @@ class TestDoneImplicitFocus(_IsolatedHome, unittest.TestCase):
 
 
 class TestHelpText(unittest.TestCase):
+    # v0.11.0: the grouped dpx-style help is a condensed quick index;
+    # the README Commands table stays the canonical spec.
+
     def test_help_includes_list(self):
-        self.assertRegex(HELP_TEXT, r"(?m)^\s{2}list\s+Print task list")
+        self.assertRegex(
+            HELP_TEXT, r"(?m)^    list \[project\]  +Print task list")
 
     def test_help_documents_st_flags(self):
-        self.assertIn("st [-l|-e|-g]", HELP_TEXT)
-        self.assertIn("-l: list tasks", HELP_TEXT)
-        self.assertIn("-e: edit plan", HELP_TEXT)
-        self.assertIn("-g: global dashboard", HELP_TEXT)
+        self.assertIn("-l, --list", HELP_TEXT)
+        self.assertIn("Same as st -l", HELP_TEXT)
+        self.assertIn("-e, --edit", HELP_TEXT)
+        self.assertIn("Same as st -e", HELP_TEXT)
+        self.assertIn("-g, --global", HELP_TEXT)
+        self.assertIn("Same as st -g", HELP_TEXT)
 
     def test_help_documents_dashboard_verbose(self):
-        self.assertIn("dashboard -v", HELP_TEXT)
-        self.assertIn("triad context per project", HELP_TEXT)
+        self.assertIn("dashboard [-v]", HELP_TEXT)
+        readme = (Path(__file__).resolve().parent.parent
+                  / "README.md").read_text(encoding="utf-8")
+        self.assertIn("PREV", readme)
+        self.assertIn("Focus", readme)
+        self.assertIn("Next", readme)
 
     def test_help_does_not_document_removed_surface(self):
-        # The removed commands must not appear as command entries
-        # (the -l flag description legitimately contains the word
-        # "tasks", so a substring check would be wrong).
-        self.assertNotRegex(HELP_TEXT, r"(?m)^\s{2}tasks\b")
-        self.assertNotRegex(HELP_TEXT, r"(?m)^\s{2}status\b")
+        # The removed commands must not appear as command entries.
+        self.assertNotRegex(HELP_TEXT, r"(?m)^    tasks\b")
+        self.assertNotRegex(HELP_TEXT, r"(?m)^    status\b")
         self.assertNotIn("list -g", HELP_TEXT)
         self.assertNotIn("st --global", HELP_TEXT)
 
     def test_help_groups_local_and_global_views(self):
-        self.assertIn("Local (current project):", HELP_TEXT)
-        self.assertIn("Global (all registered projects):", HELP_TEXT)
+        self.assertIn("VIEW:", HELP_TEXT)
+        self.assertIn("SPACES (GLOBAL CONTEXTS):", HELP_TEXT)
 
     def test_help_includes_editor_hierarchy(self):
-        self.assertIn("$VISUAL", HELP_TEXT)
-        self.assertIn(".ck.json", HELP_TEXT)
+        # Editor resolution detail lives in the README.
+        readme = (Path(__file__).resolve().parent.parent
+                  / "README.md").read_text(encoding="utf-8")
+        self.assertIn("$VISUAL", readme)
+        self.assertIn(".ck.json", readme)
 
 
 if __name__ == "__main__":

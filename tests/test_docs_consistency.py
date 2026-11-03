@@ -1,6 +1,6 @@
 """Documentation consistency: version bump and roadmap hygiene.
 
-Guards the v0.10.1 documentation update:
+Guards the v0.11.0 documentation update:
 
 - every version source agrees (package, pyproject, README, ROADMAP);
 - completed features (Shell Completion) never reappear in the
@@ -13,7 +13,9 @@ Guards the v0.10.1 documentation update:
   ``--clear``, array storage and legacy migration) are documented in
   both languages (v0.10.0);
 - the unified note timestamp format and HISTORY multi-note rule are
-  documented in both languages (v0.10.1).
+  documented in both languages (v0.10.1);
+- the grouped-help quick reference appears near the Commands table in
+  both languages (v0.11.0).
 """
 
 from __future__ import annotations
@@ -111,6 +113,17 @@ class TestDocumentationConsistency(unittest.TestCase):
             self.assertIn("active_task.note", section)
         self.assertIn("**Note timestamps.**", english)
         self.assertIn("**Метки времени заметок.**", russian)
+
+    def test_quick_reference_documented_bilingually(self):
+        """v0.11.0: grouped-help quick ref near the Commands tables."""
+        for marker, needle in (
+            ("## 🛠 Commands", "**Quick reference:**"),
+            ("## 🛠 Команды", "**Краткая справка:**"),
+        ):
+            start = self.readme.rindex(marker)
+            window = self.readme[start:start + 500]
+            self.assertIn(needle, window, marker)
+            self.assertIn("ck -h", window, marker)
 
     def test_bilingual_roadmap_checklists_have_parity(self):
         pairs = (

@@ -537,11 +537,18 @@ class TestPhysicalInstall(unittest.TestCase):
     # ---- help / docs ------------------------------------------------ #
 
     def test_help_documents_physical_install(self):
-        self.assertIn("physical executable file, never a symlink", HELP_TEXT)
-        self.assertIn("~/.local/bin/ck-dev", HELP_TEXT)
+        # v0.11.0: the grouped help is a condensed index ("install" /
+        # "uninstall" rows only); the physical-copy contract is
+        # documented in the README, the canonical spec.
+        self.assertIn("install", HELP_TEXT)
+        self.assertIn("uninstall", HELP_TEXT)
+        readme = (Path(__file__).resolve().parent.parent / "README.md").read_text(
+            encoding="utf-8")
+        self.assertIn("physical executable file, no symlink", readme)
+        self.assertIn("~/.local/bin/ck-dev", readme)
         # No reference may suggest that install CREATES a symlink.
-        self.assertNotIn("Symlink ck to", HELP_TEXT)
-        self.assertNotIn("Symlink ck-dev", HELP_TEXT)
+        self.assertNotIn("Symlink ck to", readme)
+        self.assertNotIn("Symlink ck-dev", readme)
 
 
 class TestPhysicalInstallEndToEnd(unittest.TestCase):

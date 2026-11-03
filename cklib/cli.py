@@ -37,226 +37,111 @@ from .sandbox import (
 )
 
 
-HELP_TEXT = f"""Context Keeper CLI [v{VERSION}]
+# ---------------------------------------------------------------------- #
+# Grouped top-level help (dpx-style, v0.11.0)
+# ---------------------------------------------------------------------- #
+#
+# The README Commands table is the CANONICAL spec: it carries the
+# per-command detail (ranges, flags, edge cases) that this grouped help
+# intentionally condenses away. The help is a quick-reference index
+# grouped by intent, rendered with ONE global description column so the
+# rows scan vertically.
+#
+# Alignment rule: within each group the longest command would set its
+# own column, but a single GLOBAL column (max over all command forms,
+# padded with a 2-space gap) keeps the eye moving in a straight line
+# down the page.
+_HELP_GROUPS: List[tuple] = [
+    ("TASKS", [
+        ("add <text>", "Add a new task"),
+        ("start <ID>", "Focus a task (0 resets)"),
+        ("done <ID|range>", "Mark task(s) done"),
+        ("delete <ID>", "Delete a task (alias: rm)"),
+        ("move <ID> <pos>", "Move a task"),
+        ("swap <ID1> <ID2>", "Swap two tasks"),
+        ("reorder <ID...>", "Set task order"),
+    ]),
+    ("NOTES", [
+        ("note <text>", "Append a process note to the active task"),
+        ("notes", "List active process notes"),
+    ]),
+    ("VIEW", [
+        ("st", "Status overview (Previous / Focus / Next)"),
+        ("list [project]", "Print task list (pipe-friendly)"),
+        ("dashboard [-v]", "Cross-project dashboard"),
+    ]),
+    ("SAVE", [
+        ("save", "Save context + optional local git commit"),
+        ("edit", "Open PLAN.md in editor"),
+        ("log [--all]", "View HISTORY.md (all archives with --all)"),
+    ]),
+    ("SPACES (GLOBAL CONTEXTS)", [
+        ("space list", "List all spaces"),
+        ("space create <n>", "Create a new space"),
+        ("space rename <o> <n>", "Rename a space"),
+        ("space move <n> <pos>", "Move a space"),
+        ("space swap <a> <b>", "Swap two spaces"),
+        ("space reorder", "Normalize space order"),
+        ("space delete <n>", "Delete a space and its notes"),
+        ("<space> <command>",
+         "Run any task command against a space (local / remote / "
+         "today / <name>)"),
+    ]),
+    ("PROJECTS", [
+        ("init [--register]", "Initialize a project locally"),
+        ("register", "Add project to global registry"),
+        ("unregister", "Remove project from registry"),
+        ("prune", "Purge missing projects"),
+    ]),
+    ("SHELL", [
+        ("completion <sh>", "Print completion script (bash | zsh)"),
+    ]),
+    ("SELF", [
+        ("info", "Installation diagnostics"),
+        ("install", "Install to ~/.local/bin"),
+        ("uninstall", "Remove installed files"),
+        ("update", "Self-update from git"),
+    ]),
+    ("DEV", [
+        ("dev setup", "Build sandbox mock environment"),
+        ("dev emulate", "History rotation stress emulator"),
+        ("dev clean", "Clean the sandbox (alias: sandbox clean)"),
+    ]),
+    ("SHORTHANDS", [
+        ("-l, --list", "Same as st -l"),
+        ("-e, --edit", "Same as st -e"),
+        ("-g, --global", "Same as st -g"),
+    ]),
+    ("OPTIONS", [
+        ("-h, --help", "Show this help"),
+        ("-v, --version", "Show version"),
+    ]),
+]
 
-Usage: ck <command> [args]
 
-Local (current project):
-  st [-l|-e|-g]              Status of current project (-l: list tasks,
-                             -e: edit plan, -g: global dashboard)
-  st <project_name>          Status of a REGISTERED project, from any
-                             directory (same targeting rules as
-                             `ck list <project_name>`); an unknown
-                             name exits 1. With no argument OUTSIDE
-                             every project, `ck st` never guesses:
-                             it renders the single nested project or
-                             lists the available ones
-  st --all                   Also print the full PLAN.md
-  list                       Print task list to STDOUT
-  list <project_name>        Print the task list of a REGISTERED
-                             project from any directory; an unknown
-                             name exits 1. With no argument OUTSIDE
-                             every project, `ck list` never guesses:
-                             it names the single nested project in the
-                             header or lists the available ones
-  init                       Initialize .ck/ locally (use --register to register globally)
-  start <ID>                 Mark task ID as focused ([>]); 0 resets focus.
-                             A noted task that loses focus moves to
-                             Unfocused / Paused Context (its note travels
-                             with it); a noteless one prompts for a note
-                             (TTY) or gets a soft hint. Flags: --no-input
-                             (never prompt), -y (assume yes, ask text only)
-  done <ID|Range>            Mark task(s) as done ([x]). Bare `ck done`
-                             completes the CURRENT FOCUS; without a
-                             focus it prints the usage line instead
-  delete <ID> [-s <space>]   Permanently remove a TASK, then re-index
-                             the remaining task IDs so the sequence
-                             keeps a gapless 1..N. Without -s the
-                             active project (`project`) is targeted;
-                             -s / --space <name> targets a global
-                             space and leaves the active project and
-                             its .ck/state.json untouched. Prints
-                             `Task #<ID>: <title>` and asks `[y/N]`;
-                             -f / --force skips the prompt. Alias:
-                             `ck rm <ID>`. (Not to be confused with
-                             `ck space delete <name>`, which removes
-                             a whole global SPACE and its notes.)
-  move <ID> <pos|top|bottom> Move a PENDING/ACTIVE task ([ ] or [>])
-                             to position N among the active tasks, or
-                             to the first/last slot. Completed ([x])
-                             tasks are never reordered (exit 1)
-  swap <ID1> <ID2>           Exchange the positions of two active tasks
-  reorder <ID1> <ID2> ...    Set the relative order of active tasks;
-                             listed IDs move ahead of unlisted ones,
-                             which keep their relative order. Prints
-                             a multi-line summary of the applied
-                             change, then the refreshed sprint view
-                             (the `ck list` equivalent); `move` /
-                             `swap` stay single-line
-  add <text>                 Insert a new open task before ## Completed
-  note <ID> <text>           Append a timestamped process note to the task;
-                             `ck note <text>` targets the active task.
-                             `--list` shows that task's notes, `--clear`
-                             removes them (shown in `ck st`, archived by
-                             `ck done`)
-  notes                      List all active process notes: every note entry
-                             of the focused task plus every paused task
-                             ([i] No active process notes found. when none)
-  save                       Checkpoint workflow (does NOT complete the
-                             task): append a note/summary to HISTORY.md,
-                             then optionally create a LOCAL Git commit.
-                             Complete tasks separately with `ck done <ID>`
-  edit                       Open PLAN.md in your editor
-  log                        Open HISTORY.md in your editor
-  info                       Diagnostic information about this installation
+def render_help() -> str:
+    """The grouped ``ck -h`` screen (see :data:`HELP_TEXT`)."""
+    entries = [entry for _name, rows in _HELP_GROUPS for entry in rows]
+    width = max(len(command) for command, _desc in entries)
+    column = width + 2
+    lines = [
+        "--- CK - Context Keeper ---",
+        'Minimalist Unix-way "external memory" for developers',
+        "",
+        "USAGE:",
+        "    ck <command> [options]",
+        "    ck <space> <command> [options]",
+    ]
+    for group_name, rows in _HELP_GROUPS:
+        lines.append("")
+        lines.append(f"{group_name}:")
+        for command, desc in rows:
+            padded = command.ljust(column)
+            lines.append(f"    {padded}{desc}")
+    return "\n".join(lines) + "\n"
 
-Shell completion:
-  completion bash            Print the Bash completion script to STDOUT:
-                             eval "$(ck completion bash)"
-  completion zsh             Print the Zsh completion script to STDOUT:
-                             eval "$(ck completion zsh)"
-                             Scripts complete the core commands plus the
-                             registered project names (from
-                             ~/.config/ck/projects.json) and space names
-                             for `ck space move|swap|rename|delete`
-                             (from the persisted spaces_order); helper
-                             calls resolve CK_BIN (when executable)
-                             or fall back to the ck on PATH (ck-dev
-                             exports the checkout's launcher); missing
-                             or unreadable sources degrade to no names
 
-Global (all registered projects):
-  dashboard                  Cross-project dashboard (compact table)
-  dashboard -v               Detailed block view: full PREV/FOCUS/NEXT
-                             triad context per project
-  register   [-n NAME] [--path PATH]  Add a project to the global registry
-  unregister [--path PATH | NAME]     Remove a project from the registry
-  prune                              Drop entries whose folders no longer exist
-
-Space Management (manage global spaces):
-  space list                 List every global space plus the
-                             active [PROJECT] context; [PROJECT]
-                             is where un-prefixed commands
-                             (ck st, ck list) resolve
-  space create <name>        Create a new space from the default
-                             template
-  space rename <old> <new>   Rename a space, carrying its notes
-                             along (alias: mv)
-  space move <name> <pos>    Move a space to a 1-based position in
-                             the persisted space order (the virtual
-                             `project` space included)
-  space swap <a> <b>         Exchange two spaces' positions
-  space reorder              Normalize/re-index the space sequence
-                             against the spaces that currently exist
-  space delete <name> [-f]   Permanently delete a space and its
-                             process notes; the target is checked
-                             first, then `[y/N]` confirmation
-                             (`-y` / `-f` / `--force` skip it). The
-                             default `project` space and the
-                             built-in `local` / `remote` / `today`
-                             cannot be deleted
-
-Spaces (out-of-project task lists, ~/.config/ck/spaces/):
-  local add <text>          Add a task to the workstation space
-  local list                List workstation space tasks
-  local st                  Detailed status view for the
-                             workstation space (same layout
-                             as `ck st`: header, progress,
-                             current focus, notes, context);
-                             `status` is an exact alias
-  local st -l|--list        Space task listing (as `ck st -l`)
-  local st -e|--edit        Open the space file in $EDITOR
-                             (as `ck st -e`)
-  local st -g|--global      Global dashboard (as `ck st -g`);
-                             same as `ck local dashboard`
-  local done <ID|range>     Mark workstation task(s) done ([x]);
-                             bare `ck local done` completes the
-                             CURRENT FOCUS of the space
-  local focus <ID>          Focus a workstation task ([>]);
-                             0 resets focus
-  local start <ID>          Alias for `ck local focus <ID>`
-  local note <ID> <text>    Append a timestamped process note to a
-                             workstation task (`--list` / `--clear`)
-  local notes               List every active process note
-                             (focused task + paused/unfocused
-                             tasks), all entries in order
-  local edit                Open the workstation space file
-                             (~/.config/ck/spaces/local.md) in
-                             your editor
-  local dashboard           Alias for `ck dashboard`; `-v` adds
-                             the detailed PREV/FOCUS/NEXT blocks
-                             (spaces are listed there too)
-  remote ...                Same commands for the infrastructure
-                             space (~/.config/ck/spaces/remote.md)
-  today ...                 Same commands for the daily scratch
-                             space (~/.config/ck/spaces/today.md)
-  <space> ...               ANY EXISTING space file placed in
-                             ~/.config/ck/spaces/<name>.md is
-                             automatically routable with the same
-                             commands (dynamic spaces); spaces
-                             also render a detailed PREV/FOCUS/NEXT
-                             block under `ck dashboard -v`.
-                             Registered projects are NEVER routed
-                             here: `ck <project> <command>` exits 1
-
-Editor resolution (ck edit / ck log):
-  1. "editor" key in .ck.json at the project root
-  2. $VISUAL
-  3. $EDITOR
-  4. nano (if installed), else vi
-
-Color overrides ("colors" keys in .ck.json, optional):
-  text, muted, border, accent -> "none" (native), "cyan", "bold blue",
-  "bright-black", or raw SGR ("38;5;208"); unset keys inherit your
-  terminal's native text color. The `border` slot paints the thin
-  table/card rules and defaults to a quiet "bright-black" hairline
-  (use "none" to inherit the native color).
-
-System commands:
-  install                    Copy the ck launcher to {USER_INSTALL_PATH}
-                             (physical executable file, never a symlink) and
-                             snapshot cklib/ to {SNAPSHOT_INSTALL_DIR}:
-                             production is a static snapshot refreshed only
-                             by an explicit `ck install` / `ck update`
-  install --dev              Deprecated: no global dev entrypoint is
-                             created. Dev mode runs from the checkout via
-                             local binary execution: ./ck-dev
-  uninstall                  Remove {USER_INSTALL_PATH}, the cklib
-                             snapshot and any legacy ~/.local/bin/ck-dev
-  update                     git fetch + git pull --ff-only origin main
-                             (an existing installation is refreshed after
-                             a successful pull)
-
-Dev mode (ck-dev / CK_SANDBOX=1 / --sandbox):
-  ./ck-dev                   Enter sandbox mode: sets up .sandbox/ if needed,
-                             prints the sandbox warning banner and Global
-                             Dashboard, then opens an interactive subshell.
-                             To exit: type 'exit' or press Ctrl+D.
-  ck dev setup               Build an isolated mock environment in .sandbox/
-  ck dev clean               Remove the .sandbox/ directory (alias: ck sandbox clean)
-  ck dev emulate             Interactive history-rotation stress emulator:
-                             3 generate/rotate cycles in
-                             .sandbox/projects/sandbox_stress with tiny
-                             limits (.md.gz archives, FIFO purge), then
-                             prints how to inspect via `ck log --all`
-  sandbox setup              Build an isolated mock environment in .sandbox/
-                             (registered/unregistered/missing projects, bulk
-                             history + archive data)
-  sandbox clean              Remove the .sandbox/ directory (same as ck-clean)
-
-Inside a sandbox session, plain `ck` prints the sandbox warning banner
-before transparently executing in sandbox mode.
-
-Inside a sandbox session, plain `ck` prints the sandbox warning banner
-before transparently executing in sandbox mode.
-
-Options:
-  -v, --version              Show version
-  -h, --help                 Show this help
-  -l, --list                 Shorthand for `ck st -l` (list tasks)
-  -e, --edit                 Shorthand for `ck st -e` (edit plan)
-  -g, --global               Shorthand for `ck st -g` (global dashboard)
-"""
+HELP_TEXT = render_help()
 
 
 # Commands that may print a non-blocking update notice to stderr.
@@ -886,6 +771,25 @@ def _print_focus_result(result) -> None:
                     "note. Attach one via `ck note <text>`.")
 
 
+def _help_via_argparse(argv: List[str]) -> int:
+    """Per-command help through argparse's default subparser formatting.
+
+    ``ck <command> --help`` and ``ck help <command>`` delegate here:
+    argparse short-circuits on the help flag and prints the subparser's
+    usage line and flags (the redesigned per-command screen is deferred;
+    the argparse default is acceptable). Unknown command names ride the
+    same path and surface the 0.9.2 one-liner from the parser error,
+    exiting 2. The bare grouped screen is NOT printed here.
+    """
+    parser = build_parser()
+    try:
+        parser.parse_args(argv)
+    except SystemExit as e:
+        return int(e.code) if e.code is not None else 2
+    # parse_args fell through without a help flag: nothing was printed.
+    return 2
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     """CLI entry point. Returns a process exit code.
 
@@ -934,12 +838,24 @@ def _dispatch(argv: Optional[List[str]] = None) -> int:
     # Sandbox interceptor: plain `ck` inside a dev-mode session warns
     # with the sandbox banner first, then executes transparently.
     # Help/version flows stay banner-free.
-    if "-h" in raw or "--help" in raw or raw[0] == "help":
+    if raw[0] in ("-h", "--help", "help"):
+        # v0.11.0 grouped help: `ck -h` / `ck --help` / `ck help` are
+        # byte-identical. `ck help <command>` routes to the argparse
+        # subparser help (per-command detail); unknown names get the
+        # 0.9.2 one-liner from the parser's error path.
+        if raw[0] == "help" and len(raw) > 1:
+            return _help_via_argparse([raw[1], "--help"])
         print(HELP_TEXT)
         return 0
     if raw[0] == "-v" or raw[0] == "--version":
         print(f"ck version {VERSION}")
         return 0
+    # A subcommand followed by a help flag gets the argparse subparser
+    # help (per-command usage + flags), never the grouped top-level
+    # screen: `ck add --help` and `ck st --help` stay useful. Unknown
+    # names flow through the one-liner error path unchanged.
+    if ("-h" in raw or "--help" in raw) and len(raw) > 1:
+        return _help_via_argparse(raw)
     # SHELL COMPLETION: handled BEFORE any startup side effect (space
     # auto-init, update probe, sandbox banner). The generated scripts
     # call `ck completion --list-projects` on every TAB, so this path

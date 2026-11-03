@@ -230,7 +230,7 @@ class TestEmulateHelp(unittest.TestCase):
     def test_dev_emulate_in_help_and_usage(self):
         # The dev section of HELP_TEXT documents the emulator.
         from cklib.cli import HELP_TEXT
-        self.assertIn("ck dev emulate", HELP_TEXT)
+        self.assertIn("dev emulate", HELP_TEXT)
 
     def test_unknown_dev_action_lists_emulate(self):
         from cklib.cli import main
