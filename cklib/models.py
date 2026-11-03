@@ -484,13 +484,19 @@ class Notes:
     timestamp: str
     comment: str
     body: str = ""
+    note_lines: list[str] = field(default_factory=list)
 
     def render(self) -> str:
         if self.task_id is not None:
             header = f"### {self.timestamp} | [{self.task_id}] {self.task_title}"
         else:
             header = f"### {self.timestamp} | {self.task_title}"
-        out = f"\n{header}\n- {self.comment}\n"
+        if self.note_lines:
+            out = f"\n{header}\n"
+            for line in self.note_lines:
+                out += f"{line}\n"
+        else:
+            out = f"\n{header}\n- {self.comment}\n"
         if self.body:
             # The body is wrapped in a single fence by this renderer.
             # Strip any fence markers the user included so the emitted

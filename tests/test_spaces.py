@@ -760,12 +760,14 @@ class TestSpaceCommandRouting(_IsolatedHome):
         state = json.loads(
             spaces.state_path("local").read_text(encoding="utf-8")
         )
-        self.assertEqual(state["notes"]["1"], "debugging auth")
+        self.assertEqual(len(state["notes"]["1"]), 1)
+        self.assertEqual(state["notes"]["1"][0]["text"], "debugging auth")
+        self.assertTrue(state["notes"]["1"][0]["created"])
         self.assertEqual(
             spaces.SpaceManager("local").get_note(1), "debugging auth"
         )
 
-    def test_local_note_updates_existing_note(self):
+    def test_local_note_appends_to_existing_note(self):
         self._seed("local", "first task")
         self._run(["local", "note", "1", "first note"])
 
@@ -776,7 +778,12 @@ class TestSpaceCommandRouting(_IsolatedHome):
         state = json.loads(
             spaces.state_path("local").read_text(encoding="utf-8")
         )
-        self.assertEqual(state["notes"]["1"], "updated note")
+        self.assertEqual(
+            [entry["text"] for entry in state["notes"]["1"]],
+            ["first note", "updated note"],
+        )
+        self.assertEqual(
+            spaces.SpaceManager("local").get_note(1), "updated note")
 
     def test_local_note_unknown_id_is_clean_error(self):
         self._seed("local", "first task")
@@ -814,7 +821,8 @@ class TestSpaceCommandRouting(_IsolatedHome):
         state = json.loads(
             spaces.state_path("remote").read_text(encoding="utf-8")
         )
-        self.assertEqual(state["notes"]["1"], "waiting for IP")
+        self.assertEqual(len(state["notes"]["1"]), 1)
+        self.assertEqual(state["notes"]["1"][0]["text"], "waiting for IP")
         self.assertEqual(
             spaces.SpaceManager("remote").get_note(1), "waiting for IP"
         )
@@ -938,7 +946,8 @@ class TestDynamicSpaceRouting(_IsolatedHome):
         state = json.loads(
             spaces.state_path("custom").read_text(encoding="utf-8")
         )
-        self.assertEqual(state["notes"]["1"], "custom note")
+        self.assertEqual(len(state["notes"]["1"]), 1)
+        self.assertEqual(state["notes"]["1"][0]["text"], "custom note")
 
         code, out = self._run(["custom", "done", "1"])
         self.assertEqual(code, 0)

@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.9.3-blue)]()
+[![version](https://img.shields.io/badge/version-0.10.0-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -46,7 +46,7 @@ Context Keeper (ck) acts as a bridge between your brain, AI agents, and Git, per
 - Self-Installer: ck install / ck uninstall (user-level physical copy — a regular executable file, never a symlink; no sudo)
 - Self-Updater: ck update (git fetch + `pull --ff-only` for checkouts; in-place `install.sh` refresh for standalone installs, preserving `.ck/`; refuses on dirty work tree)
 - CLI Task Management: ck add <text>, ck start <ID>, ck done <ID|range|list>
-- Process Notes: `ck note <text>` attaches a scratchpad to the active task — shown in `ck st`, archived to HISTORY.md on `ck done`, and carried through focus switches via the Unfocused / Paused Context block
+- Process Notes: `ck note <ID> <text>` appends a timestamped scratchpad entry to a task (never overwrites) — shown in `ck st`, archived to HISTORY.md on `ck done`, and carried through focus switches via the Unfocused / Paused Context block; `--list` shows one task's notes, `--clear` removes them
 - Global Registry: Cross-project dashboard (ck dashboard) backed by `~/.config/ck/projects.json`; registration is explicit
 - Fail-Closed Locking: Cross-process file locking guards registry, PLAN.md, HISTORY.md and state.json writes
 - Full Plan View: ck st --all
@@ -104,7 +104,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.9.3
+ck -v    # → ck version 0.10.0
 ```
 
 ---
@@ -138,13 +138,13 @@ ck -v    # → ck version 0.9.3
 | ck start \<ID\> | Focus a task (`- [>]`); `ck start 0` resets focus. A noted task that loses focus moves to Unfocused / Paused Context (note preserved until `ck done` archives it); a noteless one gets a soft attach-a-note hint |
 | ck done \<ID\|range\|list\> | Mark task(s) done (`- [x]`), e.g. `3`, `2-4`, `1,3,5`. Bare `ck done` completes the CURRENT FOCUS (usage error without one); the completed task's process note is archived into HISTORY.md and cleared |
 | ck delete \<ID\> [-s \<space\>] / ck rm \<ID\> | Permanently remove ONE task and re-index the remaining task IDs 1..N. The default target is the active project (`project`); `-s` / `--space <name>` targets a global space instead, mutating only that space file and leaving the project's `.ck/state.json` and `PLAN.md` untouched. Prints `Task #<ID>: <title>` and asks `Permanently delete task #<ID> from space '<space>'? [y/N]`; `-f` / `--force` skips the prompt — a non-interactive run without `-f` refuses (exit 2). Notes are archived to the target's `HISTORY.md`; a targeted space archives to `~/.config/ck/spaces/<space>.HISTORY.md`. Whole spaces are removed with the separate `ck space delete <name>` |
-| ck note \<text\> | Attach/update a process note on the active task (shown in `ck st`; archived to HISTORY.md by `ck done`) |
+| ck note \<ID\> \<text\> | **Append** a timestamped process note to the task (never overwrite). `ck note <text>` keeps the active-task shortcut. `ck note <ID> --list` prints that task's notes with timestamps; `ck note <ID> --clear` removes all of them. Shown in `ck st`; every entry is archived to HISTORY.md by `ck done` |
 | ck edit | Open PLAN.md in your editor (see [Editor Resolution](#editor-resolution)) |
 | ck save | Checkpoint workflow (does **not** complete the task): append an optional note + short summary to HISTORY.md, then optionally create a **local** Git commit. Completion stays a separate `ck done <ID>` action |
 | ck log | Open HISTORY.md in your editor (see [Editor Resolution](#editor-resolution)) |
 | ck log --all | View the full history: every rotation archive (`.md.gz` decompressed / legacy `.md.bak`, oldest first) concatenated with the current HISTORY.md |
 | ck st | Status overview (tri-state: Previous / Focus / Next); an explicit focus is duplicated at the top as `-> CURRENT FOCUS: [#<id>] <title>` (with its note). WORK CONTEXT shows `<< Done`, a conditional `[!] Skipped` (only on a real execution gap), `[>] Focus` / `Next`, `>> Upcoming`, and a highlighted bottom banner `>> Backlog: N task(s) remaining` |
-| ck notes | List all active process notes: `[>] Active Focus:` plus `[!] Unfocused / Paused Context:` with each paused task's bound note (`[i] No active process notes found.` when none) |
+| ck notes | List all active process notes: `[>] Active Focus:` plus `[!] Unfocused / Paused Context:` with every entry of each task's note, in append order (`[i] No active process notes found.` when none) |
 | ck st -l / --list | Print the task list to STDOUT. Inside a project this is identical to `ck list`; outside one it follows the `ck st` hierarchy (global-registry fallback), whereas `ck list` deliberately never guesses — see [ck list Outside a Project](#ck-list-outside-a-project) |
 | ck st -e / --edit | Open PLAN.md in your editor (same as `ck edit`) |
 | ck st -g / --global | Cross-project dashboard (same as `ck dashboard`) |
@@ -174,8 +174,8 @@ ck -v    # → ck version 0.9.3
 | ck local done \<ID\|range\|list\> | Mark workstation space task(s) done (`- [x]`); bare `ck local done` completes the space's CURRENT FOCUS (usage error without one) |
 | ck local focus \<ID\> | Focus a workstation space task (`- [>]`), demoting any other focus; `ck local focus 0` resets focus |
 | ck local start \<ID\> | Alias for `ck local focus <ID>` |
-| ck local note \<ID> \<text\> | Attach a process note to a workstation space task (stored in `~/.config/ck/spaces/local.json`) |
-| ck local notes | List every active process note of the space — the focused task's note under `[>] Active Focus:` and the notes bound to open, unfocused tasks under `[!] Unfocused / Paused Context:` (`[i] No active process notes found.` when none); same format as the project `ck notes` |
+| ck local note \<ID\> \<text\> | **Append** a timestamped process note to a workstation space task (stored in `~/.config/ck/spaces/local.json`); `--list` / `--clear` work exactly like the project command |
+| ck local notes | List every active process note of the space — the focused task's notes under `[>] Active Focus:` and every entry bound to open, unfocused tasks under `[!] Unfocused / Paused Context:` (`[i] No active process notes found.` when none); same format as the project `ck notes` |
 | ck local edit | Open the workstation space file (`~/.config/ck/spaces/local.md`) in the editor resolved by the standard logic (`.ck.json` `editor` key → `$VISUAL` → `$EDITOR` → nano/vi) |
 | ck local dashboard | Alias for `ck dashboard`; `-v` adds the detailed PREV/FOCUS/NEXT blocks (spaces included) |
 | ck remote add \<text\> | Add a task to the infrastructure space (`~/.config/ck/spaces/remote.md`) |
@@ -184,8 +184,8 @@ ck -v    # → ck version 0.9.3
 | ck remote done \<ID\|range\|list\> | Mark infrastructure space task(s) done (bare form completes the space's CURRENT FOCUS) |
 | ck remote focus \<ID\> | Focus an infrastructure space task (`0` resets focus) |
 | ck remote start \<ID\> | Alias for `ck remote focus <ID>` |
-| ck remote note \<ID> \<text\> | Attach a process note to an infrastructure space task (stored in `~/.config/ck/spaces/remote.json`) |
-| ck remote notes | List every active process note of the infrastructure space |
+| ck remote note \<ID> \<text\> | **Append** a timestamped process note to an infrastructure space task (stored in `~/.config/ck/spaces/remote.json`); `--list` / `--clear` work exactly like the project command |
+| ck remote notes | List every active process note of the infrastructure space, all entries in order |
 | ck remote edit | Open the infrastructure space file (`~/.config/ck/spaces/remote.md`) in the editor |
 | ck remote dashboard | Alias for `ck dashboard` |
 | ck today \<command\> | Same commands for the daily scratch space (`~/.config/ck/spaces/today.md`), seeded at startup with the empty template; no daily-reset logic yet |
@@ -637,18 +637,32 @@ archives that task's note into HISTORY.md).
 
 ## Process Notes & Unfocused / Paused Context
 
-A **process note** (`ck note <text>`) is a lightweight scratchpad attached to the
-active task. It lives in `.ck/state.json`, renders under the task it belongs to,
-and follows a strict lifecycle:
+A **process note** (`ck note <ID> <text>`) is a lightweight scratchpad attached to
+a task. Every call **appends** a new timestamped entry — it never overwrites an
+earlier note. Notes live in `.ck/state.json` (spaces use their
+`~/.config/ck/spaces/<name>.json` sidecar), render under the task they belong
+to, and follow a strict lifecycle:
 
-- **Attach / update** — `ck note <text>` writes the note onto the active task
-  (focused task, else first open task).
-- **Display** — `ck st` shows `* Note: <text>` under the task that owns it, and
-  `ck dashboard -v` shows it per project (including for registered projects
-  viewed from another directory).
-- **Complete** — `ck done <ID>` archives the note into `HISTORY.md` as a dated
-  entry, then clears it from the active-task state. The note is user data: it
-  graduates into history, it is never silently dropped.
+- **Append** — `ck note <ID> <text>` adds a note entry to that task;
+  `ck note <text>` keeps the active-task shortcut (focused task, else first open
+  task). `ck note <ID> --list` prints the task's notes with timestamps;
+  `ck note <ID> --clear` removes all of them.
+- **Display** — `ck st` shows one `* Note:` line per entry under the task that
+  owns it, and `ck dashboard -v` shows them per project (including for
+  registered projects viewed from another directory). With two or more entries
+  each line carries a `(HH:MM UTC)` marker so the sequence is readable.
+- **Complete** — `ck done <ID>` archives every note entry into `HISTORY.md` in
+  append order, then clears them from the task state. A single note keeps the
+  historical `- <text>` line; multiple notes share one dated entry with one
+  `* Note` line per note. Notes are user data: they graduate into history, they
+  are never silently dropped.
+
+**Storage and migration.** Notes are stored as ordered arrays of
+`{"text": ..., "created": ...}` entries, where `created` is ISO-8601 UTC with a
+`+00:00` offset. Existing single-string notes from earlier versions are
+converted in memory on load; the array shape is persisted on the next write to
+that file. Read-only commands (including `ck notes`) never modify
+`state.json`.
 
 ### Switching focus
 
@@ -753,19 +767,30 @@ hint banner — `[!] No active focus set. Run 'ck start <ID>'` — and points at
 ### Viewing notes: `ck notes`
 
 `ck notes` lists every active process note in the project in two sections —
-the focused task's note and each paused task's bound note (paused entries
+the focused task's notes and each paused task's bound notes (paused entries
 without a note are shown with a `(no note)` marker so the paused context stays
-fully visible):
+fully visible). All entries of a task are listed in append order:
 
 ```text
 $ ck notes
 [>] Active Focus:
    - [3] write docs
+     * Note: outline the CLI section
+     * Note (14:32 UTC): add migration examples
 [!] Unfocused / Paused Context:
    - [2] implement API mapping
      * Note: paused mid-refactor — mapping layer half done
    - [4] refactor parser
      (no note)
+```
+
+`ck note <ID> --list` narrows the same view to ONE task with full timestamps:
+
+```text
+$ ck note 3 --list
+[3] write docs
+   * Note (2026-11-03 14:31 UTC): outline the CLI section
+   * Note (2026-11-03 14:32 UTC): add migration examples
 ```
 
 When nothing carries a note: `[i] No active process notes found.`
@@ -1149,6 +1174,7 @@ Logs go **exclusively** to `stderr` and `.sandbox/dev.log` — `stdout` stays co
 - [x] Zsh completion redesign: the menu appears on the FIRST `<TAB>` at every position (flags after `ck st <project>` / `ck st -l`, spaces and projects in `ck <TAB>`), dynamic `ck <space> <TAB>` routing, no prefix-then-menu `-` insertion, and `ck-dev` exports `CK_BIN` (`v0.9.2`)
 - [x] pytest isolation: every test runs against a throwaway `CK_CONFIG_DIR`, so the real `~/.config/ck/` (registry, `state.json`, spaces, locks) is never written by the suite (`v0.9.2`)
 - [x] Completion docs for the virtual `project` space (offered for `move`/`swap`, never `rename`/`delete`) and the space-only `status` alias; unknown-command errors are one readable line instead of a wrapped choice dump (`v0.9.2`)
+- [x] Append-only process notes: `ck note <ID> <text>` stores a timestamped entry per call (never overwrites), `--list` / `--clear`, in-memory migration of legacy string notes, space parity, and full HISTORY archiving in append order (`v0.10.0`)
 
 ---
 
@@ -1183,6 +1209,7 @@ Context Keeper (ck) служит мостом между вашим разумо
 - Хранение в тексте
 - Интеграция с Git (только локальные коммиты, без push)
 - Авто-архивация: ротация HISTORY.md по лимиту HISTORY_LIMIT со сжатыми `.md.gz`-архивами (COMPRESS_ARCHIVES) и FIFO-очисткой по MAX_BAK_FILES
+- Процессные заметки: `ck note <ID> <text>` добавляет заметку с меткой времени к задаче (не перезаписывает предыдущую) — видна в `ck st`, архивируется в HISTORY.md по `ck done` и переносится через `Unfocused / Paused Context`; `--list` показывает заметки одной задачи, `--clear` удаляет их
 - Парсинг `- [ ]` / `- [>]` / `- [x]` (устаревший `- []` нормализуется)
 - Поддержка AI
 - Глобальный реестр проектов и панель мониторинга
@@ -1519,6 +1546,36 @@ $ echo $?
 
 ---
 
+## Процессные заметки и Unfocused / Paused Context
+
+**Процессная заметка** (`ck note <ID> <text>`) — лёгкий блокнот, привязанный к
+задаче. Каждый вызов **добавляет** новую запись с меткой времени и никогда не
+перезаписывает предыдущую. Заметки хранятся в `.ck/state.json` (пространства —
+в sidecar `~/.config/ck/spaces/<name>.json`), отображаются под своей задачей и
+подчиняются строгому жизненному циклу:
+
+- **Добавление** — `ck note <ID> <text>` добавляет запись к указанной задаче;
+  `ck note <text>` сохраняет сокращение для активной задачи (сфокусированная,
+  иначе первая открытая). `ck note <ID> --list` печатает заметки задачи с
+  метками времени; `ck note <ID> --clear` удаляет их все.
+- **Отображение** — `ck st` показывает по одной строке `* Note:` на каждую
+  запись под владеющей задачей, а `ck dashboard -v` — по проектам (включая
+  зарегистрированные проекты из другого каталога). При двух и более записях
+  каждая строка получает маркер `(HH:MM UTC)`, чтобы порядок читался.
+- **Завершение** — `ck done <ID>` архивирует все записи в `HISTORY.md` в
+  порядке добавления, затем очищает состояние задачи. Одна заметка сохраняет
+  исторический формат `- <text>`; несколько заметок попадают в одну датированную
+  запись, по строке `* Note` на каждую. Заметки — это пользовательские данные:
+  они переходят в историю и никогда не теряются молча.
+
+**Хранение и миграция.** Заметки хранятся как упорядоченные массивы
+`{"text": ..., "created": ...}`, где `created` — ISO-8601 UTC с суффиксом
+`+00:00`. Старые заметки-строки из предыдущих версий преобразуются в памяти при
+загрузке; массив сохраняется при следующей записи файла. Команды только для
+чтения (включая `ck notes`) никогда не изменяют `state.json`.
+
+---
+
 ## ⌨️ Выбор редактора
 
 `ck edit`, `ck log` и опция `e=editor` в `ck save` запускают внешний редактор, который определяется по строгому приоритету (побеждает первое совпадение):
@@ -1774,3 +1831,4 @@ CK_DEBUG=1 ./ck-dev add "traced"    # или: ./ck-dev -v add "traced"
 - [x] Редизайн Zsh-автодополнения: меню появляется на ПЕРВОМ `<TAB>` в каждой позиции (флаги после `ck st <project>` / `ck st -l`, пространства и проекты в `ck <TAB>`), динамическая маршрутизация `ck <space> <TAB>`, без подстановки `-`, и `ck-dev` экспортирует `CK_BIN` (`v0.9.2`)
 - [x] Изоляция pytest: каждый тест работает с одноразовым `CK_CONFIG_DIR`, поэтому реальные `~/.config/ck/` (реестр, `state.json`, пространства, локи) никогда не изменяются набором тестов (`v0.9.2`)
 - [x] Документация виртуального пространства `project` в автодополнении (предлагается для `move`/`swap`, никогда для `rename`/`delete`) и алиаса `status` только для пространств; ошибка неизвестной команды — одна читаемая строка вместо перенесённого списка выбора (`v0.9.2`)
+- [x] Заметки только с добавлением: `ck note <ID> <text>` сохраняет запись с меткой времени на каждый вызов (без перезаписи), `--list` / `--clear`, миграция старых строк в памяти, паритет пространств и полная архивация в HISTORY в порядке добавления (`v0.10.0`)

@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Callable, Optional, Tuple
 
 from . import git as gith
+from . import notes as note_store
 from . import registry
 from . import spaces
 from . import ui
@@ -900,9 +901,16 @@ class ContextKeeper:
         if path is None or not path.exists():
             return {}
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return {}
+        if not isinstance(data, dict):
+            return {}
+        # LEGACY MIGRATION: old files stored one string per task. The
+        # conversion is in-memory only — a read never rewrites the
+        # file; the next write persists the array shape.
+        return note_store.migrate_notes(
+            data, note_store.file_mtime_iso(path))
 
     def _write_state(self, state: dict) -> None:
         """Atomic-replace write of ``state.json`` under ``file_lock``.
@@ -917,6 +925,7 @@ class ContextKeeper:
             resolve_write_path(self.ck_path).mkdir(parents=True, exist_ok=True)
         else:
             self.ck_path.mkdir(parents=True, exist_ok=True)
+        state = note_store.migrate_notes(state, note_store.now_iso())
         text = json.dumps(state, indent=2, ensure_ascii=False)
         with file_lock(self.state_file):
             _atomic_write_text(self.state_file, text)
@@ -1293,25 +1302,18 @@ class ContextKeeper:
         transitioned = tl.toggle_done(ids)
         if transitioned:
             completed = set(transitioned)
-            # Archive the process note BEFORE clearing it: the note
-            # is user data — it graduates into HISTORY.md instead of
-            # vanishing with the completed task context.
-            note_data = self.get_note()
-            if note_data is not None \
-                    and note_data.get("id") in completed:
-                archived = tl.by_id(note_data["id"])
-                if archived is not None:
-                    self._archive_note_to_history(
-                        archived, note_data["note"])
-            # Paused-task registry: archived notes for completed
-            # entries, then drop ALL completed tasks from the
+            # Archive every process note BEFORE clearing the task
+            # context: notes are user data and graduate into
+            # HISTORY.md instead of vanishing with the completed task.
+            for tid in transitioned:
+                archived = tl.by_id(tid)
+                if archived is None:
+                    continue
+                entries = self.get_note_entries(tid)
+                if entries:
+                    self._archive_note_to_history(archived, entries)
+            # Paused-task registry: drop ALL completed tasks from the
             # registry — a done task is finished, never paused.
-            for entry in self._paused_tasks():
-                if entry["id"] in completed and entry["note"]:
-                    archived = tl.by_id(entry["id"])
-                    if archived is not None:
-                        self._archive_note_to_history(
-                            archived, entry["note"])
             self._purge_paused_tasks(completed)
             self._commit_plan(tl)
             # Completing the focused task changes which task is
@@ -1319,6 +1321,7 @@ class ContextKeeper:
             # positional and can shift, so re-derive from the AST).
             self._sync_active_task(tl)
             self._purge_note_if_completed(completed)
+            self._purge_notes_if_completed(completed)
         return transitioned
 
     # ------------------------------------------------------------------ #
@@ -1376,8 +1379,8 @@ class ContextKeeper:
         # Notes are user data: archive the ones bound to this task
         # BEFORE the plan (and its task list) stops resolving them.
         notes = self._notes_bound_to_task(task_id)
-        for note in notes:
-            self._archive_note_to_history(target, note)
+        if notes:
+            self._archive_note_to_history(target, notes)
 
         # AST deletion drops the source bullet (TaskList.delete) and
         # renumbers the remaining nodes 1..N in document order.
@@ -1392,21 +1395,13 @@ class ContextKeeper:
             "notes_archived": len(notes),
         }
 
-    def _notes_bound_to_task(self, task_id: int) -> list[str]:
-        """Every non-empty process note attached to ``task_id``.
+    def _notes_bound_to_task(self, task_id: int) -> list[dict]:
+        """Every process-note entry attached to ``task_id``, in order.
 
-        Covers both the active-task note and the paused-task
-        registry entries. Read-only; used by :meth:`delete_task` to
-        archive the notes before the task disappears.
+        Read-only; used by :meth:`delete_task` to archive the notes
+        before the task disappears.
         """
-        notes: list[str] = []
-        active = self.get_note()
-        if active is not None and active.get("id") == task_id:
-            notes.append(active["note"])
-        for entry in self._paused_tasks():
-            if entry["id"] == task_id and entry["note"]:
-                notes.append(entry["note"])
-        return notes
+        return self.get_note_entries(task_id)
 
     def _remap_state_after_delete(self, deleted_id: int) -> None:
         """Shift ``state.json`` IDs to follow a positional deletion.
@@ -1459,6 +1454,31 @@ class ContextKeeper:
                 kept.append(entry)
             if changed:
                 state["paused_tasks"] = kept
+
+        notes = state.get("notes")
+        if isinstance(notes, dict):
+            shifted: dict = {}
+            notes_changed = False
+            for key, value in notes.items():
+                try:
+                    nid = int(key)
+                except (TypeError, ValueError):
+                    shifted[key] = value
+                    continue
+                if nid == deleted_id:
+                    notes_changed = True
+                    continue
+                if nid > deleted_id:
+                    shifted[str(nid - 1)] = value
+                    notes_changed = True
+                else:
+                    shifted[key] = value
+            if notes_changed:
+                if shifted:
+                    state["notes"] = shifted
+                else:
+                    state.pop("notes", None)
+                changed = True
 
         if changed:
             self._write_state(state)
@@ -1630,18 +1650,19 @@ class ContextKeeper:
     # COMMAND: note (active-task process note / scratchpad)
     # ------------------------------------------------------------------ #
 
-    def set_note(self, text: str) -> dict:
-        """Attach or update a short process note on the CURRENT
-        active task (focused task, else first open task).
+    def set_note(self, text: str, task_id: Optional[int] = None) -> dict:
+        """Append a short process note to a task.
 
-        The note lives in ``.ck/state.json`` under ``active_task``::
+        With no ``task_id`` the note attaches to the CURRENT active
+        task (focused task, else first open task); an explicit ID
+        targets that task directly. Every call APPENDS a new
+        timestamped entry — an existing note is never overwritten.
 
-            {"active_task": {"id": 2, "title": "...", "note": "...",
-                             "updated_at": "..."}}
-
-        It is displayed by ``ck st`` (``* Note: <text>``) and purged
-        automatically by :meth:`done` when the noted task is
-        completed. Returns the stored note metadata dict.
+        The canonical ledger lives in ``.ck/state.json`` under
+        ``notes`` as ``{task_id: [{"text", "created"}, ...]}``. The
+        legacy ``active_task.note`` / ``paused_tasks[].note`` string
+        fields are kept in sync with the newest text for backward
+        compatibility. Returns the stored note metadata dict.
 
         Aborts with a clear error when no project plan is bound (no
         initialized project) — no orphaned state entries are created.
@@ -1651,21 +1672,52 @@ class ContextKeeper:
             raise ValueError("Note text is empty")
         self._require_bound_plan()
         tl = self._load_plan()
-        active = tl.active()
-        if active is None:
-            raise ValueError(
-                "No active task to attach a note to "
-                "(plan is empty or every task is done)"
-            )
+        if task_id is None:
+            target = tl.active()
+            if target is None:
+                raise ValueError(
+                    "No active task to attach a note to "
+                    "(plan is empty or every task is done)"
+                )
+        else:
+            target = tl.by_id(task_id)
+            if target is None:
+                raise KeyError(f"No task with id {task_id}")
+
         state = self._read_state()
-        state["active_task"] = {
-            "id": active.id,
-            "title": active.title,
-            "note": note,
-            "updated_at": datetime.now().isoformat(timespec="seconds"),
-        }
+        notes = state.get("notes")
+        if not isinstance(notes, dict):
+            notes = {}
+        entries = notes.get(str(target.id))
+        if not isinstance(entries, list):
+            entries = []
+        entry = note_store.append_entry(entries, note)
+        notes[str(target.id)] = entries
+        state["notes"] = notes
+
+        active = tl.active()
+        if active is not None and active.id == target.id:
+            state["active_task"] = {
+                "id": target.id,
+                "title": target.title,
+                "note": note,
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+            }
+        paused = state.get("paused_tasks")
+        if isinstance(paused, list):
+            for item in paused:
+                if isinstance(item, dict) and item.get("id") == target.id:
+                    item["note"] = note
         self._write_state(state)
-        return state["active_task"]
+
+        if active is not None and active.id == target.id:
+            return state["active_task"]
+        return {
+            "id": target.id,
+            "title": target.title,
+            "note": note,
+            "created": entry["created"],
+        }
 
     def get_note(self) -> Optional[dict]:
         """Return the stored active-task note dict, or None.
@@ -1684,6 +1736,98 @@ class ContextKeeper:
             return data
         return None
 
+    def get_note_entries(self, task_id: int) -> list[dict]:
+        """All timestamped note entries bound to ``task_id``, in order.
+
+        Read-only: legacy values are normalized in memory only, so a
+        listing never rewrites ``state.json``.
+        """
+        state = self._read_state()
+        raw = state.get("notes")
+        entries: list[dict] = []
+        if isinstance(raw, dict):
+            value = raw.get(str(task_id))
+            if isinstance(value, list):
+                for item in value:
+                    if not isinstance(item, dict):
+                        continue
+                    text = item.get("text")
+                    created = item.get("created")
+                    if isinstance(text, str) and text \
+                            and isinstance(created, str) and created:
+                        entries.append({"text": text, "created": created})
+        if entries:
+            return entries
+        # Defensive fallback for hand-edited/partial state where the
+        # canonical ledger is absent but the legacy slot still exists.
+        active = state.get("active_task")
+        if isinstance(active, dict) and active.get("id") == task_id:
+            text = active.get("note")
+            if isinstance(text, str) and text:
+                return [{
+                    "text": text,
+                    "created": note_store.file_mtime_iso(self.state_file),
+                }]
+        paused = state.get("paused_tasks")
+        if isinstance(paused, list):
+            for item in paused:
+                if isinstance(item, dict) and item.get("id") == task_id:
+                    text = item.get("note")
+                    if isinstance(text, str) and text:
+                        return [{
+                            "text": text,
+                            "created": note_store.file_mtime_iso(
+                                self.state_file),
+                        }]
+        return []
+
+    def clear_notes(self, task_id: int) -> dict:
+        """Remove every process note bound to ``task_id``."""
+        self._require_bound_plan()
+        tl = self._load_plan()
+        target = tl.by_id(task_id)
+        if target is None:
+            raise KeyError(f"No task with id {task_id}")
+        state = self._read_state()
+        removed = 0
+        changed = False
+        notes = state.get("notes")
+        if isinstance(notes, dict):
+            entries = notes.pop(str(task_id), None)
+            if isinstance(entries, list):
+                removed = len(entries)
+                changed = True
+        active = state.get("active_task")
+        if isinstance(active, dict) and active.get("id") == task_id:
+            state.pop("active_task", None)
+            changed = True
+        paused = state.get("paused_tasks")
+        if isinstance(paused, list):
+            for item in paused:
+                if isinstance(item, dict) and item.get("id") == task_id \
+                        and item.get("note"):
+                    item["note"] = ""
+                    changed = True
+        if changed:
+            self._write_state(state)
+        return {"id": task_id, "title": target.title, "cleared": removed}
+
+    def note_listing(self, task_id: int) -> str:
+        """Render one task's notes with full timestamps (``--list``)."""
+        self._require_bound_plan()
+        tl = self._load_plan()
+        target = tl.by_id(task_id)
+        if target is None:
+            raise KeyError(f"No task with id {task_id}")
+        entries = self.get_note_entries(task_id)
+        if not entries:
+            return notice(INFO, f"No process notes found for task [{task_id}].")
+        lines = [f"[{target.id}] {target.title}"]
+        for entry in entries:
+            stamp = note_store.note_datetime(entry["created"])
+            lines.append(f"   * Note ({stamp}): {entry['text']}")
+        return "\n".join(lines)
+
     # ------------------------------------------------------------------ #
     # Paused-task registry (Unfocused / Paused Context)
     # ------------------------------------------------------------------ #
@@ -1698,9 +1842,11 @@ class ContextKeeper:
         completed tasks never surface as paused.
         """
         tl = self._load_plan()
-        raw = self._read_state().get("paused_tasks")
+        state = self._read_state()
+        raw = state.get("paused_tasks")
         if not isinstance(raw, list):
             return []
+        ledger = state.get("notes")
         out: list[dict] = []
         seen: set[int] = set()
         for item in raw:
@@ -1717,7 +1863,26 @@ class ContextKeeper:
             if tl.by_id(tid) is None:
                 continue
             seen.add(tid)
-            out.append({"id": tid, "title": title, "note": note})
+            entries: list[dict] = []
+            if isinstance(ledger, dict):
+                value = ledger.get(str(tid))
+                if isinstance(value, list):
+                    for entry in value:
+                        if isinstance(entry, dict) \
+                                and isinstance(entry.get("text"), str) \
+                                and entry.get("text") \
+                                and isinstance(entry.get("created"), str) \
+                                and entry.get("created"):
+                            entries.append({
+                                "text": entry["text"],
+                                "created": entry["created"],
+                            })
+            out.append({
+                "id": tid,
+                "title": title,
+                "note": note,
+                "notes": entries,
+            })
         return out
 
     def _register_paused(self, task_id: int, title: str,
@@ -1835,12 +2000,10 @@ class ContextKeeper:
         return focus.id if focus is not None else None
 
     def _note_for_task(self, task_id: int) -> str:
-        """Return the stored process-note text when it belongs to
-        ``task_id`` (structurally valid entry only), else ""."""
-        data = self.get_note()
-        if data is None or data.get("id") != task_id:
-            return ""
-        return data["note"]
+        """Return the newest process-note text bound to ``task_id``
+        (structurally valid entries only), else ""."""
+        entries = self.get_note_entries(task_id)
+        return entries[-1]["text"] if entries else ""
 
     def _drop_note(self) -> None:
         """Remove the stored active-task note when present. Writes
@@ -1852,23 +2015,51 @@ class ContextKeeper:
         state.pop("active_task", None)
         self._write_state(state)
 
-    def _archive_note_to_history(self, task: Task, note: str) -> None:
-        """Append ``note`` to ``HISTORY.md`` as a dated Notes entry.
+    def _archive_note_to_history(self, task: Task, notes) -> None:
+        """Append the task's process notes to ``HISTORY.md``.
 
-        Called by :meth:`done` when the noted task is completed: the
-        note is user data — it graduates into the durable history
-        instead of vanishing with the task context. Goes through
+        Called by :meth:`done` / :meth:`delete_task` when a noted
+        task is completed or removed: the notes are user data — they
+        graduate into the durable history instead of vanishing with
+        the task context. A single note keeps the historical
+        ``- <text>`` line; multiple notes share one dated entry with
+        one ``* Note`` line per entry, in append order. Goes through
         ``_open_history_append`` so DEV MODE appends land in the
         sandboxed copy (the real HISTORY.md is never touched).
         """
+        if isinstance(notes, str):
+            entries = [{"text": notes, "created": ""}]
+        else:
+            entries = list(notes)
+        if not entries:
+            return
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-        entry = Notes(
-            task_id=task.id,
-            task_title=task.title,
-            timestamp=ts,
-            comment=note,
-            body="",
-        )
+        if len(entries) == 1:
+            entry = Notes(
+                task_id=task.id,
+                task_title=task.title,
+                timestamp=ts,
+                comment=entries[0]["text"],
+                body="",
+            )
+        else:
+            lines: list[str] = []
+            for index, item in enumerate(entries):
+                if index == 0:
+                    lines.append(f"  * Note: {item['text']}")
+                else:
+                    stamp = note_store.note_stamp(
+                        item.get("created") or "")
+                    lines.append(
+                        f"  * Note ({stamp}): {item['text']}")
+            entry = Notes(
+                task_id=task.id,
+                task_title=task.title,
+                timestamp=ts,
+                comment="",
+                body="",
+                note_lines=lines,
+            )
         self._ensure_ck_dir()
         with file_lock(self.history_file):
             with self._open_history_append() as fh:
@@ -1885,6 +2076,21 @@ class ContextKeeper:
         tid = active.get("id")
         if isinstance(tid, int) and tid in completed_ids:
             state.pop("active_task", None)
+            self._write_state(state)
+
+    def _purge_notes_if_completed(self, completed_ids: set) -> None:
+        """Drop canonical note-ledger entries for completed tasks."""
+        if not completed_ids:
+            return
+        state = self._read_state()
+        notes = state.get("notes")
+        if not isinstance(notes, dict):
+            return
+        changed = False
+        for tid in completed_ids:
+            if notes.pop(str(tid), None) is not None:
+                changed = True
+        if changed:
             self._write_state(state)
 
     def _purge_paused_tasks(self, completed_ids: set) -> None:
@@ -2384,10 +2590,10 @@ class ContextKeeper:
 
             [>] Active Focus:
                - [<id>] <title>
-                 * Note: <text>          (when a note is attached)
+                 * Note: <text>          (one line per entry)
             [!] Unfocused / Paused Context:
                - [<id>] <title>
-                 * Note: <text>          (each paused task's note)
+                 * Note: <text>          (each task's entries, in order)
 
         With no notes anywhere (active or paused) a single ``[i] No
         active process notes found.`` line is returned. The plan
@@ -3825,6 +4031,44 @@ def _status_context(tl: TaskList) -> _StatusContext:
     )
 
 
+def _coerce_note_entries(value) -> list[dict]:
+    """Accept a legacy string or an entry array; return entry dicts."""
+    if isinstance(value, str):
+        return [{"text": value, "created": ""}] if value else []
+    if isinstance(value, list):
+        out: list[dict] = []
+        for item in value:
+            if isinstance(item, dict):
+                text = item.get("text")
+                created = item.get("created", "")
+                if isinstance(text, str) and text:
+                    out.append({
+                        "text": text,
+                        "created": created if isinstance(created, str)
+                        else "",
+                    })
+            elif isinstance(item, str) and item:
+                out.append({"text": item, "created": ""})
+        return out
+    return []
+
+
+def _note_display_lines(entries, indent: str, palette) -> list[str]:
+    """Render one ``* Note`` line per entry (single note keeps old form)."""
+    items = _coerce_note_entries(entries)
+    if not items:
+        return []
+    if len(items) == 1:
+        return [palette.bold_cyan(f"{indent}* Note: {items[0]['text']}")]
+    lines: list[str] = []
+    for item in items:
+        stamp = note_store.note_stamp(item.get("created", ""))
+        suffix = f" ({stamp})" if stamp else ""
+        lines.append(
+            palette.bold_cyan(f"{indent}* Note{suffix}: {item['text']}"))
+    return lines
+
+
 def _render_local_status(ck: ContextKeeper, tl: TaskList,
                          *, palette: Optional["ui.Palette"] = None,
                          source: str = "local") -> str:
@@ -3959,22 +4203,12 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
     #    as a focus (the [>] Next section keeps that nuance).
     top_focus = tl.focused[0] if tl.focused else None
     if top_focus is not None:
-        top_note = ""
-        note_data = ck.get_note()
-        if note_data is not None and note_data.get("id") == top_focus.id \
-                and note_data.get("note"):
-            top_note = note_data["note"]
-        else:
-            for entry in ck._paused_tasks():
-                if entry["id"] == top_focus.id and entry["note"]:
-                    top_note = entry["note"]
-                    break
+        top_entries = ck.get_note_entries(top_focus.id)
         lines.append("")
         lines.append(
             " -> CURRENT FOCUS: "
             + p.bold_yellow(f"[#{top_focus.id}] {top_focus.title}"))
-        if top_note:
-            lines.append(p.bold_cyan(f"    * Note: {top_note}"))
+        lines.extend(_note_display_lines(top_entries, "    ", p))
 
     # 0b) No active focus: guide the user to ``ck start`` instead of
     #     silently auto-focusing. The read path NEVER mutates PLAN.md;
@@ -4015,15 +4249,11 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
     # Active note + paused-task ledger: the ``paused_tasks``
     # registry is the single source of truth for the "Unfocused /
     # Paused Context" block — EVERY open task that previously held
-    # focus appears there (with its bound note, if any), so unnoted
+    # focus appears there (with its bound notes, if any), so unnoted
     # or previously paused tasks can never vanish into the generic
-    # skipped list. (A note in the legacy ``active_task`` slot
-    # pointing at a non-focused open task — e.g. state written by an
-    # older version — renders as a paused entry too.)
-    note_data = ck.get_note()
-    note_id = note_data["id"] if note_data is not None else None
-    note_text = note_data["note"] if note_data is not None else ""
-    paused_display: list = []  # (id, title, note) triples
+    # skipped list. Notes attached directly to another open task via
+    # ``ck note <ID>`` are surfaced there too.
+    paused_display: list = []  # (id, title, entries) triples
     paused_ids: set = set()
     for entry in ck._paused_tasks():
         p_task = tl.by_id(entry["id"])
@@ -4034,30 +4264,25 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
         if p_task.id in paused_ids:
             continue
         paused_ids.add(p_task.id)
-        paused_display.append((p_task.id, p_task.title, entry["note"]))
-    # Legacy bridge: an active_task note pointing at a non-focused
-    # open task (state written by an older version) renders as a
-    # paused entry too.
-    noted_task = tl.by_id(note_id) if note_id is not None else None
-    if (noted_task is not None
-            and noted_task.status == TaskStatus.OPEN
-            and noted_task.id not in paused_ids
-            and (ctx.current is None or noted_task.id != ctx.current.id)):
-        paused_ids.add(noted_task.id)
-        paused_display.append(
-            (noted_task.id, noted_task.title, note_text))
-    # The note bound to the DISPLAYED Focus/Next task renders inline
-    # under it — whether it sits in the active slot or in the paused
+        entries = entry.get("notes") or _coerce_note_entries(
+            entry.get("note", ""))
+        paused_display.append((p_task.id, p_task.title, entries))
+    for noted_task in tl.open:
+        if noted_task.id in paused_ids:
+            continue
+        if ctx.current is not None and noted_task.id == ctx.current.id:
+            continue
+        entries = ck.get_note_entries(noted_task.id)
+        if entries:
+            paused_ids.add(noted_task.id)
+            paused_display.append(
+                (noted_task.id, noted_task.title, entries))
+    # The notes bound to the DISPLAYED Focus/Next task render inline
+    # under it — whether they sit in the active slot or in the paused
     # registry (e.g. right after a re-focus or a focus reset).
-    inline_note = ""
+    inline_entries: list = []
     if ctx.current is not None:
-        if note_id == ctx.current.id and note_text:
-            inline_note = note_text
-        else:
-            for entry in ck._paused_tasks():
-                if entry["id"] == ctx.current.id and entry["note"]:
-                    inline_note = entry["note"]
-                    break
+        inline_entries = ck.get_note_entries(ctx.current.id)
 
     # 2) [!] Skipped: opens genuinely passed over between the last
     #    completion and the explicit focus, BY NAME (capped, closest
@@ -4092,16 +4317,16 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
             f"       - "
             f"{p.bold_yellow(f'[{ctx.current.id}] {ctx.current.title}')}"
         )
-        if inline_note:
-            lines.append(p.bold_cyan(f"       * Note: {inline_note}"))
+        lines.extend(_note_display_lines(
+            inline_entries, "       ", p))
     elif ctx.current is not None:
         t = ctx.current
         lines.append("    [>] Next:")
         lines.append(
             f"       - {p.bold_yellow(f'[{t.id}] {t.title}')} [ ]"
         )
-        if inline_note:
-            lines.append(p.bold_cyan(f"       * Note: {inline_note}"))
+        lines.extend(_note_display_lines(
+            inline_entries, "       ", p))
     else:
         lines.append(p.muted("    [>] Next: (no open tasks)"))
 
@@ -4123,10 +4348,10 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
     #    visible too instead of sinking into the skipped list.
     if paused_display:
         lines.append(p.bold_yellow("    Unfocused / Paused Context:"))
-        for pid, ptitle, pnote in paused_display:
+        for pid, ptitle, pentries in paused_display:
             lines.append(f"       - [{pid}] {ptitle}")
-            if pnote:
-                lines.append(p.bold_cyan(f"         * Note: {pnote}"))
+            lines.extend(_note_display_lines(
+                pentries, "         ", p))
 
     # 6) >> Backlog: BOTTOM BANNER of the WORK CONTEXT block — the
     #    total remaining uncompleted tasks (Total − Done). Tasks
@@ -4197,75 +4422,68 @@ def _render_tasks_listing(tl: TaskList,
         if p is not None:
             note = notes.get(t.id)
             if note:
-                lines.append(p.bold_cyan(f"    * Note: {note}"))
+                lines.extend(_note_display_lines(note, "    ", p))
     return "\n".join(lines)
 
 
 def _render_notes_listing(ck: ContextKeeper, tl: TaskList) -> str:
     """Render all active process notes (``ck notes``).
 
-    Two structured sections: the focused task's note (``[>] Active
-    Focus:``) and every paused task's bound note (``[!] Unfocused /
-    Paused Context:``). A paused entry WITHOUT a note is still
-    listed (with a muted ``(no note)`` marker) so the paused context
-    stays fully visible; the section itself is omitted only when no
-    paused tasks exist. No notes anywhere -> the single ``[i] No
-    active process notes found.`` line.
+    Two structured sections: the focused task's notes (``[>] Active
+    Focus:``) and every paused/unfocused task's bound notes
+    (``[!] Unfocused / Paused Context:``). A paused entry WITHOUT a
+    note is still listed (with a muted ``(no note)`` marker) so the
+    paused context stays fully visible; the section itself is omitted
+    only when no paused tasks exist. Every task with multiple entries
+    lists them all, in append order. No notes anywhere -> the single
+    ``[i] No active process notes found.`` line.
     """
     p = ui.get_palette(colors=ck.color_overrides())
-    note_data = ck.get_note()
-    note_id = note_data["id"] if note_data is not None else None
-    note_text = note_data["note"] if note_data is not None else ""
-
     focus = tl.focused[0] if tl.focused else None
-    active_note = ""
-    if focus is not None:
-        if note_id == focus.id and note_text:
-            active_note = note_text
-        else:
-            for entry in ck._paused_tasks():
-                if entry["id"] == focus.id and entry["note"]:
-                    active_note = entry["note"]
-                    break
+    active_entries = ck.get_note_entries(focus.id) if focus else []
 
     paused_entries: list = []
+    seen: set = set()
     for entry in ck._paused_tasks():
         p_task = tl.by_id(entry["id"])
         if p_task is None or p_task.status != TaskStatus.OPEN:
             continue
         if focus is not None and p_task.id == focus.id:
             continue
-        paused_entries.append((p_task.id, p_task.title, entry["note"]))
-    # Legacy bridge: an active_task note pointing at a non-focused
-    # open task (state written by an older version) renders as a
-    # paused entry here too.
-    if note_id is not None and note_text \
-            and (focus is None or note_id != focus.id):
-        noted = tl.by_id(note_id)
-        if (noted is not None and noted.status == TaskStatus.OPEN
-                and all(pid != noted.id for pid, _, _ in paused_entries)):
-            paused_entries.append((noted.id, noted.title, note_text))
+        if p_task.id in seen:
+            continue
+        seen.add(p_task.id)
+        entries = entry.get("notes") or _coerce_note_entries(
+            entry.get("note", ""))
+        paused_entries.append((p_task.id, p_task.title, entries))
+    # Notes attached directly to another open task (`ck note <ID>`)
+    # are active context even when the task never held focus.
+    for noted in tl.open:
+        if noted.id in seen:
+            continue
+        if focus is not None and noted.id == focus.id:
+            continue
+        entries = ck.get_note_entries(noted.id)
+        if entries:
+            seen.add(noted.id)
+            paused_entries.append((noted.id, noted.title, entries))
 
-    has_any = bool(active_note) or any(
-        note for _, _, note in paused_entries)
-    if not has_any and focus is None and not paused_entries:
-        return notice(INFO, "No active process notes found.")
+    has_any = bool(active_entries) or any(
+        entries for _, _, entries in paused_entries)
     if not has_any:
-        # Focus/paused tasks exist but carry no notes at all.
         return notice(INFO, "No active process notes found.")
 
     out: list[str] = []
     if focus is not None:
         out.append(p.bold_yellow("[>] Active Focus:"))
         out.append(f"   - [{focus.id}] {focus.title}")
-        if active_note:
-            out.append(p.bold_cyan(f"     * Note: {active_note}"))
+        out.extend(_note_display_lines(active_entries, "     ", p))
     if paused_entries:
         out.append(notice(WARN, "Unfocused / Paused Context:", p))
-        for pid, ptitle, pnote in paused_entries:
+        for pid, ptitle, pentries in paused_entries:
             out.append(f"   - [{pid}] {ptitle}")
-            if pnote:
-                out.append(p.bold_cyan(f"     * Note: {pnote}"))
+            if pentries:
+                out.extend(_note_display_lines(pentries, "     ", p))
             else:
                 out.append(p.muted("     (no note)"))
     return "\n".join(out)
@@ -4533,9 +4751,12 @@ def read_paused_tasks(project_root: Path) -> list[dict]:
         return []
     if not isinstance(data, dict):
         return []
+    data = note_store.migrate_notes(
+        data, note_store.file_mtime_iso(state_file))
     raw = data.get("paused_tasks")
     if not isinstance(raw, list):
         return []
+    ledger = data.get("notes")
     out: list[dict] = []
     seen: set = set()
     for item in raw:
@@ -4550,7 +4771,22 @@ def read_paused_tasks(project_root: Path) -> list[dict]:
         if not isinstance(title, str) or not isinstance(note, str):
             continue
         seen.add(tid)
-        out.append({"id": tid, "title": title, "note": note})
+        entries: list[dict] = []
+        if isinstance(ledger, dict):
+            value = ledger.get(str(tid))
+            if isinstance(value, list):
+                entries = [
+                    {"text": entry["text"], "created": entry["created"]}
+                    for entry in value
+                    if isinstance(entry, dict)
+                    and isinstance(entry.get("text"), str)
+                    and entry.get("text")
+                    and isinstance(entry.get("created"), str)
+                    and entry.get("created")
+                ]
+        out.append({
+            "id": tid, "title": title, "note": note, "notes": entries,
+        })
     return out
 
 
@@ -4570,6 +4806,8 @@ def read_active_task_note(project_root: Path) -> Optional[dict]:
         return None
     if not isinstance(data, dict):
         return None
+    data = note_store.migrate_notes(
+        data, note_store.file_mtime_iso(state_file))
     active = data.get("active_task")
     if not isinstance(active, dict):
         return None
@@ -4577,7 +4815,23 @@ def read_active_task_note(project_root: Path) -> Optional[dict]:
     tid = active.get("id")
     if isinstance(note, str) and note and isinstance(tid, int) \
             and not isinstance(tid, bool):
-        return active
+        entries: list[dict] = []
+        ledger = data.get("notes")
+        if isinstance(ledger, dict):
+            value = ledger.get(str(tid))
+            if isinstance(value, list):
+                entries = [
+                    {"text": entry["text"], "created": entry["created"]}
+                    for entry in value
+                    if isinstance(entry, dict)
+                    and isinstance(entry.get("text"), str)
+                    and entry.get("text")
+                    and isinstance(entry.get("created"), str)
+                    and entry.get("created")
+                ]
+        result = dict(active)
+        result["notes"] = entries
+        return result
     return None
 
 
@@ -5341,9 +5595,12 @@ def _render_verbose_triad(tl: TaskList, note_data: Optional[dict],
 
     out.append(p.bold("    -> Context:"))
     prev, focus, nxt, note_id, note_text = _status_triad(tl, note_data)
+    note_entries = _coerce_note_entries(
+        note_data.get("notes") if isinstance(note_data, dict) else None
+    ) or _coerce_note_entries(note_text)
     # Paused ledger: every open task that lost focus (or, for
-    # spaces, every open task carrying a note), with its bound note.
-    # The Focus/Next anchor is excluded — its note renders inline
+    # spaces, every open task carrying a note), with its bound notes.
+    # The Focus/Next anchor is excluded — its notes render inline
     # instead (a noteless pause stays visible).
     anchor = focus if focus is not None else nxt
     paused_map: dict = {}
@@ -5353,7 +5610,9 @@ def _render_verbose_triad(tl: TaskList, note_data: Optional[dict],
             continue
         if anchor is not None and p_task.id == anchor.id:
             continue
-        paused_map[p_task.id] = (p_task.title, p_entry["note"])
+        entries = _coerce_note_entries(p_entry.get("notes")) \
+            or _coerce_note_entries(p_entry.get("note", ""))
+        paused_map[p_task.id] = (p_task.title, entries)
     # Legacy bridge: an active_task note pointing at a non-anchored
     # open task (state written by an older version) renders as a
     # paused entry too.
@@ -5363,17 +5622,21 @@ def _render_verbose_triad(tl: TaskList, note_data: Optional[dict],
         if (noted is not None
                 and noted.status == TaskStatus.OPEN
                 and noted.id not in paused_map):
-            paused_map[noted.id] = (noted.title, note_text)
-    # The note bound to the anchor renders inline under it — from
+            paused_map[noted.id] = (noted.title, note_entries)
+    # The notes bound to the anchor render inline under it — from
     # the active slot or the paused ledger.
-    inline_note = ""
+    inline_entries: list = []
     if anchor is not None:
-        if note_id == anchor.id and note_text:
-            inline_note = note_text
+        if note_id == anchor.id and note_entries:
+            inline_entries = note_entries
         else:
             for p_entry in paused_entries:
-                if (p_entry["id"] == anchor.id and p_entry["note"]):
-                    inline_note = p_entry["note"]
+                if p_entry["id"] != anchor.id:
+                    continue
+                inline_entries = _coerce_note_entries(
+                    p_entry.get("notes")) \
+                    or _coerce_note_entries(p_entry.get("note", ""))
+                if inline_entries:
                     break
     # --- PREV: the last completion before the focus (muted, past) ---
     out.append("       " + p.muted("<< PREV"))
@@ -5385,12 +5648,10 @@ def _render_verbose_triad(tl: TaskList, note_data: Optional[dict],
     out.append("       " + p.bold_yellow("[>] FOCUS"))
     if focus is not None:
         out.append(p.bold_yellow(f"          [{focus.id}] {focus.title}"))
-        if inline_note:
-            out.append(p.bold_cyan(f"            * Note: {inline_note}"))
+        out.extend(_note_display_lines(inline_entries, "            ", p))
     else:
         out.append(p.muted("          (no focus selected)"))
-        if inline_note:
-            out.append(p.bold_cyan(f"          * Note: {inline_note}"))
+        out.extend(_note_display_lines(inline_entries, "          ", p))
     # --- NEXT: what follows the anchor (accent, upcoming) ---
     out.append("       " + p.accent(">> NEXT"))
     if nxt is not None:
@@ -5401,10 +5662,9 @@ def _render_verbose_triad(tl: TaskList, note_data: Optional[dict],
     if paused_map:
         out.append("       " + notice(WARN, "Unfocused / Paused "
                                          "Context:", p))
-        for pid, (ptitle, pnote) in paused_map.items():
+        for pid, (ptitle, pentries) in paused_map.items():
             out.append(f"          - [{pid}] {ptitle}")
-            if pnote:
-                out.append(p.bold_cyan(f"            * Note: {pnote}"))
+            out.extend(_note_display_lines(pentries, "            ", p))
     return out
 
 

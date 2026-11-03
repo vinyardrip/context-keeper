@@ -1,6 +1,6 @@
 """Documentation consistency: version bump and roadmap hygiene.
 
-Guards the v0.9.3 documentation update:
+Guards the v0.10.0 documentation update:
 
 - every version source agrees (package, pyproject, README, ROADMAP);
 - completed features (Shell Completion) never reappear in the
@@ -8,7 +8,10 @@ Guards the v0.9.3 documentation update:
 - the English and Russian roadmap sections stay in sync (same number
   of pending / completed entries);
 - the strict space-routing rule and the dev-session ``ck info`` note
-  are documented in both languages (v0.9.3).
+  are documented in both languages (v0.9.3);
+- append-only process notes (``ck note <ID>``, ``--list``,
+  ``--clear``, array storage and legacy migration) are documented in
+  both languages (v0.10.0).
 """
 
 from __future__ import annotations
@@ -79,6 +82,19 @@ class TestDocumentationConsistency(unittest.TestCase):
             self.readme.count("Why strict, not magical"), 2)
         self.assertGreaterEqual(
             self.readme.count("`ck info` in a dev session"), 2)
+
+    def test_append_only_notes_are_documented_bilingually(self):
+        """v0.10.0: both Process Notes sections describe the new CLI."""
+        english = _section(
+            self.readme, "## Process Notes & Unfocused / Paused Context")
+        russian = _section(
+            self.readme, "## Процессные заметки и Unfocused / Paused Context")
+        for section in (english, russian):
+            self.assertIn("ck note <ID> <text>", section)
+            self.assertIn("--list", section)
+            self.assertIn("--clear", section)
+            self.assertIn("ISO-8601", section)
+            self.assertIn("state.json", section)
 
     def test_bilingual_roadmap_checklists_have_parity(self):
         pairs = (

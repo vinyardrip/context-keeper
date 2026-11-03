@@ -51,6 +51,7 @@ from types import SimpleNamespace
 from typing import Optional
 
 from . import config, sequence
+from . import notes as note_store
 from .config import file_lock
 from .models import Notes, TaskList, TaskStatus
 from .parser import (
@@ -1023,12 +1024,17 @@ class SpaceManager:
     def _read_state(self) -> dict:
         path = _state_read_path(self.space)
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError, json.JSONDecodeError):
             return {}
+        if not isinstance(data, dict):
+            return {}
+        return note_store.migrate_notes(
+            data, note_store.file_mtime_iso(path))
 
     def _write_state(self, state: dict) -> None:
         path = _state_write_path(self.space)
+        state = note_store.migrate_notes(state, note_store.now_iso())
         text = json.dumps(state, indent=2, ensure_ascii=False)
         with file_lock(path):
             _atomic_write_text(path, text)
@@ -1100,8 +1106,8 @@ class SpaceManager:
             raise KeyError(f"No task with id {task_id}")
 
         notes = self._notes_bound_to_task(task_id)
-        for note in notes:
-            self._archive_note_to_history(target, note)
+        if notes:
+            self._archive_note_to_history(target, notes)
 
         tl.delete(task_id)
         self._commit(tl)
@@ -1114,24 +1120,51 @@ class SpaceManager:
             "notes_archived": len(notes),
         }
 
-    def _notes_bound_to_task(self, task_id: int) -> list[str]:
-        """Every non-empty process note attached to ``task_id``."""
-        note = self._all_notes().get(task_id)
-        return [note] if note else []
+    def _notes_bound_to_task(self, task_id: int) -> list[dict]:
+        """Every timestamped process-note entry attached to ``task_id``."""
+        return self.get_notes(task_id)
 
-    def _archive_note_to_history(self, task, note: str) -> None:
-        """Append ``note`` to this space's ``<space>.HISTORY.md``.
+    def _archive_note_to_history(self, task, notes) -> None:
+        """Append the task's notes to this space's ``<space>.HISTORY.md``.
 
         Reuses the project history entry format (``Notes.render()``)
-        so space and project audit trails look identical. The task ID
-        is the ID the user asked to delete (before re-indexing).
+        so space and project audit trails look identical. A single
+        note keeps the historical ``- <text>`` line; multiple notes
+        share one dated entry with one ``* Note`` line per entry, in
+        append order. The task ID is the ID the user asked to delete
+        (before re-indexing).
         """
-        entry = Notes(
-            task_id=task.id,
-            task_title=task.title,
-            timestamp=datetime.now().strftime("%Y-%m-%d %H:%M"),
-            comment=note,
-        )
+        if isinstance(notes, str):
+            entries = [{"text": notes, "created": ""}]
+        else:
+            entries = list(notes)
+        if not entries:
+            return
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+        if len(entries) == 1:
+            entry = Notes(
+                task_id=task.id,
+                task_title=task.title,
+                timestamp=ts,
+                comment=entries[0]["text"],
+            )
+        else:
+            lines: list[str] = []
+            for index, item in enumerate(entries):
+                if index == 0:
+                    lines.append(f"  * Note: {item['text']}")
+                else:
+                    stamp = note_store.note_stamp(
+                        item.get("created") or "")
+                    lines.append(
+                        f"  * Note ({stamp}): {item['text']}")
+            entry = Notes(
+                task_id=task.id,
+                task_title=task.title,
+                timestamp=ts,
+                comment="",
+                note_lines=lines,
+            )
         _append_space_history(self.space, entry)
 
     def _remap_notes_after_delete(self, deleted_id: int) -> None:
@@ -1173,26 +1206,43 @@ class SpaceManager:
         state["updated_at"] = datetime.now().isoformat(timespec="seconds")
         self._write_state(state)
 
-    def _all_notes(self) -> dict[int, str]:
-        """All task notes in the space's sidecar (valid entries).
+    def _all_note_entries(self) -> dict[int, list[dict]]:
+        """All task note entries in the space's sidecar (valid entries).
 
-        Keys are task IDs (ints); only non-empty string values
-        count. Orphaned notes (task since removed) are harmless:
-        the list renderer only looks up IDs the plan still has.
+        Keys are task IDs (ints); values are ordered ``{"text",
+        "created"}`` arrays. Orphaned notes (task since removed) are
+        harmless: the list renderer only looks up IDs the plan still
+        has.
         """
         raw = self._read_state().get("notes")
         if not isinstance(raw, dict):
             return {}
-        out: dict[int, str] = {}
+        out: dict[int, list[dict]] = {}
         for key, value in raw.items():
-            if not isinstance(value, str) or not value:
-                continue
             try:
                 tid = int(key)
             except (TypeError, ValueError):
                 continue
-            out[tid] = value
+            entries = [
+                {"text": item["text"], "created": item["created"]}
+                for item in value
+                if isinstance(item, dict)
+                and isinstance(item.get("text"), str)
+                and item.get("text")
+                and isinstance(item.get("created"), str)
+                and item.get("created")
+            ] if isinstance(value, list) else []
+            if entries:
+                out[tid] = entries
         return out
+
+    def _all_notes(self) -> dict[int, str]:
+        """Newest note text per task (backward-compatible view)."""
+        return {
+            tid: entries[-1]["text"]
+            for tid, entries in self._all_note_entries().items()
+            if entries
+        }
 
     def list_tasks(self) -> str:
         """Render the space task list in the PROJECT ``ck list``
@@ -1229,7 +1279,7 @@ class SpaceManager:
         from .core import _render_tasks_listing
         return (
             f"{header}\n"
-            f"{_render_tasks_listing(tl, self._all_notes())}"
+            f"{_render_tasks_listing(tl, self._all_note_entries())}"
         )
 
     def status(self) -> str:
@@ -1396,13 +1446,15 @@ class SpaceManager:
         return focused.id if focused is not None else None
 
     def set_note(self, task_id: int, text: str) -> dict:
-        """Attach/update a process note on space task ``task_id``.
+        """Append a timestamped process note to space task ``task_id``.
 
-        The note lives in the space's JSON sidecar (``<space>.json``)
-        keyed by task ID — the analogue of a project's
-        ``.ck/state.json`` ``active_task`` note. Raises ``KeyError``
-        when the task does not exist and ``ValueError`` for empty
-        text. Returns the stored note metadata dict.
+        The note ledger lives in the space's JSON sidecar
+        (``<space>.json``) keyed by task ID, as an ordered array of
+        ``{"text", "created"}`` entries — the analogue of a project's
+        ``.ck/state.json`` ``notes`` ledger. Every call APPENDS; an
+        existing note is never overwritten. Raises ``KeyError`` when
+        the task does not exist and ``ValueError`` for empty text.
+        Returns the stored note metadata dict.
         """
         note = sanitize_task_text(text)
         if not note:
@@ -1415,19 +1467,66 @@ class SpaceManager:
         notes = state.get("notes")
         if not isinstance(notes, dict):
             notes = {}
-        notes[str(task_id)] = note
+        entries = notes.get(str(task_id))
+        if not isinstance(entries, list):
+            entries = []
+        entry = note_store.append_entry(entries, note)
+        notes[str(task_id)] = entries
         state["notes"] = notes
         state["updated_at"] = datetime.now().isoformat(timespec="seconds")
         self._write_state(state)
-        return {"id": task_id, "title": target.title, "note": note}
+        return {
+            "id": task_id,
+            "title": target.title,
+            "note": note,
+            "created": entry["created"],
+            "notes": entries,
+        }
+
+    def get_notes(self, task_id: int) -> list[dict]:
+        """All timestamped note entries for ``task_id``, in order."""
+        return self._all_note_entries().get(task_id, [])
+
+    def clear_notes(self, task_id: int) -> dict:
+        """Remove every process note bound to space task ``task_id``."""
+        tl = self.load()
+        target = tl.by_id(task_id)
+        if target is None:
+            raise KeyError(f"No task with id {task_id}")
+        state = self._read_state()
+        notes = state.get("notes")
+        removed = 0
+        if isinstance(notes, dict):
+            entries = notes.pop(str(task_id), None)
+            if isinstance(entries, list):
+                removed = len(entries)
+            if removed:
+                state["updated_at"] = datetime.now().isoformat(
+                    timespec="seconds")
+                self._write_state(state)
+        return {"id": task_id, "title": target.title, "cleared": removed}
+
+    def note_listing(self, task_id: int) -> str:
+        """Render one space task's notes with full timestamps."""
+        tl = self.load()
+        target = tl.by_id(task_id)
+        if target is None:
+            raise KeyError(f"No task with id {task_id}")
+        entries = self.get_notes(task_id)
+        if not entries:
+            from .ui import INFO, notice
+            return notice(
+                INFO, f"No process notes found for task [{task_id}].")
+        lines = [f"[{target.id}] {target.title}"]
+        for entry in entries:
+            stamp = note_store.note_datetime(entry["created"])
+            lines.append(f"   * Note ({stamp}): {entry['text']}")
+        return "\n".join(lines)
 
     def get_note(self, task_id: int) -> str:
-        """The stored process-note text for ``task_id`` ("" when none)."""
-        notes = self._read_state().get("notes")
-        if not isinstance(notes, dict):
-            return ""
-        note = notes.get(str(task_id))
-        return note if isinstance(note, str) else ""
+        """The newest process-note text for ``task_id`` ("" when none)."""
+        entries = self.get_notes(task_id)
+        return entries[-1]["text"] if entries else ""
 
     def snapshot(self) -> dict:
         """Aggregate the state of the space for the dashboard table.
@@ -1507,10 +1606,17 @@ class _SpaceKeeperView:
         focus_id = self._mgr.current_focus_id()
         if focus_id is None:
             return None
-        note = self._mgr.get_note(focus_id)
-        if not note:
+        entries = self._mgr.get_notes(focus_id)
+        if not entries:
             return None
-        return {"id": focus_id, "note": note}
+        return {
+            "id": focus_id,
+            "note": entries[-1]["text"],
+            "notes": entries,
+        }
+
+    def get_note_entries(self, task_id: int) -> list[dict]:
+        return self._mgr.get_notes(task_id)
 
     def _paused_tasks(self) -> list[dict]:
         tl = self._mgr.load()
@@ -1519,10 +1625,14 @@ class _SpaceKeeperView:
         for t in tl.open:
             if focus_id is not None and t.id == focus_id:
                 continue
-            note = self._mgr.get_note(t.id)
-            if note:
-                out.append(
-                    {"id": t.id, "title": t.title, "note": note})
+            entries = self._mgr.get_notes(t.id)
+            if entries:
+                out.append({
+                    "id": t.id,
+                    "title": t.title,
+                    "note": entries[-1]["text"],
+                    "notes": entries,
+                })
         return out
 
     def color_overrides(self) -> dict:

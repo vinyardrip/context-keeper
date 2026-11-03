@@ -94,10 +94,13 @@ Local (current project):
                              (the `ck list` equivalent); `move` /
                              `swap` stay single-line
   add <text>                 Insert a new open task before ## Completed
-  note <text>                Attach/update a process note on the active task
-                             (shown in `ck st`, cleared by `ck done`)
-  notes                      List all active process notes: the focused
-                             task's note plus every paused task's bound note
+  note <ID> <text>           Append a timestamped process note to the task;
+                             `ck note <text>` targets the active task.
+                             `--list` shows that task's notes, `--clear`
+                             removes them (shown in `ck st`, archived by
+                             `ck done`)
+  notes                      List all active process notes: every note entry
+                             of the focused task plus every paused task
                              ([i] No active process notes found. when none)
   save                       Checkpoint workflow (does NOT complete the
                              task): append a note/summary to HISTORY.md,
@@ -172,11 +175,11 @@ Spaces (out-of-project task lists, ~/.config/ck/spaces/):
   local focus <ID>          Focus a workstation task ([>]);
                              0 resets focus
   local start <ID>          Alias for `ck local focus <ID>`
-  local note <ID> <text>    Attach a process note to a
-                             workstation task
+  local note <ID> <text>    Append a timestamped process note to a
+                             workstation task (`--list` / `--clear`)
   local notes               List every active process note
                              (focused task + paused/unfocused
-                             tasks)
+                             tasks), all entries in order
   local edit                Open the workstation space file
                              (~/.config/ck/spaces/local.md) in
                              your editor
@@ -434,8 +437,14 @@ def build_parser() -> "argparse.ArgumentParser":
              "the new order plus the refreshed sprint view")
 
     p_note = sub.add_parser(
-        "note", help="Attach a process note to the active task")
-    p_note.add_argument("text", nargs="+", help="Note text")
+        "note", help="Append a process note to a task")
+    p_note.add_argument("text", nargs="*", help="Note text")
+    p_note.add_argument(
+        "--clear", action="store_true",
+        help="Remove every note from the target task")
+    p_note.add_argument(
+        "--list", action="store_true", dest="list_notes",
+        help="List the target task's notes with timestamps")
 
     sub.add_parser(
         "notes", help="List all active process notes (focus + paused)")
@@ -589,6 +598,7 @@ _SPACE_ACTION_FLAGS: dict[str, frozenset] = {
     "st": frozenset({"-l", "--list", "-e", "--edit", "-g", "--global"}),
     "status": frozenset({"-l", "--list", "-e", "--edit",
                          "-g", "--global"}),
+    "note": frozenset({"--clear", "--list"}),
     "dashboard": frozenset({"-v", "--verbose"}),
 }
 
@@ -630,7 +640,7 @@ _LEGACY_FLAGS: dict[str, frozenset] = {
     "reorder": frozenset(),
     "delete": frozenset({"-f", "--force", "-s", "--space"}),
     "rm": frozenset({"-f", "--force", "-s", "--space"}),
-    "note": frozenset(),
+    "note": frozenset({"--clear", "--list"}),
     "notes": frozenset(),
     "save": frozenset(),
     "edit": frozenset(),
@@ -1090,8 +1100,50 @@ def _dispatch(argv: Optional[List[str]] = None) -> int:
             new_id = ck.add_task(text)
             _notice(ui.OK, f"Added task (id={new_id}): {text}")
         elif args.command == "note":
-            text = " ".join(args.text)
-            info = ck.set_note(text)
+            tokens = list(args.text)
+            if args.clear and args.list_notes:
+                print("Usage: ck note <ID> <text> [--clear|--list]")
+                return 2
+            if not tokens:
+                if args.list_notes:
+                    print(ck.notes())
+                    return 0
+                if args.clear:
+                    active = ck.get_note()
+                    if active is None:
+                        _print_error(
+                            "ERROR: No active task with process notes.")
+                        return 2
+                    info = ck.clear_notes(active["id"])
+                    print(f"* Cleared {info['cleared']} note(s) for "
+                          f"[{info['id']}]: {info['title']}")
+                    return 0
+                print("Usage: ck note <ID> <text>")
+                return 2
+            task_id = None
+            try:
+                task_id = int(tokens[0])
+            except ValueError:
+                task_id = None
+            if task_id is not None:
+                if args.list_notes:
+                    print(ck.note_listing(task_id))
+                    return 0
+                if args.clear:
+                    info = ck.clear_notes(task_id)
+                    print(f"* Cleared {info['cleared']} note(s) for "
+                          f"[{info['id']}]: {info['title']}")
+                    return 0
+                text = " ".join(tokens[1:])
+                if not text:
+                    _print_note_required("Usage: ck note <ID> <text>")
+                    return 2
+                info = ck.set_note(text, task_id=task_id)
+            else:
+                if args.clear or args.list_notes:
+                    print("Usage: ck note <ID> <text> [--clear|--list]")
+                    return 2
+                info = ck.set_note(" ".join(tokens))
             print(f"* Note saved for [{info['id']}]: {info['note']}")
         elif args.command == "notes":
             print(ck.notes())
@@ -1262,6 +1314,12 @@ def _print_error(message: str) -> None:
         print(message)
         return
     print(f"{ui.BOLD_RED}{message}{ui.RESET}")
+
+
+def _print_note_required(usage: str) -> None:
+    """The shared ``ck note <ID>`` missing-text error (badge + usage)."""
+    print(ui.notice(ui.ERR, "Note text required."))
+    print(usage)
 
 
 def _notice(token: str, message: str = "") -> None:
@@ -1943,11 +2001,53 @@ def _legacy_dispatch(raw: List[str]) -> int:
             if rc:
                 return rc
         elif cmd == "note":
-            if not rest:
-                print("Usage: ck note <text>")
+            clear = "--clear" in rest
+            show = "--list" in rest
+            tokens = [t for t in rest if t not in ("--clear", "--list")]
+            if clear and show:
+                print("Usage: ck note <ID> <text> [--clear|--list]")
                 return 2
-            text = " ".join(rest)
-            info = ck.set_note(text)
+            if not tokens:
+                if show:
+                    print(ck.notes())
+                    return 0
+                if clear:
+                    active = ck.get_note()
+                    if active is None:
+                        _print_error(
+                            "ERROR: No active task with process notes.")
+                        return 2
+                    info = ck.clear_notes(active["id"])
+                    print(f"* Cleared {info['cleared']} note(s) for "
+                          f"[{info['id']}]: {info['title']}")
+                    return 0
+                print("Usage: ck note <ID> <text>")
+                return 2
+            task_id = None
+            try:
+                task_id = int(tokens[0])
+            except ValueError:
+                task_id = None
+            if task_id is not None:
+                if show:
+                    print(ck.note_listing(task_id))
+                    return 0
+                if clear:
+                    info = ck.clear_notes(task_id)
+                    print(f"* Cleared {info['cleared']} note(s) for "
+                          f"[{info['id']}]: {info['title']}")
+                    return 0
+                text = " ".join(tokens[1:])
+                if not text:
+                    _print_note_required("Usage: ck note <ID> <text>")
+                    return 2
+                info = ck.set_note(text, task_id=task_id)
+            else:
+                if show or clear:
+                    print("Usage: ck note <ID> <text> [--clear|--list]")
+                    return 2
+                text = " ".join(tokens)
+                info = ck.set_note(text)
             print(f"* Note saved for [{info['id']}]: {info['note']}")
         elif cmd == "notes":
             print(ck.notes())
@@ -2236,15 +2336,46 @@ def _run_space_command(space: str, rest: List[str]) -> int:
         return 0
 
     if action == "note":
-        if len(args) < 2:
-            print(f"Usage: ck {space} note <ID> <text>")
+        clear = "--clear" in args
+        show = "--list" in args
+        tokens = [a for a in args if a not in ("--clear", "--list")]
+        usage_note = f"Usage: ck {space} note <ID> <text> [--clear|--list]"
+        if clear and show:
+            print(usage_note)
+            return 2
+        if not tokens:
+            if show:
+                print(mgr.notes())
+                return 0
+            if clear:
+                focus_id = mgr.current_focus_id()
+                if focus_id is None:
+                    _print_error(
+                        f"ERROR: No focused task in space '{space}'.")
+                    return 2
+                info = mgr.clear_notes(focus_id)
+                print(f"* Cleared {info['cleared']} note(s) for "
+                      f"[{info['id']}]: {info['title']}")
+                return 0
+            print(usage_note)
             return 2
         try:
-            tid = int(args[0])
+            tid = int(tokens[0])
         except ValueError:
-            _print_error(f"ERROR: Invalid task ID: {args[0]!r}")
+            _print_error(f"ERROR: Invalid task ID: {tokens[0]!r}")
             return 2
-        text = " ".join(args[1:])
+        if show:
+            print(mgr.note_listing(tid))
+            return 0
+        if clear:
+            info = mgr.clear_notes(tid)
+            print(f"* Cleared {info['cleared']} note(s) for "
+                  f"[{info['id']}]: {info['title']}")
+            return 0
+        text = " ".join(tokens[1:])
+        if not text:
+            _print_note_required(f"Usage: ck {space} note <ID> <text>")
+            return 2
         info = mgr.set_note(tid, text)
         print(f"* Note saved for [{info['id']}]: {info['note']}")
         return 0
