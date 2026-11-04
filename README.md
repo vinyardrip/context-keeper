@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.11.1-blue)]()
+[![version](https://img.shields.io/badge/version-0.12.0-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -104,7 +104,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.11.1
+ck -v    # → ck version 0.12.0
 ```
 
 ---
@@ -168,8 +168,8 @@ ck -v    # → ck version 0.11.1
 | ck space move \<name\> \<position\> | Move a space to a 1-based position in the persisted `spaces_order` sequence (the virtual `project` space is a valid target). The order is stored in `~/.config/ck/state.json` and drives both `ck space list` and the dashboard's `SPACES` table |
 | ck space swap \<name1\> \<name2\> | Exchange the positions of two spaces (any two entries of the sequence, including `project`) |
 | ck space reorder | Normalize/re-index the persisted sequence against the spaces that currently exist: stale names are dropped, new spaces appended, duplicates collapsed, and the `project` sentinel keeps its slot. Prints the numbered result |
-| ck space delete \<name\> [-f] | Permanently delete a space **and** its note sidecar / `.HISTORY.md`, then drop it from the persisted order. The target is validated **first** (a missing space reports `ERROR:` with exit 1 immediately — no stdin read, no prompt; invalid input exits 2), and an existing space asks `Permanently delete …? [y/N]` on a terminal and refuses without confirmation when non-interactive; `-f` / `--force` (or `-y` / `--yes`) skips the prompt. The virtual `project` space and the built-in `local` / `remote` / `today` can never be deleted. No `rm` alias — the verb is spelled out, and task deletion stays the separate top-level `ck delete <ID>` |
-| ck local add \<text\> | Add a task to the workstation space (`~/.config/ck/spaces/local.md`; `local`/`remote`/`today` are auto-initialized at startup — an existing space file is never overwritten) |
+| ck space delete \<name\> [-f] | Permanently delete a space **and** its note sidecar / `.HISTORY.md`, then drop it from the persisted order. The target is validated **first** (a missing space reports `ERROR:` with exit 1 immediately — no stdin read, no prompt; invalid input exits 2), and an existing space asks `Permanently delete …? [y/N]` on a terminal and refuses without confirmation when non-interactive; `-f` / `--force` (or `-y` / `--yes`) skips the prompt. The virtual `project` space and the built-in `local` / `remote` can never be deleted; the daily `today` journal is deletable (`ck space delete today` also clears `today_date`). No `rm` alias — the verb is spelled out, and task deletion stays the separate top-level `ck delete <ID>` |
+| ck local add \<text\> | Add a task to the workstation space (`~/.config/ck/spaces/local.md`; `local`/`remote` are auto-initialized at startup — an existing space file is never overwritten) |
 | ck local list | List workstation space tasks in the project `ck list` layout (`##` section headers, `[ ]`/`[>]`/`[x]` markers), with attached process notes rendered as `* Note:` lines under their tasks |
 | ck local st / ck local status | Detailed workstation space status view — same layout as `ck st` (header bar, progress, CURRENT FOCUS with its process note, WORK CONTEXT: Done / Skipped / Focus / Next / Upcoming / Unfocused-Paused / Backlog) |
 | ck local st -l / --list | Space task listing (synonym of `ck local list`) |
@@ -192,7 +192,9 @@ ck -v    # → ck version 0.11.1
 | ck remote notes | List every active process note of the infrastructure space, all entries in order |
 | ck remote edit | Open the infrastructure space file (`~/.config/ck/spaces/remote.md`) in the editor |
 | ck remote dashboard | Alias for `ck dashboard` |
-| ck today \<command\> | Same commands for the daily scratch space (`~/.config/ck/spaces/today.md`), seeded at startup with the empty template; no daily-reset logic yet |
+| ck today init | Initialize the daily journal: create `~/.config/ck/spaces/today.md` from the empty template, set `today_date` in `~/.config/ck/state.json`, and append `today` to `spaces_order`. Idempotent (`[ok] Already initialized for YYYY-MM-DD.`); refuses a legacy `today.md` with a migration hint |
+| ck today migrate [--name \<new\>] | Rename a pre-0.12.0 regular `today` space (default target: `todo`), carrying its note sidecar and HISTORY archive; then run `ck today init` to create the daily journal |
+| ck today [\<command\>] | Daily journal tasks (`~/.config/ck/spaces/today.md`): `add`, `list`, `st` (default), `done`, `focus`/`start`, `delete`, `note`, `notes`, `edit`, `dashboard`. At the start of the first `ck today *` command of a new local day, completed `[x]` tasks are deleted (no `HISTORY.md`) and open/focused tasks stay; `save` / `log` are refused |
 | ck \<space\> \<command\> | Dynamic space routing: ANY space file placed in `~/.config/ck/spaces/<name>.md` is automatically routable with the same commands (`add` / `list` / `st` / `done` / `focus` / `start` / `note` / `notes` / `edit` / `dashboard`), rendered uniformly in the `SPACES (GLOBAL CONTEXTS)` dashboard table |
 
 **`ck <name>` routes only to spaces.** A registered project is never a dynamic space, even if its name matches. Running `ck <project-name> <command>` prints `[err] '<name>' is a registered project, not a space.` and exits 1 — no `.lock`, no `[ok]`, no silent loss. To operate on a project from another directory, either `cd` into it, or use `ck list <name>` for a read-only view.
@@ -204,8 +206,8 @@ ck -v    # → ck version 0.11.1
 > `~/.config/ck/spaces/...` path and the space order in
 > `~/.config/ck/state.json` are replaced by `.sandbox/config/spaces/...` and
 > `.sandbox/config/state.json`. Host spaces are never read, discovered or
-> written; the sandbox starts with its own `local` / `remote` / `today`
-> scaffolds.
+> written; the sandbox starts with its own `local` / `remote` scaffolds
+> (the daily `today` journal is initialized explicitly inside the sandbox).
 
 The `ck dashboard` / `ck -g` output always opens with a unified
 `SPACES (GLOBAL CONTEXTS)` table (`Space | Focus Task | Progress | Last
@@ -235,7 +237,7 @@ hierarchy; the active project in `ck space list` is bold cyan. With
 / `>> NEXT` context triad plus its process notes — the same verbose
 treatment registered projects get, and the compact table is not repeated
 above the cards.
-| ck completion bash\|zsh | Print the matching shell completion script to STDOUT: `eval "$(ck completion zsh)"`. Completions cover the core commands and the registered project names; in Zsh every global space (`ck <TAB>`, `ck <space> <TAB>`) (`~/.config/ck/projects.json`); space names for `ck space move|swap|rename|delete` follow the persisted `spaces_order`. Zsh shows the menu on the FIRST `<TAB>` at every multi-match position, `ck st <project> <TAB>` / `ck st -l <TAB>` offer the unused flags, and protected contexts are filtered (`project` for rename/delete, built-ins for delete, the first `swap` operand). A per-call `_ck_bin` resolver prefers an executable `CK_BIN` (a `ck-dev` session exports its local launcher) and falls back to the `ck` on `PATH`; top-level completion never falls back to filenames. A missing, empty or unreadable source simply yields no names (never a traceback) |
+| ck completion bash\|zsh | Print the matching shell completion script to STDOUT: `eval "$(ck completion zsh)"`. Completions cover the core commands and the registered project names; in Zsh every global space (`ck <TAB>`, `ck <space> <TAB>`) (`~/.config/ck/projects.json`); space names for `ck space move|swap|rename|delete` follow the persisted `spaces_order`. Zsh shows the menu on the FIRST `<TAB>` at every multi-match position, `ck st <project> <TAB>` / `ck st -l <TAB>` offer the unused flags, and protected contexts are filtered (`project` for rename/delete, `local` / `remote` for delete, the first `swap` operand). A per-call `_ck_bin` resolver prefers an executable `CK_BIN` (a `ck-dev` session exports its local launcher) and falls back to the `ck` on `PATH`; top-level completion never falls back to filenames. A missing, empty or unreadable source simply yields no names (never a traceback) |
 | ck info | Installation diagnostics (version, branch, paths, `launcher_path`) plus an accurate `install_mode`: `symlink (one-liner tree)`, `physical copy` after `ck install`, or `standalone/dev launcher` for a direct checkout |
 | ck install | Copy ck to ~/.local/bin/ck (physical executable file, no symlink) + cklib snapshot to ~/.local/share/ck; no sudo |
 | ck uninstall | Remove ~/.local/bin/ck, the cklib snapshot and any legacy ~/.local/bin/ck-dev |
@@ -290,6 +292,47 @@ errors (exit 2 / exit 1 respectively) and never persist a partial order.
 > inside the current `PLAN.md`; `ck space move` / `swap` / `reorder` reorder the
 > **global spaces** and never touch a plan. Likewise `ck delete <ID>` deletes a
 > task, while `ck space delete <name>` deletes a whole space and its notes.
+
+### Daily Journal (`today`)
+
+**Daily journal — `today`.** `today` is a reserved daily space. It is not
+created automatically; initialize it explicitly:
+
+```bash
+ck today init
+```
+
+Once initialized, `ck today st` shows the day's tasks with a dated header
+(`## Current Sprint (2026-11-04, Wednesday)`; the weekday is locale-aware, so
+a Russian locale renders `Среда`). `ck today` (no subcommand) is a shortcut for
+`ck today st`. The date lives only in `~/.config/ck/state.json` as
+`today_date`; the Markdown file itself keeps the plain `## Current Sprint`
+header.
+
+**Rollover.** At the start of the first `ck today *` command of a new local
+day, the journal rolls over: completed (`[x]`) tasks are **deleted** (there is
+no `HISTORY.md` for `today`), while open (`[ ]`) and focused (`[>]`) tasks stay
+in place with no ID churn. Notes attached to deleted tasks are dropped;
+notes on surviving tasks follow the positional re-indexing. The date boundary
+is local midnight (`datetime.now().date()`). Rollover is lazy — it happens on
+your first `ck today` command of the day, not at 00:00 exactly. If
+`today.md` was removed manually while `today_date` is still set, the next
+command recreates it empty and warns first.
+
+**Migration from pre-0.12.0.** If a regular space named `today` existed before
+0.12.0, `ck today init` refuses. Run `ck today migrate` (renames it to `todo`
+by default; `--name <new>` picks another target) and then `ck today init`.
+`ck space rename today <new>` also still works for that legacy file.
+
+**Restrictions.** `ck today save` and `ck today log` are refused (the daily
+journal has no history). Every other task and space command works as usual
+(`add`, `list`, `st`, `done`, `delete`, `move`, `swap`, `reorder`, `note`,
+`notes`, `edit`, `dashboard`). `today` cannot be renamed while it is an active
+daily journal; use `ck space delete today` to remove it entirely (this also
+clears `today_date`).
+
+**Future.** `weekend` and `month`-style journals are planned as separate MINOR
+versions; the underlying constant is `DAILY_SPACES = {"today"}` in the code.
 
 ### Shell Completion
 
@@ -975,13 +1018,13 @@ echo "$CK_SANDBOX_ROOT"
 │   └── <name>-<hash>/   # one sandbox dir per real project
 │       └── .ck/         # PLAN.md, HISTORY.md, state.json, locks …
 ├── config/              # sandboxed global registry / state / spaces
-│   └── spaces/          # local/, remote/, today/, custom spaces (isolated)
+│   └── spaces/          # local/, remote/, custom spaces, today/ (isolated)
 └── dev.log              # debug log (see below)
 ```
 
 - Created automatically on the first dev-mode write; never committed (`.gitignore`).
 - Project sandbox copies are **seeded from the real state** (e.g. appends to a sandboxed `HISTORY.md` start from the real history), so a dev session mirrors production without mutating it.
-- **Global spaces are the exception: they are strictly isolated.** `~/.config/ck/spaces/` is replaced by `.sandbox/config/spaces/` for the whole session, so host spaces are never read or discovered; the sandbox seeds its own empty `local` / `remote` / `today` scaffolds.
+- **Global spaces are the exception: they are strictly isolated.** `~/.config/ck/spaces/` is replaced by `.sandbox/config/spaces/` for the whole session, so host spaces are never read or discovered; the sandbox seeds its own empty `local` / `remote` scaffolds (initialize `today` explicitly there when needed).
 
 ### Safe Development Binary (`ck-dev`)
 
@@ -1183,7 +1226,7 @@ Logs go **exclusively** to `stderr` and `.sandbox/dev.log` — `stdout` stays co
 - [x] Shell Completion for Bash / Zsh: commands, flags, registered projects and spaces (`ck completion bash|zsh`, executable `CK_BIN` fallback)
 - [x] Baseline pytest coverage (`cklib/core.py`, `cklib/history.py` and the full CLI/sandbox suite)
 - [x] Strict space routing: `ck <name>` addresses only spaces; registered projects and unknown names exit 1 before any lock or write (`v0.9.3`)
-- [x] Default `today` space auto-seeded alongside `local` / `remote`, with the default order `project, local, remote, today`; existing state is never rewritten (`v0.9.3`)
+- [x] Default `today` space auto-seeded alongside `local` / `remote`, with the default order `project, local, remote, today`; existing state is never rewritten (`v0.9.3`; superseded in `v0.12.0` by the explicit daily journal)
 - [x] Dev docs (EN+RU): resolved `ck info` config path in sandbox sessions and the strict-routing rule with its rationale (`v0.9.3`)
 - [x] Strict sandbox isolation for global spaces (`.sandbox/config/spaces/`) and `ck save` history-vs-Git wording audit (`v0.9.2`)
 - [x] Zsh completion redesign: the menu appears on the FIRST `<TAB>` at every position (flags after `ck st <project>` / `ck st -l`, spaces and projects in `ck <TAB>`), dynamic `ck <space> <TAB>` routing, no prefix-then-menu `-` insertion, and `ck-dev` exports `CK_BIN` (`v0.9.2`)
@@ -1195,6 +1238,7 @@ Logs go **exclusively** to `stderr` and `.sandbox/dev.log` — `stdout` stays co
 - [x] Grouped dpx-style help: `ck -h` / `ck --help` / `ck help` print a banner + USAGE + intent-grouped quick index (TASKS / NOTES / VIEW / SAVE / SPACES / PROJECTS / SHELL / SELF / DEV / SHORTHANDS / OPTIONS) with one global aligned column (`v0.11.0`)
 - [x] `ck help <command>` (or `ck <command> --help`) prints the argparse per-command usage; the 0.9.2 unknown-command one-liner and `ck -v` are unchanged (`v0.11.0`)
 - [x] Colored `ck -h`: bold cyan group headers, bold green command names and a bold banner; descriptions stay neutral, `NO_COLOR=1` wins, piped output stays plain, and ANSI wrappers never shift alignment (`v0.11.1`)
+- [x] Daily journal `today`: explicit `ck today init` / `ck today migrate`, reserved name, lazy local-midnight rollover that deletes completed `[x]` tasks (no `HISTORY.md`) and carries open/focused tasks, dated locale-aware `ck today st` header, and `save` / `log` refusals (`v0.12.0`)
 
 ---
 
@@ -1293,7 +1337,8 @@ chmod +x ck
 > `~/.config/ck/state.json` заменяются на `.sandbox/config/spaces/...` и
 > `.sandbox/config/state.json`. Пространства хоста не читаются, не
 > обнаруживаются и не изменяются; песочница начинает с собственными
-> пустыми шаблонами `local` / `remote` / `today`.
+> пустыми шаблонами `local` / `remote` (ежедневный журнал `today`
+> инициализируется в песочнице явно).
 
 **`ck <name>` routes only to spaces.** Зарегистрированный проект никогда не
 становится динамическим пространством, даже если имя совпадает. Команда
@@ -1309,6 +1354,52 @@ project, not a space.` и завершается с кодом 1 — без `.lo
 дублировало бы это вторым, невидимым правилом — и ломалось бы в момент, когда
 реальное пространство и проект получают одинаковое имя. Строгая маршрутизация
 сохраняет `<name>` предсказуемым: это всегда пространство, никогда проект.
+
+### Ежедневный журнал (`today`)
+
+**Ежедневный журнал — `today`.** `today` — зарезервированное ежедневное
+пространство. Оно не создаётся автоматически; инициализируйте его явно:
+
+```bash
+ck today init
+```
+
+После инициализации `ck today st` показывает задачи дня с заголовком,
+содержащим дату (`## Current Sprint (2026-11-04, Среда)`; день недели
+зависит от локали). `ck today` без подкоманды — сокращение для `ck today st`.
+Дата хранится только в `~/.config/ck/state.json` в поле `today_date`; сам
+Markdown-файл сохраняет обычный заголовок `## Current Sprint`.
+
+| КОМАНДА | ОПИСАНИЕ |
+|--------|------------|
+| ck today init | Создать журнал: `spaces/today.md` из пустого шаблона, `today_date` в `state.json`, `today` в конце `spaces_order`. Идемпотентно (`[ok] Already initialized for YYYY-MM-DD.`); при старом `today.md` отказывает с подсказкой о миграции |
+| ck today migrate [--name \<new\>] | Переименовать старое обычное пространство `today` (по умолчанию в `todo`) вместе с sidecar заметок и HISTORY-архивом; затем выполнить `ck today init` |
+
+**Переход через полночь.** При запуске первой команды `ck today *` нового
+локального дня журнал перекатывается: завершённые (`[x]`) задачи
+**удаляются** (для `today` нет `HISTORY.md`), а открытые (`[ ]`) и
+сфокусированные (`[>]`) остаются на месте без смены ID. Заметки удалённых
+задач отбрасываются; заметки выживших задач следуют за переиндексацией.
+Граница дня — локальная полночь (`datetime.now().date()`). Перекат ленивый:
+он происходит при первой команде `ck today` в этот день, а не ровно в 00:00.
+Если `today.md` удалили вручную, а `today_date` остался, следующая команда
+пересоздаст файл пустым и сначала предупредит об этом.
+
+**Миграция из версий до 0.12.0.** Если обычное пространство `today`
+существовало до 0.12.0, `ck today init` откажется. Выполните
+`ck today migrate` (переименует в `todo`; `--name <new>` задаёт другое имя),
+а затем `ck today init`. Для старого файла также работает
+`ck space rename today <new>`.
+
+**Ограничения.** `ck today save` и `ck today log` запрещены (у ежедневного
+журнала нет истории). Остальные команды задач и пространств работают как
+обычно (`add`, `list`, `st`, `done`, `delete`, `move`, `swap`, `reorder`,
+`note`, `notes`, `edit`, `dashboard`). Активный журнал `today` нельзя
+переименовать; для полного удаления используйте `ck space delete today`
+(это также очищает `today_date`).
+
+**Будущее.** Журналы `weekend` и `month` запланированы отдельными MINOR-
+версиями; в коде для этого есть константа `DAILY_SPACES = {"today"}`.
 
 ### Инициализация и регистрация
 
@@ -1689,13 +1780,13 @@ echo "$CK_SANDBOX_ROOT"
 │   └── <имя>-<hash>/    # своя песочница на каждый реальный проект
 │       └── .ck/         # PLAN.md, HISTORY.md, state.json, lock-файлы …
 ├── config/              # песочные реестр, state и пространства
-│   └── spaces/          # local/, remote/, today/, кастомные пространства (изолированы)
+│   └── spaces/          # local/, remote/, кастомные пространства, today/ (изолированы)
 └── dev.log              # отладочный лог
 ```
 
 - Создаётся автоматически при первой dev-записи; в Git не попадает (`.gitignore`).
 - Песочные копии **проектов наследуют реальное состояние** (например, запись в песочный `HISTORY.md` начинается с реальной истории), поэтому dev-сессия отражает продакшен, не изменяя его.
-- **Глобальные пространства — исключение: они строго изолированы.** На всю сессию `~/.config/ck/spaces/` заменяется на `.sandbox/config/spaces/`, поэтому пространства хоста не читаются и не обнаруживаются; песочница создаёт собственные пустые шаблоны `local` / `remote` / `today`.
+- **Глобальные пространства — исключение: они строго изолированы.** На всю сессию `~/.config/ck/spaces/` заменяется на `.sandbox/config/spaces/`, поэтому пространства хоста не читаются и не обнаруживаются; песочница создаёт собственные пустые шаблоны `local` / `remote` (журнал `today` при необходимости инициализируется там явно).
 
 ### Безопасный бинарник разработки (`ck-dev`)
 
@@ -1862,7 +1953,7 @@ CK_DEBUG=1 ./ck-dev add "traced"    # или: ./ck-dev -v add "traced"
 - [x] Shell Completion (автодополнение) для Bash / Zsh: команды, флаги, зарегистрированные проекты и пространства (`ck completion bash|zsh`, fallback на исполняемый `CK_BIN`)
 - [x] Базовое покрытие pytest (`cklib/core.py`, `cklib/history.py` и полный набор тестов CLI/песочницы)
 - [x] Строгая маршрутизация пространств: `ck <name>` адресует только пространства; зарегистрированные проекты и неизвестные имена завершаются с кодом 1 до любого lock или записи (`v0.9.3`)
-- [x] Пространство `today` по умолчанию создаётся вместе с `local` / `remote`; порядок по умолчанию `project, local, remote, today`, существующее состояние не перезаписывается (`v0.9.3`)
+- [x] Пространство `today` по умолчанию создаётся вместе с `local` / `remote`; порядок по умолчанию `project, local, remote, today`, существующее состояние не перезаписывается (`v0.9.3`; заменено в `v0.12.0` явным ежедневным журналом)
 - [x] Документация dev-режима (EN+RU): разрешённый путь `ck info` в песочнице и правило строгой маршрутизации с обоснованием (`v0.9.3`)
 - [x] Строгая изоляция глобальных пространств в песочнице (`.sandbox/config/spaces/`) и аудит формулировок `ck save` про историю и Git (`v0.9.2`)
 - [x] Редизайн Zsh-автодополнения: меню появляется на ПЕРВОМ `<TAB>` в каждой позиции (флаги после `ck st <project>` / `ck st -l`, пространства и проекты в `ck <TAB>`), динамическая маршрутизация `ck <space> <TAB>`, без подстановки `-`, и `ck-dev` экспортирует `CK_BIN` (`v0.9.2`)
@@ -1874,3 +1965,4 @@ CK_DEBUG=1 ./ck-dev add "traced"    # или: ./ck-dev -v add "traced"
 - [x] Сгруппированная помощь в стиле dpx: `ck -h` / `ck --help` / `ck help` выводят баннер + USAGE + краткий индекс по группам (TASKS / NOTES / VIEW / SAVE / SPACES / PROJECTS / SHELL / SELF / DEV / SHORTHANDS / OPTIONS) с одной общей колонкой (`v0.11.0`)
 - [x] `ck help <команда>` (или `ck <команда> --help`) печатает встроенную помощь argparse по команде; однострочник о неизвестной команде (0.9.2) и `ck -v` не изменились (`v0.11.0`)
 - [x] Цветной `ck -h`: жирные бирюзовые заголовки групп, жирные зелёные имена команд и жирный баннер; описания нейтральны, `NO_COLOR=1` побеждает, перенаправленный вывод остаётся без ANSI, а обёртки не смещают выравнивание (`v0.11.1`)
+- [x] Ежедневный журнал `today`: явные `ck today init` / `ck today migrate`, зарезервированное имя, ленивый перекат в локальную полночь с удалением завершённых `[x]` задач (без `HISTORY.md`) и сохранением открытых/сфокусированных, датированный заголовок `ck today st` с локалью и запрет `save` / `log` (`v0.12.0`)

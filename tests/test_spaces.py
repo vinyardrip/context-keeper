@@ -1975,12 +1975,12 @@ class TestSpacesVerboseDashboard(_IsolatedHome):
 
         section = self._spaces_section(self._dashboard())
 
-        # Heading + one CARD per space (all three built-ins), framed by
-        # ONE shared rule: two openings + one closing.
-        self.assertIn("MY SPACES (3)", section)
+        # Heading + one CARD per auto-seeded built-in, framed by ONE
+        # shared rule: two openings + one closing.
+        self.assertIn("MY SPACES (2)", section)
         self.assertIn(" > LOCAL", section)
         self.assertIn(" > REMOTE", section)
-        self.assertEqual(section.count(self.RULE), 4)
+        self.assertEqual(section.count(self.RULE), 3)
         # Path line, progress and the triad, inside the card.
         self.assertIn(f"@ {spaces.space_path('local')}", section)
         self.assertIn("[%] Progress: 1/3 tasks done (33.3%)", section)
@@ -2094,7 +2094,7 @@ class TestSpacesVerboseDashboard(_IsolatedHome):
 
         section = self._spaces_section(self._dashboard())
 
-        self.assertIn("MY SPACES (4)", section)
+        self.assertIn("MY SPACES (3)", section)
         self.assertIn(" > CUSTOM", section)
 
     def test_compact_dashboard_has_no_space_blocks(self):
@@ -2509,11 +2509,17 @@ class TestSpaceManagement(_IsolatedHome):
         for name in sorted(spaces.RESERVED_SPACE_NAMES):
             with self.subTest(name=name):
                 code, out = self._run(["space", "create", name])
-                self.assertEqual(code, 2, out)
-                self.assertIn("Reserved names", out)
+                if name == "today":
+                    # v0.12.0: reserved DAILY journal, not a plain verb.
+                    self.assertEqual(code, 1, out)
+                    self.assertIn("'today' is reserved", out)
+                    self.assertIn("ck today init", out)
+                else:
+                    self.assertEqual(code, 2, out)
+                    self.assertIn("Reserved names", out)
         # None of them materialised a file.
         for name in spaces.RESERVED_SPACE_NAMES:
-            if name in ("local", "remote", "today"):
+            if name in ("local", "remote"):
                 continue
             self.assertFalse(spaces.space_path(name).exists())
 
@@ -2939,29 +2945,31 @@ class TestDefaultSpacesAutoInit(_IsolatedHome):
     """Startup auto-init creates missing built-ins, preserves existing.
 
     ``ensure_default_spaces`` must be idempotent, strictly
-    non-destructive (an existing ``local.md`` / ``remote.md`` /
-    ``today.md`` is kept byte-for-byte, sidecar included), limited to
-    the built-in names, silent, and it must never raise.
+    non-destructive (an existing ``local.md`` / ``remote.md`` is kept
+    byte-for-byte, sidecar included), limited to the auto-seeded
+    built-in names, silent, and it must never raise. The daily
+    ``today`` journal is NEVER auto-seeded since v0.12.0.
     """
 
     def test_missing_defaults_created_from_scaffold(self):
         self.assertEqual(spaces.ensure_default_spaces(),
-                         ["local", "remote", "today"])
-        for name in ("local", "remote", "today"):
+                         ["local", "remote"])
+        for name in ("local", "remote"):
             path = spaces.space_path(name)
             self.assertTrue(path.is_file())
             self.assertEqual(
                 path.read_text(encoding="utf-8"),
                 spaces._EMPTY_SPACE.format(space=name),
             )
+        self.assertFalse(spaces.space_path("today").exists())
 
     def test_second_run_is_a_noop(self):
         self.assertEqual(spaces.ensure_default_spaces(),
-                         ["local", "remote", "today"])
+                         ["local", "remote"])
         stamps = {name: spaces.space_path(name).stat().st_mtime_ns
-                  for name in ("local", "remote", "today")}
+                  for name in ("local", "remote")}
         self.assertEqual(spaces.ensure_default_spaces(), [])
-        for name in ("local", "remote", "today"):
+        for name in ("local", "remote"):
             self.assertEqual(spaces.space_path(name).stat().st_mtime_ns,
                              stamps[name],
                              f"{name}.md was rewritten on re-run")
@@ -2982,7 +2990,7 @@ class TestDefaultSpacesAutoInit(_IsolatedHome):
         self.assertTrue(live.exists())
 
     def test_existing_spaces_order_is_never_rewritten(self):
-        """v0.9.3: seeding ``today`` leaves persisted state byte-identical."""
+        """Seeding the built-ins leaves persisted state byte-identical."""
         spaces.write_space_order(["project", "local", "remote"])
         state_file = spaces.global_state_path()
         before = state_file.read_bytes()
@@ -2991,10 +2999,10 @@ class TestDefaultSpacesAutoInit(_IsolatedHome):
 
         self.assertEqual(state_file.read_bytes(), before)
         self.assertNotIn("today", spaces.read_space_order())
-        # The default order still surfaces today in memory.
+        # today is not a built-in seed: no in-memory phantom row either.
         self.assertEqual(
             spaces.space_order(include_project=True),
-            ["project", "local", "remote", "today"])
+            ["project", "local", "remote"])
 
     def test_existing_space_preserved_byte_for_byte(self):
         """A populated space file AND its note sidecar survive."""
@@ -3013,13 +3021,13 @@ class TestDefaultSpacesAutoInit(_IsolatedHome):
         created = spaces.ensure_default_spaces()
 
         # Only the MISSING defaults are created; local is untouched.
-        self.assertEqual(created, ["remote", "today"])
+        self.assertEqual(created, ["remote"])
         self.assertEqual(spaces.space_path("local").read_text(
             encoding="utf-8"), original)
         self.assertEqual(sidecar.read_text(encoding="utf-8"),
                          '{"notes": {"7": "keep me"}}')
         self.assertTrue(spaces.space_path("remote").is_file())
-        self.assertTrue(spaces.space_path("today").is_file())
+        self.assertFalse(spaces.space_path("today").exists())
 
     def test_custom_spaces_never_created_or_touched(self):
         alpha = spaces.space_path("alpha")
@@ -3028,7 +3036,7 @@ class TestDefaultSpacesAutoInit(_IsolatedHome):
 
         created = spaces.ensure_default_spaces()
 
-        self.assertEqual(created, ["local", "remote", "today"])
+        self.assertEqual(created, ["local", "remote"])
         self.assertEqual(alpha.read_text(encoding="utf-8"),
                          "# alpha\n\n- [ ] mine\n")
 
@@ -3070,10 +3078,11 @@ class TestDefaultSpacesAutoInit(_IsolatedHome):
         self.assertEqual(code, 0, buf.getvalue())
         self.assertTrue(spaces.space_path("local").is_file())
         self.assertTrue(spaces.space_path("remote").is_file())
-        self.assertTrue(spaces.space_path("today").is_file())
+        self.assertFalse(spaces.space_path("today").exists())
         listing = buf.getvalue()
-        for name in ("LOCAL", "REMOTE", "TODAY"):
+        for name in ("LOCAL", "REMOTE"):
             self.assertIn(name, listing)
+        self.assertNotIn("TODAY", listing)
         # The hook is transparent: no auto-init chatter on stdout.
         self.assertNotIn("auto-init", listing.lower())
 
@@ -3105,9 +3114,10 @@ class TestDefaultSpacesAutoInit(_IsolatedHome):
         sandbox_dir = spaces.spaces_dir()
         self.assertTrue(sandbox_dir.is_dir())
         self.assertTrue(cksandbox.is_within_sandbox(sandbox_dir))
-        for name in ("local", "remote", "today"):
+        for name in ("local", "remote"):
             self.assertTrue((sandbox_dir / f"{name}.md").is_file())
             self.assertFalse((production_dir / f"{name}.md").exists())
+        self.assertFalse((sandbox_dir / "today.md").exists())
 
 
 if __name__ == "__main__":

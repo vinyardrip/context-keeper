@@ -1,6 +1,6 @@
 """Documentation consistency: version bump and roadmap hygiene.
 
-Guards the v0.11.1 documentation update:
+Guards the v0.12.0 documentation update:
 
 - every version source agrees (package, pyproject, README, ROADMAP);
 - completed features (Shell Completion) never reappear in the
@@ -17,7 +17,9 @@ Guards the v0.11.1 documentation update:
 - the grouped-help quick reference appears near the Commands table in
   both languages (v0.11.0);
 - `ck -h` color behavior and the pipe/NO_COLOR rules are documented in
-  both languages (v0.11.1).
+  both languages (v0.11.1);
+- the daily journal `today` (init/migrate, rollover, restrictions) is
+  documented in both languages and in the Commands table (v0.12.0).
 """
 
 from __future__ import annotations
@@ -138,6 +140,22 @@ class TestDocumentationConsistency(unittest.TestCase):
             "`ck -h` использует ту же цветовую схему", self.readme)
         self.assertIn(
             "При перенаправлении вывод всегда без ANSI.", self.readme)
+
+    def test_daily_journal_documented_bilingually(self):
+        """v0.12.0: daily journal init/migrate/rollover/rules."""
+        english = _section(self.readme, "### Daily Journal (`today`)")
+        russian = _section(self.readme, "### Ежедневный журнал (`today`)")
+        for section in (english, russian):
+            self.assertIn("ck today init", section)
+            self.assertIn("ck today migrate", section)
+            self.assertIn("today_date", section)
+            self.assertIn("HISTORY.md", section)
+            self.assertIn("DAILY_SPACES", section)
+            self.assertIn("`ck today save`", section)
+        self.assertIn("local midnight", english)
+        self.assertIn("локальная полночь", russian)
+        self.assertIn("| ck today init |", self.readme)
+        self.assertIn("| ck today migrate", self.readme)
 
     def test_bilingual_roadmap_checklists_have_parity(self):
         pairs = (

@@ -81,6 +81,7 @@ COMPLETION_COMMANDS: Tuple[Tuple[str, str], ...] = (
     ("space", "manage global spaces"),
     ("local", "workstation space"),
     ("remote", "infrastructure space"),
+    ("today", "daily journal space"),
     ("register", "register a project"),
     ("unregister", "unregister a project"),
     ("prune", "drop registry entries whose folders are gone"),
@@ -370,10 +371,10 @@ _ck_completion() {
                     if [ -z "$__ck_line" ]; then
                         continue
                     fi
-                    # `project` is virtual and cannot be renamed or
-                    # deleted; local/remote/today are protected built-ins.
+                    # `project` is virtual and local/remote are
+                    # protected built-ins; `today` is deletable.
                     case "$__ck_action:$__ck_line" in
-                        rename:project|delete:project|delete:local|delete:remote|delete:today)
+                        rename:project|delete:project|delete:local|delete:remote)
                             continue
                             ;;
                     esac
@@ -389,6 +390,11 @@ _ck_completion() {
         local|remote)
             if [ "$COMP_CWORD" -eq 2 ]; then
                 COMPREPLY=( $(compgen -W "add list st status done focus start note notes edit dashboard" -- "$cur") )
+            fi
+            ;;
+        today)
+            if [ "$COMP_CWORD" -eq 2 ]; then
+                COMPREPLY=( $(compgen -W "init migrate add list st status done focus start note notes edit dashboard" -- "$cur") )
             fi
             ;;
         completion)
@@ -577,11 +583,18 @@ __CK_COMMAND_ENTRIES__
 
 _ck_space_actions() {
     # `ck local <TAB>` / `ck remote <TAB>` / `ck <custom-space> <TAB>`:
-    # every space shares one action vocabulary.
+    # every space shares one action vocabulary. `ck today <TAB>` adds
+    # the daily-journal lifecycle verbs.
     local -a actions
     actions=(
 __CK_SPACE_ACTION_ENTRIES__
     )
+    if [[ ${1:-} == today ]]; then
+        actions+=(
+            'init:initialize the daily journal'
+            'migrate:rename a legacy today space'
+        )
+    fi
     _ck_entries actions 'space action' "${actions[@]}"
 }
 
@@ -685,8 +698,8 @@ _ck() {
                 return 0
             fi
             # SPACE ARGUMENTS follow the persisted spaces_order. The
-            # virtual `project` cannot be renamed/deleted,
-            # local/remote/today are protected built-ins, and swap
+            # virtual `project` cannot be renamed/deleted, local/remote
+            # are protected built-ins (today is deletable), and swap
             # excludes its first pick.
             case $words[3] in
                 move)
@@ -708,7 +721,7 @@ _ck() {
                     ;;
                 delete)
                     if (( CURRENT == 4 )); then
-                        _ck_spaces project local remote today
+                        _ck_spaces project local remote
                     fi
                     ;;
             esac
@@ -716,6 +729,11 @@ _ck() {
         local|remote)
             if (( CURRENT == 3 )); then
                 _ck_space_actions
+            fi
+            ;;
+        today)
+            if (( CURRENT == 3 )); then
+                _ck_space_actions today
             fi
             ;;
         completion)
