@@ -119,29 +119,62 @@ _HELP_GROUPS: List[tuple] = [
 ]
 
 
-def render_help() -> str:
-    """The grouped ``ck -h`` screen (see :data:`HELP_TEXT`)."""
+def _help_color_enabled(stream=None) -> bool:
+    """Color decision for the help screen only.
+
+    Help deliberately follows the documentation convention (plain when
+    piped) instead of the CLI always-color badge policy: ``ck -h >
+    file`` must stay escape-free. ``NO_COLOR`` wins over everything,
+    ``FORCE_COLOR`` forces color for captures, and otherwise color is
+    enabled only for a TTY.
+    """
+    if os.environ.get("NO_COLOR"):
+        return False
+    forced = (os.environ.get("FORCE_COLOR")
+              or os.environ.get("CLICOLOR_FORCE") or "").strip().lower()
+    if forced and forced not in ("0", "false", "no", "off"):
+        return True
+    target = stream if stream is not None else sys.stdout
+    try:
+        return bool(target.isatty())
+    except (AttributeError, OSError):
+        return False
+
+
+def render_help(*, color: Optional[bool] = None, stream=None) -> str:
+    """The grouped ``ck -h`` screen (see :data:`HELP_TEXT`).
+
+    ``color=None`` auto-detects per :func:`_help_color_enabled`;
+    ``color=False`` is the canonical plain layout stored in
+    :data:`HELP_TEXT`. Styling wraps only the token — the command
+    padding is computed on the plain name, so ANSI escapes never
+    shift the description column.
+    """
+    if color is None:
+        color = _help_color_enabled(stream)
+    p = ui.Palette(color)
     entries = [entry for _name, rows in _HELP_GROUPS for entry in rows]
     width = max(len(command) for command, _desc in entries)
     column = width + 2
     lines = [
-        "--- CK - Context Keeper ---",
+        p.paint("--- CK - Context Keeper ---", ui.BOLD),
         'Minimalist Unix-way "external memory" for developers',
         "",
-        "USAGE:",
+        p.paint("USAGE:", ui.BOLD_CYAN),
         "    ck <command> [options]",
         "    ck <space> <command> [options]",
     ]
     for group_name, rows in _HELP_GROUPS:
         lines.append("")
-        lines.append(f"{group_name}:")
+        lines.append(p.paint(f"{group_name}:", ui.BOLD_CYAN))
         for command, desc in rows:
-            padded = command.ljust(column)
-            lines.append(f"    {padded}{desc}")
+            pad = " " * (column - len(command))
+            lines.append(
+                f"    {p.paint(command, ui.BOLD_GREEN)}{pad}{desc}")
     return "\n".join(lines) + "\n"
 
 
-HELP_TEXT = render_help()
+HELP_TEXT = render_help(color=False)
 
 
 # Commands that may print a non-blocking update notice to stderr.
@@ -827,7 +860,7 @@ def _dispatch(argv: Optional[List[str]] = None) -> int:
     if not raw:
         if is_dev_call:
             return enter_sandbox()
-        print(HELP_TEXT)
+        print(render_help())
         return 0
     if raw[0] == "exit" and is_dev_call:
         # SAFEGUARD: `ck-dev exit` cannot close an active subshell.
@@ -845,7 +878,7 @@ def _dispatch(argv: Optional[List[str]] = None) -> int:
         # 0.9.2 one-liner from the parser's error path.
         if raw[0] == "help" and len(raw) > 1:
             return _help_via_argparse([raw[1], "--help"])
-        print(HELP_TEXT)
+        print(render_help())
         return 0
     if raw[0] == "-v" or raw[0] == "--version":
         print(f"ck version {VERSION}")
@@ -928,7 +961,7 @@ def _dispatch(argv: Optional[List[str]] = None) -> int:
     ck = ContextKeeper()
     try:
         if args.command is None or args.command == "help":
-            print(HELP_TEXT)
+            print(render_help())
             return 0
         if args.command == "init":
             ck.init(register=args.register)
@@ -2041,7 +2074,7 @@ def _legacy_dispatch(raw: List[str]) -> int:
             # rejected earlier in main() before dispatch.
             return exit_sandbox()
         elif cmd == "help":
-            print(HELP_TEXT)
+            print(render_help())
         else:
             print(f"Unknown command: {cmd!r}. Use `ck --help`.")
             return 2

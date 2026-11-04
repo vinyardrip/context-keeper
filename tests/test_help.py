@@ -1,4 +1,4 @@
-"""Tests for the grouped dpx-style top-level help (v0.11.0).
+"""Tests for the grouped dpx-style top-level help (v0.11.0, v0.11.1 color).
 
 Guards:
 
@@ -12,7 +12,9 @@ Guards:
 - every command documented in the README Commands table appears in the
   help (a small whitelist for meta/external entrypoints);
 - per-command ``--help`` still works (exit 0, argparse format);
-- the 0.9.2 unknown-command one-liner is unchanged.
+- the 0.9.2 unknown-command one-liner is unchanged;
+- v0.11.1: TTY / FORCE_COLOR color, NO_COLOR and pipes stay plain,
+  and ANSI never changes alignment.
 """
 
 from __future__ import annotations
@@ -26,11 +28,12 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 import tests  # noqa: F401  (filesystem isolation safety net)
 
 import cklib.ui as ckui
-from cklib.cli import HELP_TEXT, main
+from cklib.cli import HELP_TEXT, main, render_help
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 README = REPO_ROOT / "README.md"
@@ -80,6 +83,25 @@ def _run_binary(argv) -> subprocess.CompletedProcess:
         return subprocess.run(
             [sys.executable, str(CK_LAUNCHER), *argv],
             capture_output=True, text=True, cwd=td, timeout=60,
+        )
+
+
+def _clean_color_env(**overrides) -> dict:
+    """Environment without inherited color toggles, plus overrides."""
+    env = {
+        key: value for key, value in os.environ.items()
+        if key not in ("NO_COLOR", "FORCE_COLOR", "CLICOLOR_FORCE")
+    }
+    env.update(overrides)
+    return env
+
+
+def _run_binary_env(argv, env) -> subprocess.CompletedProcess:
+    """Run the real launcher with an explicit color environment."""
+    with tempfile.TemporaryDirectory() as td:
+        return subprocess.run(
+            [sys.executable, str(CK_LAUNCHER), *argv],
+            capture_output=True, text=True, cwd=td, timeout=60, env=env,
         )
 
 
@@ -163,6 +185,62 @@ class TestGroupedHelpLayout(unittest.TestCase):
             else:
                 self.assertEqual(done.stdout, first)
         self.assertTrue(first.startswith("--- CK - Context Keeper ---"))
+
+
+class TestHelpColors(unittest.TestCase):
+    def test_no_color_matches_plain_golden(self):
+        env = _clean_color_env(NO_COLOR="1")
+        done = _run_binary_env(["-h"], env)
+        self.assertEqual(done.returncode, 0)
+        self.assertEqual(done.stderr, "")
+        self.assertEqual(done.stdout, HELP_TEXT + "\n")
+        self.assertNotIn("\x1b[", done.stdout)
+
+    def test_redirected_output_is_plain_without_color_env(self):
+        """A pipe is not a TTY, so help stays escape-free."""
+        done = _run_binary_env(["-h"], _clean_color_env())
+        self.assertEqual(done.returncode, 0)
+        self.assertNotIn("\x1b[", done.stdout)
+        self.assertEqual(done.stdout, HELP_TEXT + "\n")
+
+    def test_force_color_styles_headers_and_commands(self):
+        done = _run_binary_env(["-h"], _clean_color_env(FORCE_COLOR="1"))
+        self.assertEqual(done.returncode, 0)
+        self.assertIn("\x1b[1;36mTASKS:\x1b[0m", done.stdout)
+        self.assertIn("\x1b[1;32madd <text>\x1b[0m", done.stdout)
+        self.assertIn("\x1b[1m--- CK - Context Keeper ---\x1b[0m", done.stdout)
+        # Descriptions (and inline aliases) stay neutral.
+        self.assertIn("            Add a new task", done.stdout)
+        self.assertIn("Delete a task (alias: rm)", done.stdout)
+
+    def test_ansi_is_zero_width_alignment_preserved(self):
+        plain = _run_binary_env(["-h"], _clean_color_env(NO_COLOR="1"))
+        colored = _run_binary_env(["-h"], _clean_color_env(FORCE_COLOR="1"))
+        self.assertEqual(plain.stdout, ckui.strip_ansi(colored.stdout))
+
+    def test_no_color_wins_over_force_color(self):
+        plain = _run_binary_env(["-h"], _clean_color_env(NO_COLOR="1"))
+        both = _run_binary_env(
+            ["-h"], _clean_color_env(NO_COLOR="1", FORCE_COLOR="1"))
+        self.assertEqual(both.stdout, plain.stdout)
+
+    def test_tty_detection_controls_color(self):
+        class _FakeStdout:
+            def __init__(self, tty: bool) -> None:
+                self._tty = tty
+
+            def isatty(self) -> bool:
+                return self._tty
+
+        with mock.patch.dict(os.environ, {
+                "NO_COLOR": "", "FORCE_COLOR": "", "CLICOLOR_FORCE": ""}):
+            with mock.patch("cklib.cli.sys.stdout", _FakeStdout(False)):
+                plain = render_help()
+            with mock.patch("cklib.cli.sys.stdout", _FakeStdout(True)):
+                colored = render_help()
+        self.assertNotIn("\x1b[", plain)
+        self.assertIn("\x1b[1;36m", colored)
+        self.assertEqual(plain, ckui.strip_ansi(colored))
 
 
 class TestSubcommandHelp(unittest.TestCase):

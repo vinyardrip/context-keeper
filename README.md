@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.11.0-blue)]()
+[![version](https://img.shields.io/badge/version-0.11.1-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -104,7 +104,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.11.0
+ck -v    # → ck version 0.11.1
 ```
 
 ---
@@ -868,6 +868,9 @@ NO_COLOR=1 ck st          # plain text, no escapes
 ck dashboard > log.txt    # badges stay colored inside the file
 ```
 
+`ck -h` uses the same color scheme as status badges; `NO_COLOR=1` disables it.
+Piped output is always plain.
+
 ---
 
 ## <a name="editor-resolution"></a>⌨️ Editor Resolution
@@ -1191,6 +1194,7 @@ Logs go **exclusively** to `stderr` and `.sandbox/dev.log` — `stdout` stays co
 - [x] Deprecated `active_task.note`: migrated into the `notes` ledger only when the array is absent (the array wins), never persisted again after the next state write; read-only commands keep `state.json` byte-identical (`v0.10.1`)
 - [x] Grouped dpx-style help: `ck -h` / `ck --help` / `ck help` print a banner + USAGE + intent-grouped quick index (TASKS / NOTES / VIEW / SAVE / SPACES / PROJECTS / SHELL / SELF / DEV / SHORTHANDS / OPTIONS) with one global aligned column (`v0.11.0`)
 - [x] `ck help <command>` (or `ck <command> --help`) prints the argparse per-command usage; the 0.9.2 unknown-command one-liner and `ck -v` are unchanged (`v0.11.0`)
+- [x] Colored `ck -h`: bold cyan group headers, bold green command names and a bold banner; descriptions stay neutral, `NO_COLOR=1` wins, piped output stays plain, and ANSI wrappers never shift alignment (`v0.11.1`)
 
 ---
 
@@ -1647,6 +1651,9 @@ export EDITOR="nano"  # используется, если VISUAL не зада�
 | `CK_DEBUG` | `1` пишет отладочный лог в `.sandbox/dev.log` |
 | `NO_COLOR` | Отключает ANSI-оформление |
 
+`ck -h` использует ту же цветовую схему, что и статус-бейджи; `NO_COLOR=1`
+отключает её. При перенаправлении вывод всегда без ANSI.
+
 `CK_CONFIG_DIR` имеет высший приоритет: реестр (`projects.json`), `state.json` и всё дерево пространств переезжают вместе с ним. Набор тестов выставляет переменную на одноразовый каталог для каждого теста, поэтому `pytest` никогда не читает и не изменяет реальный `~/.config/ck/`.
 
 > **Обновляетесь с версии, где ещё не было изоляции pytest, и видите устаревшие `[MISSING]`?** Один раз выполните `ck prune` в production. После перевода тестов на одноразовый `CK_CONFIG_DIR` `pytest` не пишет в `~/.config/ck/projects.json`, поэтому ситуация не повторится. `ck dashboard` намеренно не запускает автоочистку: временно недоступный каталог (сетевой диск, отключённая USB-флешка) не должен молча удалять данные пользователя.
@@ -1866,3 +1873,4 @@ CK_DEBUG=1 ./ck-dev add "traced"    # или: ./ck-dev -v add "traced"
 - [x] Устаревшее поле `active_task.note`: переносится в ledger только при отсутствии массива (массив главнее) и больше не записывается после следующей мутации; read-only команды оставляют `state.json` побайтово неизменным (`v0.10.1`)
 - [x] Сгруппированная помощь в стиле dpx: `ck -h` / `ck --help` / `ck help` выводят баннер + USAGE + краткий индекс по группам (TASKS / NOTES / VIEW / SAVE / SPACES / PROJECTS / SHELL / SELF / DEV / SHORTHANDS / OPTIONS) с одной общей колонкой (`v0.11.0`)
 - [x] `ck help <команда>` (или `ck <команда> --help`) печатает встроенную помощь argparse по команде; однострочник о неизвестной команде (0.9.2) и `ck -v` не изменились (`v0.11.0`)
+- [x] Цветной `ck -h`: жирные бирюзовые заголовки групп, жирные зелёные имена команд и жирный баннер; описания нейтральны, `NO_COLOR=1` побеждает, перенаправленный вывод остаётся без ANSI, а обёртки не смещают выравнивание (`v0.11.1`)

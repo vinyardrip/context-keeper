@@ -80,6 +80,7 @@ MAGENTA = "\033[35m"
 BOLD_YELLOW = "\033[1;33m"
 BOLD_GREEN = "\033[1;32m"
 BOLD_RED = "\033[1;31m"
+BOLD_CYAN = "\033[1;36m"
 
 # Bold magenta — NOT a badge colour. Reserved for the project-name
 # column of the GLOBAL DASHBOARD: cyan already belongs to the [i]
@@ -690,6 +691,7 @@ __all__ = [
     "RED",
     "MAGENTA",
     "BOLD_MAGENTA",
+    "BOLD_CYAN",
     "BANNER_BG",
     "COLOR_NAMES",
     "PALETTE_SLOTS",

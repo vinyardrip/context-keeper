@@ -1,6 +1,6 @@
 """Documentation consistency: version bump and roadmap hygiene.
 
-Guards the v0.11.0 documentation update:
+Guards the v0.11.1 documentation update:
 
 - every version source agrees (package, pyproject, README, ROADMAP);
 - completed features (Shell Completion) never reappear in the
@@ -15,7 +15,9 @@ Guards the v0.11.0 documentation update:
 - the unified note timestamp format and HISTORY multi-note rule are
   documented in both languages (v0.10.1);
 - the grouped-help quick reference appears near the Commands table in
-  both languages (v0.11.0).
+  both languages (v0.11.0);
+- `ck -h` color behavior and the pipe/NO_COLOR rules are documented in
+  both languages (v0.11.1).
 """
 
 from __future__ import annotations
@@ -124,6 +126,18 @@ class TestDocumentationConsistency(unittest.TestCase):
             window = self.readme[start:start + 500]
             self.assertIn(needle, window, marker)
             self.assertIn("ck -h", window, marker)
+
+    def test_help_color_policy_documented_bilingually(self):
+        """v0.11.1: color scheme plus NO_COLOR and pipe guarantees."""
+        self.assertIn(
+            "`ck -h` uses the same color scheme as status badges",
+            self.readme,
+        )
+        self.assertIn("Piped output is always plain.", self.readme)
+        self.assertIn(
+            "`ck -h` использует ту же цветовую схему", self.readme)
+        self.assertIn(
+            "При перенаправлении вывод всегда без ANSI.", self.readme)
 
     def test_bilingual_roadmap_checklists_have_parity(self):
         pairs = (
