@@ -83,7 +83,7 @@ _HELP_GROUPS: List[tuple] = [
         ("space swap <a> <b>", "Swap two spaces"),
         ("space reorder", "Normalize space order"),
         ("space delete <n>", "Delete a space and its notes"),
-        ("today [<command>]", "Daily journal (default: st)"),
+        ("today [<command>]", "Daily journal (default: list)"),
         ("today init", "Initialize the daily journal"),
         ("today migrate [--name]",
          "Rename a legacy 'today' space"),
@@ -2155,11 +2155,11 @@ def _run_today_command(rest: List[str]) -> int:
     are refused (a daily space has no HISTORY.md), and every ordinary
     task action is delegated to the shared space engine AFTER the lazy
     date rollover. A bare ``ck today`` is the documented shortcut for
-    ``ck today st``.
+    ``ck today list`` (the flat daily view).
     """
     from . import spaces
 
-    action = rest[0] if rest else "st"
+    action = rest[0] if rest else "list"
     args = rest[1:]
 
     if action == "init":
@@ -2242,8 +2242,8 @@ def _run_today_command(rest: List[str]) -> int:
                 f"Rolled over {rolled['old']} → {rolled['new']}: "
                 f"removed {rolled['removed']} completed, "
                 f"carried over {rolled['carried']}.")
-    # A bare ``ck today`` is the documented shortcut for ``ck today st``.
-    return _run_space_command("today", rest or ["st"])
+    # A bare ``ck today`` is the documented shortcut for ``ck today list``.
+    return _run_space_command("today", rest or ["list"])
 
 
 def _run_space_command(space: str, rest: List[str]) -> int:
@@ -2254,14 +2254,17 @@ def _run_space_command(space: str, rest: List[str]) -> int:
     ``~/.config/ck/spaces/``. Accepted actions:
 
     - ``add <text>``          — append a new open task;
-    - ``list``                — pipe-friendly task listing;
+    - ``list``                — pipe-friendly task listing. For a
+                                 DAILY space this is a flat list
+                                 under the dated header;
     - ``st`` / ``status``     — detailed status view (same
                                  layout as ``ck st``: header,
                                  progress, current focus, notes,
-                                 work context). Accepts the same
-                                 view flags as ``ck st``: ``-l``
-                                 (list), ``-e`` (edit), ``-g``
-                                 (global dashboard);
+                                 work context). For a DAILY space
+                                 this is an exact alias of ``list``.
+                                 Accepts the same view flags as
+                                 ``ck st``: ``-l`` (list), ``-e``
+                                 (edit), ``-g`` (global dashboard);
     - ``done <ID|range>``     — mark task(s) done (bare form
                                  completes the space's CURRENT
                                  FOCUS, mirroring ``ck done``);
@@ -2309,8 +2312,13 @@ def _run_space_command(space: str, rest: List[str]) -> int:
         "dashboard [-v]>"
     )
     if not rest:
-        print(usage)
-        return 2
+        # Daily spaces are flat journals: a bare invocation means
+        # ``list``. Non-daily spaces keep their usage error.
+        if space in spaces.DAILY_SPACES:
+            rest = ["list"]
+        else:
+            print(usage)
+            return 2
     action, args = rest[0], rest[1:]
 
     # `create` lets the `add` action materialize a brand-new

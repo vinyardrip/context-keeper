@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-VERSION = "0.12.0"
+VERSION = "0.12.1"
 CK_DIR_NAME = ".ck"
 # Traversal-boundary markers. Kept in sync with
 # ``cklib.sandbox.SANDBOX_DIR_NAME`` (".sandbox") and Git's ".git".
@@ -101,7 +101,8 @@ LEGACY_GLOBAL_CONFIG_FILE = Path.home() / ".ckrc"
 # Out-of-project task spaces (``ck local`` / ``ck remote``).
 # Stored as plain Markdown plans under ``~/.config/ck/spaces/<name>.md``.
 # ``today`` is a DAILY journal space (v0.12.0): it is initialized
-# explicitly with ``ck today init`` and is never auto-seeded.
+# explicitly with ``ck today init`` and is never auto-seeded. Its
+# rendered view is a flat dated list since v0.12.1.
 SPACES_DIR_NAME = "spaces"
 SPACE_NAMES: tuple[str, ...] = ("local", "remote")
 SPACE_LOCAL = "local"

@@ -1,6 +1,6 @@
 """Documentation consistency: version bump and roadmap hygiene.
 
-Guards the v0.12.0 documentation update:
+Guards the v0.12.1 documentation update:
 
 - every version source agrees (package, pyproject, README, ROADMAP);
 - completed features (Shell Completion) never reappear in the
@@ -19,7 +19,9 @@ Guards the v0.12.0 documentation update:
 - `ck -h` color behavior and the pipe/NO_COLOR rules are documented in
   both languages (v0.11.1);
 - the daily journal `today` (init/migrate, rollover, restrictions) is
-  documented in both languages and in the Commands table (v0.12.0).
+  documented in both languages and in the Commands table (v0.12.0);
+- the flat daily output (`today` / `st` / `list` byte-identical, dated
+  header, no dashboard sections) is documented bilingually (v0.12.1).
 """
 
 from __future__ import annotations
@@ -142,7 +144,7 @@ class TestDocumentationConsistency(unittest.TestCase):
             "При перенаправлении вывод всегда без ANSI.", self.readme)
 
     def test_daily_journal_documented_bilingually(self):
-        """v0.12.0: daily journal init/migrate/rollover/rules."""
+        """v0.12.0/v0.12.1: init/migrate/rollover and the flat output."""
         english = _section(self.readme, "### Daily Journal (`today`)")
         russian = _section(self.readme, "### Ежедневный журнал (`today`)")
         for section in (english, russian):
@@ -152,8 +154,13 @@ class TestDocumentationConsistency(unittest.TestCase):
             self.assertIn("HISTORY.md", section)
             self.assertIn("DAILY_SPACES", section)
             self.assertIn("`ck today save`", section)
+            self.assertIn("`ck today list`", section)
+            self.assertIn("CURRENT FOCUS", section)
+            self.assertIn("WORK CONTEXT", section)
         self.assertIn("local midnight", english)
         self.assertIn("локальная полночь", russian)
+        self.assertIn("byte-identical", english)
+        self.assertIn("байт-в-байт", russian)
         self.assertIn("| ck today init |", self.readme)
         self.assertIn("| ck today migrate", self.readme)
 

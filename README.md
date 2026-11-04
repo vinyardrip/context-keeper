@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.12.0-blue)]()
+[![version](https://img.shields.io/badge/version-0.12.1-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -104,7 +104,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.12.0
+ck -v    # → ck version 0.12.1
 ```
 
 ---
@@ -194,7 +194,7 @@ ck -v    # → ck version 0.12.0
 | ck remote dashboard | Alias for `ck dashboard` |
 | ck today init | Initialize the daily journal: create `~/.config/ck/spaces/today.md` from the empty template, set `today_date` in `~/.config/ck/state.json`, and append `today` to `spaces_order`. Idempotent (`[ok] Already initialized for YYYY-MM-DD.`); refuses a legacy `today.md` with a migration hint |
 | ck today migrate [--name \<new\>] | Rename a pre-0.12.0 regular `today` space (default target: `todo`), carrying its note sidecar and HISTORY archive; then run `ck today init` to create the daily journal |
-| ck today [\<command\>] | Daily journal tasks (`~/.config/ck/spaces/today.md`): `add`, `list`, `st` (default), `done`, `focus`/`start`, `delete`, `note`, `notes`, `edit`, `dashboard`. At the start of the first `ck today *` command of a new local day, completed `[x]` tasks are deleted (no `HISTORY.md`) and open/focused tasks stay; `save` / `log` are refused |
+| ck today [\<command\>] | Daily journal tasks (`~/.config/ck/spaces/today.md`): `add`, `list` (default), `st`, `done`, `focus`/`start`, `delete`, `note`, `notes`, `edit`, `dashboard`. `list` / `st` / bare `today` are byte-identical flat dated views. At the start of the first `ck today *` command of a new local day, completed `[x]` tasks are deleted (no `HISTORY.md`) and open/focused tasks stay; `save` / `log` are refused |
 | ck \<space\> \<command\> | Dynamic space routing: ANY space file placed in `~/.config/ck/spaces/<name>.md` is automatically routable with the same commands (`add` / `list` / `st` / `done` / `focus` / `start` / `note` / `notes` / `edit` / `dashboard`), rendered uniformly in the `SPACES (GLOBAL CONTEXTS)` dashboard table |
 
 **`ck <name>` routes only to spaces.** A registered project is never a dynamic space, even if its name matches. Running `ck <project-name> <command>` prints `[err] '<name>' is a registered project, not a space.` and exits 1 — no `.lock`, no `[ok]`, no silent loss. To operate on a project from another directory, either `cd` into it, or use `ck list <name>` for a read-only view.
@@ -302,12 +302,15 @@ created automatically; initialize it explicitly:
 ck today init
 ```
 
-Once initialized, `ck today st` shows the day's tasks with a dated header
-(`## Current Sprint (2026-11-04, Wednesday)`; the weekday is locale-aware, so
-a Russian locale renders `Среда`). `ck today` (no subcommand) is a shortcut for
-`ck today st`. The date lives only in `~/.config/ck/state.json` as
-`today_date`; the Markdown file itself keeps the plain `## Current Sprint`
-header.
+**Output.** `ck today`, `ck today st`, and `ck today list` are byte-identical
+for daily spaces: a flat task list with a dated header
+(`## Current Sprint (2026-11-04, Среда)`; the weekday is locale-aware, so an
+English locale renders `Wednesday`). There is no progress bar, no
+`CURRENT FOCUS`, no `WORK CONTEXT`, no Skipped / Backlog block — a daily
+journal is just a list. Notes are shown inline under each task. Non-daily
+spaces (`todo`, `local`, `remote`, custom) keep the full status view for `st`.
+The date lives only in `~/.config/ck/state.json` as `today_date`; the Markdown
+file itself keeps the plain `## Current Sprint` header.
 
 **Rollover.** At the start of the first `ck today *` command of a new local
 day, the journal rolls over: completed (`[x]`) tasks are **deleted** (there is
@@ -1239,6 +1242,7 @@ Logs go **exclusively** to `stderr` and `.sandbox/dev.log` — `stdout` stays co
 - [x] `ck help <command>` (or `ck <command> --help`) prints the argparse per-command usage; the 0.9.2 unknown-command one-liner and `ck -v` are unchanged (`v0.11.0`)
 - [x] Colored `ck -h`: bold cyan group headers, bold green command names and a bold banner; descriptions stay neutral, `NO_COLOR=1` wins, piped output stays plain, and ANSI wrappers never shift alignment (`v0.11.1`)
 - [x] Daily journal `today`: explicit `ck today init` / `ck today migrate`, reserved name, lazy local-midnight rollover that deletes completed `[x]` tasks (no `HISTORY.md`) and carries open/focused tasks, dated locale-aware `ck today st` header, and `save` / `log` refusals (`v0.12.0`)
+- [x] Daily view simplified: `ck today`, `ck today st`, and `ck today list` are byte-identical flat lists with the dated header, no progress / CURRENT FOCUS / WORK CONTEXT / Skipped / Backlog; non-daily spaces keep the full status view (`v0.12.1`)
 
 ---
 
@@ -1364,9 +1368,13 @@ project, not a space.` и завершается с кодом 1 — без `.lo
 ck today init
 ```
 
-После инициализации `ck today st` показывает задачи дня с заголовком,
-содержащим дату (`## Current Sprint (2026-11-04, Среда)`; день недели
-зависит от локали). `ck today` без подкоманды — сокращение для `ck today st`.
+**Вывод.** `ck today`, `ck today st` и `ck today list` для ежедневных
+пространств выводят байт-в-байт одно и то же: плоский список задач с
+датированным заголовком (`## Current Sprint (2026-11-04, Среда)`; день недели
+зависит от локали). Здесь нет прогресс-бара, `CURRENT FOCUS`, `WORK CONTEXT`,
+блока Skipped / Backlog — ежедневный журнал это просто список. Заметки
+показываются под соответствующими задачами. Остальные пространства (`todo`,
+`local`, `remote`, кастомные) сохраняют полный статус для `st`.
 Дата хранится только в `~/.config/ck/state.json` в поле `today_date`; сам
 Markdown-файл сохраняет обычный заголовок `## Current Sprint`.
 
@@ -1966,3 +1974,4 @@ CK_DEBUG=1 ./ck-dev add "traced"    # или: ./ck-dev -v add "traced"
 - [x] `ck help <команда>` (или `ck <команда> --help`) печатает встроенную помощь argparse по команде; однострочник о неизвестной команде (0.9.2) и `ck -v` не изменились (`v0.11.0`)
 - [x] Цветной `ck -h`: жирные бирюзовые заголовки групп, жирные зелёные имена команд и жирный баннер; описания нейтральны, `NO_COLOR=1` побеждает, перенаправленный вывод остаётся без ANSI, а обёртки не смещают выравнивание (`v0.11.1`)
 - [x] Ежедневный журнал `today`: явные `ck today init` / `ck today migrate`, зарезервированное имя, ленивый перекат в локальную полночь с удалением завершённых `[x]` задач (без `HISTORY.md`) и сохранением открытых/сфокусированных, датированный заголовок `ck today st` с локалью и запрет `save` / `log` (`v0.12.0`)
+- [x] Упрощённый ежедневный вид: `ck today`, `ck today st` и `ck today list` выводят байт-в-байт одинаковый плоский список с датированным заголовком, без progress / CURRENT FOCUS / WORK CONTEXT / Skipped / Backlog; остальные пространства сохраняют полный статус (`v0.12.1`)

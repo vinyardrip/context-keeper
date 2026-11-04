@@ -592,6 +592,17 @@ def write_space_order(order: list[str]) -> None:
 TODAY_DATE_KEY = "today_date"
 
 
+def daily_date_key(space: str) -> str:
+    """Global-state key that stores a daily space's current date.
+
+    ``today`` keeps the historical ``today_date`` key; future daily
+    spaces use ``<name>_date``.
+    """
+    if space == config.SPACE_TODAY:
+        return TODAY_DATE_KEY
+    return f"{space}_date"
+
+
 def _update_global_state(mutator) -> None:
     """Read-modify-write the global state under its fail-closed lock.
 
@@ -610,8 +621,17 @@ def _update_global_state(mutator) -> None:
 
 
 def read_today_date() -> Optional[str]:
-    """The active daily journal date (``YYYY-MM-DD``), or None."""
-    value = _read_global_state_dict().get(TODAY_DATE_KEY)
+    """The active ``today`` journal date (``YYYY-MM-DD``), or None."""
+    return read_daily_date(config.SPACE_TODAY)
+
+
+def read_daily_date(space: str) -> Optional[str]:
+    """The active date of any daily space (``YYYY-MM-DD``), or None.
+
+    Reads the global state under the space's :func:`daily_date_key`
+    (``today_date`` for ``today``, ``<name>_date`` otherwise).
+    """
+    value = _read_global_state_dict().get(daily_date_key(space))
     if isinstance(value, str) and value.strip():
         return value.strip()
     return None
@@ -654,8 +674,9 @@ def daily_section_header(date_str: str) -> str:
 
     The weekday is locale-aware (``strftime('%A')``); when the platform
     cannot format it, the ISO weekday number is used as a stable
-    fallback. Only the rendered ``ck today st`` header carries this
-    suffix — the underlying Markdown keeps plain ``## Current Sprint``.
+    fallback. Both rendered daily views (``list`` and ``st``) carry
+    this suffix — the underlying Markdown keeps plain
+    ``## Current Sprint``.
     """
     weekday = ""
     try:
@@ -1505,8 +1526,26 @@ class SpaceManager:
                 * Note: process note text
             ## Completed
             [x] 3. done task
+
+        DAILY spaces (``today``) render a FLAT list instead: the badge
+        line is omitted and the first section header carries the date
+        (see :meth:`status`, which returns this same output).
         """
         tl = self.load()
+        notes = self._all_note_entries()
+
+        if self.space in DAILY_SPACES:
+            date_str = read_daily_date(self.space)
+            header = daily_section_header(date_str) if date_str else None
+            if not tl.tasks:
+                hint = (f"No tasks. Add one with "
+                        f"`ck {self.space} add <text>`.")
+                return f"{header}\n{hint}" if header else hint
+            # Imported lazily: core imports this module at load time.
+            from .core import _render_tasks_listing
+            return _render_tasks_listing(
+                tl, notes, first_header=header)
+
         header = f"[{self.space}] {len(tl.done)}/{tl.total} done"
         if not tl.tasks:
             return (
@@ -1518,41 +1557,30 @@ class SpaceManager:
         from .core import _render_tasks_listing
         return (
             f"{header}\n"
-            f"{_render_tasks_listing(tl, self._all_note_entries())}"
+            f"{_render_tasks_listing(tl, notes)}"
         )
 
     def status(self) -> str:
         """Render the detailed status view for the space.
 
-        Uses the SAME renderer as the project ``ck st``
-        (``cklib.core._render_local_status``), so a space
-        status is laid out exactly like a project status:
-        the header bar, the `` > NAME [v<version>]`` line,
-        the ``[%] Progress:`` line, the ``-> CURRENT FOCUS:``
-        block with its process note, and the full
-        ``WORK CONTEXT`` (``<< Done`` / ``[!] Skipped`` /
-        ``[>] Focus`` / ``[>] Next`` / ``>> Upcoming`` /
-        ``Unfocused / Paused Context`` / ``>> Backlog``).
+        For NON-daily spaces this uses the SAME renderer as the project
+        ``ck st`` (``cklib.core._render_local_status``): header bar,
+        `` > NAME [v<version>]`` line, ``[%] Progress:`` line, the
+        ``-> CURRENT FOCUS:`` block, and the full ``WORK CONTEXT``
+        (``<< Done`` / ``[!] Skipped`` / ``[>] Focus`` / ``[>] Next`` /
+        ``>> Upcoming`` / ``Unfocused / Paused Context`` /
+        ``>> Backlog``).
 
-        The only space-specific adaptation is the data
-        source: :class:`_SpaceKeeperView` supplies the
-        space's display name, the note bound to the focused
-        task (from the JSON sidecar), and the space's
-        paused ledger (open, noted, non-focused tasks —
-        the analogue of the project's paused registry).
+        DAILY spaces are journals, not project dashboards:
+        ``status`` is an exact alias of :meth:`list_tasks` —
+        a flat task list under the dated header, with every note inline.
         """
+        if self.space in DAILY_SPACES:
+            return self.list_tasks()
         # Imported lazily: core imports this module at load time.
         from .core import _render_local_status
-        rendered = _render_local_status(
+        return _render_local_status(
             _SpaceKeeperView(self), self.load())
-        if self.space in DAILY_SPACES:
-            date_str = read_today_date()
-            if date_str:
-                # The date is METADATA: only the rendered status carries
-                # it; the journal file keeps plain ``## Current Sprint``.
-                rendered = (
-                    daily_section_header(date_str) + "\n" + rendered)
-        return rendered
 
     def notes(self) -> str:
         """Render all active process notes for the space.
@@ -1945,6 +1973,8 @@ __all__ = [
     "TODAY_DATE_KEY",
     "read_space_order",
     "write_space_order",
+    "daily_date_key",
+    "read_daily_date",
     "read_today_date",
     "set_today_date",
     "clear_today_date",

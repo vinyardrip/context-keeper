@@ -1,6 +1,6 @@
 # ROADMAP / PLAN
 
-Current version: v0.12.0
+Current version: v0.12.1
 
 ## Backlog
 - [x] Инициализировать базовую структуру проекта (.ck/)
@@ -63,6 +63,12 @@ Current version: v0.12.0
 - [ ] сделать линкованные задачи(одинаковые для link projects/spaces) при связи - пишем в одном проекте, дописываются в связанные(хостингом, пример закрыть уязвимость, действия одинаковые, задачи тоже)
 
 ## Completed
+
+### v0.12.1
+- [x] `ck today`, `ck today st` и `ck today list` выводят байт-в-байт одинаковый плоский список: датированный заголовок `## Current Sprint (YYYY-MM-DD, <weekday>)`, задачи и заметки, без progress / CURRENT FOCUS / WORK CONTEXT / Skipped / Backlog (`v0.12.1`)
+- [x] Голый `ck today` маршрутизируется в `list`; не-ежедневные пространства не изменились: `st` — полный дашборд, `list` — обычный список без даты (`v0.12.1`)
+- [x] Дата берётся из `state.json` (`today_date`, для будущих ежедневных пространств `<name>_date`); заголовок остаётся датированным и в `list`, и в `st` (`v0.12.1`)
+- [x] README (EN+RU), `tests/test_today.py` и проверки версии обновлены; 39 тестов ежедневного журнала (`v0.12.1`)
 
 ### v0.12.0
 - [x] Ежедневный журнал `today`: зарезервированное имя и `DAILY_SPACES = {"today"}`; `ck today init` создаёт файл, `today_date` и место в `spaces_order`, `ck today migrate [--name <new>]` переименовывает старый `today` (по умолчанию в `todo`) (`v0.12.0`)

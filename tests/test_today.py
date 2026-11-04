@@ -1,4 +1,4 @@
-"""Tests for the v0.12.0 daily journal space ``today``.
+"""Tests for the daily journal space ``today`` (v0.12.0, v0.12.1).
 
 Covered surface:
 
@@ -8,6 +8,8 @@ Covered surface:
 - lazy local-midnight rollover: completed tasks are deleted, open and
   focused tasks are carried over, notes follow the re-indexing;
 - the bare ``ck today`` shortcut and the dated status header;
+- v0.12.1: ``today`` / ``st`` / ``list`` are one flat dated list with
+  no dashboard sections, while non-daily spaces keep the full view;
 - ``save`` / ``log`` refusals for daily spaces.
 """
 
@@ -23,7 +25,7 @@ import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -124,6 +126,12 @@ class _TodayHome(unittest.TestCase):
     def add(self, *titles: str) -> None:
         for title in titles:
             code, out, _ = _run_main(["today", "add", title])
+            self.assertEqual(code, 0, out)
+
+    def make_space(self, name: str, *titles: str) -> None:
+        spaces.create_space(name)
+        for title in titles:
+            code, out, _ = _run_main([name, "add", title])
             self.assertEqual(code, 0, out)
 
     def set_yesterday(self) -> str:
@@ -439,16 +447,42 @@ class TestTodaySurface(_TodayHome):
         self.assertIn(
             "[err] 'log' is not available for daily spaces.", out)
 
-    def test_bare_today_is_the_status_shortcut(self):
+    def test_bare_today_is_the_list_shortcut(self):
         self.init_today()
         self.add("first task")
 
         code_bare, out_bare, _ = _run_main(["today"])
-        code_st, out_st, _ = _run_main(["today", "st"])
+        code_list, out_list, _ = _run_main(["today", "list"])
 
         self.assertEqual(code_bare, 0, out_bare)
+        self.assertEqual(code_list, 0, out_list)
+        self.assertEqual(out_bare, out_list)
+
+    def test_list_header_carries_date_and_weekday(self):
+        self.init_today()
+        self.add("task A", "task C")
+
+        code, out, _ = _run_main(["today", "list"])
+
+        self.assertEqual(code, 0, out)
+        first = out.splitlines()[0]
+        today = self.state()["today_date"]
+        expected_weekday = datetime.strptime(
+            today, "%Y-%m-%d").strftime("%A")
+        self.assertEqual(
+            first, f"## Current Sprint ({today}, {expected_weekday})")
+
+    def test_st_equals_list_byte_for_byte(self):
+        self.init_today()
+        self.add("task A", "task C")
+        _run_main(["today", "focus", "2"])
+
+        code_list, out_list, _ = _run_main(["today", "list"])
+        code_st, out_st, _ = _run_main(["today", "st"])
+
+        self.assertEqual(code_list, 0, out_list)
         self.assertEqual(code_st, 0, out_st)
-        self.assertEqual(out_bare, out_st)
+        self.assertEqual(out_st, out_list)
 
     def test_status_header_carries_date_and_weekday(self):
         self.init_today()
@@ -464,6 +498,51 @@ class TestTodaySurface(_TodayHome):
         weekday = first[len(f"## Current Sprint ({today}, "):-1]
         self.assertTrue(weekday.strip())
 
+    def test_status_has_no_dashboard_sections(self):
+        self.init_today()
+        self.add("task A", "task C")
+        _run_main(["today", "focus", "2"])
+
+        code, out, _ = _run_main(["today", "st"])
+
+        self.assertEqual(code, 0, out)
+        for marker in ("Progress:", "CURRENT FOCUS", "WORK CONTEXT",
+                       "Skipped", "Backlog"):
+            self.assertNotIn(marker, out)
+
+    def test_list_renders_notes_inline_like_local(self):
+        self.init_today()
+        self.add("task A")
+        _run_main(["today", "note", "1", "first thought"])
+        _run_main(["today", "note", "1", "second thought"])
+
+        code, out, _ = _run_main(["today", "list"])
+
+        self.assertEqual(code, 0, out)
+        lines = out.splitlines()
+        task_index = lines.index("[ ] 1. task A")
+        self.assertTrue(lines[task_index + 1].startswith("    * Note ("),
+                        lines[task_index + 1])
+        self.assertIn("first thought", lines[task_index + 1])
+        self.assertIn("second thought", lines[task_index + 2])
+
+    def test_rollover_message_prints_above_the_flat_list(self):
+        self.init_today()
+        self.add("finished", "carried")
+        _run_main(["today", "done", "1"])
+        self.set_yesterday()
+
+        code, out, _ = _run_main(["today", "st"])
+
+        self.assertEqual(code, 0, out)
+        lines = out.splitlines()
+        self.assertTrue(lines[0].startswith("[ok] Rolled over"), lines[0])
+        self.assertTrue(
+            lines[1].startswith("## Current Sprint ("), lines[1])
+        self.assertIn("[ ] 1. carried", out)
+        self.assertNotIn("WORK CONTEXT", out)
+        self.assertNotIn("Progress:", out)
+
     def test_status_file_keeps_plain_header(self):
         self.init_today()
         _run_main(["today", "st"])
@@ -478,6 +557,32 @@ class TestTodaySurface(_TodayHome):
         self.assertEqual(code, 1, out)
         self.assertIn("Daily space 'today' is not initialized.", out)
         self.assertIn("ck today init", out)
+
+
+class TestNonDailySpaceView(_TodayHome):
+    """Non-daily spaces keep the full dashboard / plain list (v0.12.1)."""
+
+    def test_todo_st_keeps_full_dashboard(self):
+        self.make_space("todo", "regression task")
+        _run_main(["todo", "focus", "1"])
+
+        code, out, _ = _run_main(["todo", "st"])
+
+        self.assertEqual(code, 0, out)
+        self.assertIn("WORK CONTEXT", out)
+        self.assertIn("CURRENT FOCUS", out)
+        self.assertIn("Progress:", out)
+
+    def test_todo_list_keeps_plain_header(self):
+        self.make_space("todo", "regression task")
+
+        code, out, _ = _run_main(["todo", "list"])
+
+        self.assertEqual(code, 0, out)
+        lines = out.splitlines()
+        self.assertEqual(lines[0], "[todo] 0/1 done")
+        self.assertEqual(lines[1], "## Current Sprint")
+        self.assertNotIn("## Current Sprint (", out)
 
 
 if __name__ == "__main__":

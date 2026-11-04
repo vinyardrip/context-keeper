@@ -4409,7 +4409,8 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
 
 def _render_tasks_listing(tl: TaskList,
                           notes: Optional[dict[int, str]] = None,
-                          project_label: Optional[str] = None) -> str:
+                          project_label: Optional[str] = None,
+                          first_header: Optional[str] = None) -> str:
     """Render the local task list for ``ck list`` (STDOUT output).
 
     Format (grep/cut-friendly, no editor involved):
@@ -4439,6 +4440,11 @@ def _render_tasks_listing(tl: TaskList,
     so a listing resolved from OUTSIDE the project directory still
     says which project it belongs to. Only the first header carries
     the label; later sections would just repeat it.
+
+    ``first_header`` (optional) fully replaces the FIRST section
+    header — daily journals pass their dated
+    ``## Current Sprint (YYYY-MM-DD, <weekday>)`` line. Later
+    sections (``## Completed``) keep their plain names.
     """
     if not tl.tasks:
         return "No tasks. Add one with `ck add <text>`."
@@ -4450,8 +4456,11 @@ def _render_tasks_listing(tl: TaskList,
         if t.section and t.section != current_section:
             header = f"## {t.section}"
             # ``lines`` is empty only while rendering the FIRST
-            # header, so the project label lands exactly once.
-            if project_label and not lines:
+            # header, so the project label / daily date lands
+            # exactly once.
+            if first_header and not lines:
+                header = first_header
+            elif project_label and not lines:
                 header = f"{header} ({project_label})"
             lines.append(header)
             current_section = t.section
