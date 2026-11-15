@@ -55,6 +55,33 @@ LEGACY_STATE_FILENAME = "state.json"
 COMPLETED_SECTION_TITLE = "completed"
 SPRINT_SECTION_TITLE = "current sprint"
 
+
+def stored_schema_version(ck: Path):
+    """The ``.ck/`` directory's stored schema version, or None.
+
+    Resolution order: the ``version`` file (single line), then
+    ``meta.json``'s ``schema_version`` key. None means the project
+    predates the split layout. Shared by the batch migration so the
+    "already migrated" test can never drift from the migration's own
+    check.
+    """
+    vfile = ck / VERSION_FILENAME
+    try:
+        if vfile.is_file():
+            text = vfile.read_text(encoding="utf-8").strip()
+            if text:
+                return text
+        mfile = ck / META_FILENAME
+        if mfile.is_file():
+            data = json.loads(mfile.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                value = data.get("schema_version")
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+    except (OSError, ValueError):
+        return None
+    return None
+
 # ``##`` and deeper headings (the h1 document title is never touched).
 _HEADER_RE = re.compile(r"^(#{2,6})\s")
 
@@ -459,22 +486,7 @@ class MigrateV012ToV013(Migration):
     @staticmethod
     def _stored_version(ck: Path):
         """The project's stored schema version, or None."""
-        vfile = ck / VERSION_FILENAME
-        try:
-            if vfile.is_file():
-                text = vfile.read_text(encoding="utf-8").strip()
-                if text:
-                    return text
-            mfile = ck / META_FILENAME
-            if mfile.is_file():
-                data = json.loads(mfile.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    value = data.get("schema_version")
-                    if isinstance(value, str) and value.strip():
-                        return value.strip()
-        except (OSError, ValueError):
-            return None
-        return None
+        return stored_schema_version(ck)
 
     @staticmethod
     def _read_state(ck: Path) -> dict:

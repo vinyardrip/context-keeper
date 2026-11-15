@@ -98,6 +98,12 @@ _HELP_GROUPS: List[tuple] = [
         ("init [--register]", "Initialize a project locally"),
         ("migrate [--apply]", "Upgrade a legacy project to v0.13.0 "
                               "(dry-run by default)"),
+        ("migrate --spaces [--apply]",
+         "Migrate global spaces to the v0.13 format (dry-run by "
+         "default)"),
+        ("migrate --all [--apply]",
+         "Migrate spaces + every registered project (dry-run by "
+         "default)"),
         ("register", "Add project to global registry"),
         ("unregister", "Remove project from registry"),
         ("prune", "Purge missing projects"),
@@ -296,6 +302,16 @@ def build_parser() -> "argparse.ArgumentParser":
         "--dry-run", dest="dry_run", action="store_true",
         help="Preview only (the default; mutually exclusive with "
              "--apply)",
+    )
+    p_migrate.add_argument(
+        "--spaces", action="store_true",
+        help="Migrate the GLOBAL spaces (~/.config/ck/spaces/) to the "
+             "v0.13 format instead of the current project",
+    )
+    p_migrate.add_argument(
+        "--all", action="store_true",
+        help="Migrate the global spaces AND every project registered "
+             "in projects.json",
     )
     p_migrate.add_argument(
         "-y", "--yes", dest="assume_yes", action="store_true",
@@ -616,7 +632,8 @@ _LEGACY_FLAGS: dict[str, frozenset] = {
     "register": frozenset({"-n", "--name", "--path"}),
     "unregister": frozenset({"--path"}),
     "prune": frozenset(),
-    "migrate": frozenset({"--apply", "--dry-run", "-y", "--yes"}),
+    "migrate": frozenset({"--apply", "--dry-run", "-y", "--yes",
+                          "--spaces", "--all"}),
     "local": frozenset(),
     "remote": frozenset(),
     "today": frozenset(),
@@ -884,7 +901,16 @@ def _run_migrate(ck: ContextKeeper, args) -> int:
     the whole ``.ck/`` directory. Errors are logged to
     ``.ck/migrate.log`` by the migration itself; the CLI maps them
     to exit code 1.
+
+    ``--spaces`` / ``--all`` switch to the BATCH flows: global spaces
+    and/or every registered project (see :func:`_run_batch_migrate`).
     """
+    if getattr(args, "all", False) or getattr(args, "spaces", False):
+        return _run_batch_migrate(
+            apply=bool(getattr(args, "apply", False)),
+            spaces_only=bool(getattr(args, "spaces", False))
+            and not getattr(args, "all", False),
+        )
     apply = bool(getattr(args, "apply", False))
     try:
         result = ck.migrate(dry_run=not apply)
@@ -903,6 +929,37 @@ def _run_migrate(ck: ContextKeeper, args) -> int:
     if not result.applied and not result.dry_run:
         return 1
     return 0
+
+
+def _run_batch_migrate(*, apply: bool, spaces_only: bool) -> int:
+    """Run ``ck migrate --spaces`` / ``--all`` (batch migrations).
+
+    ``--spaces`` migrates ONLY the global spaces;
+    ``--all`` migrates the spaces FIRST, then every project
+    registered in ``~/.config/ck/projects.json``. Both default to a
+    dry-run preview; ``--apply`` writes (spaces get a
+    ``spaces_backup_<tag>/`` backup, projects their
+    ``.ck_backup_<version>/``). A failing project is reported and the
+    batch continues; the exit code is non-zero when anything failed.
+    """
+    from .migrations import migrate_all_projects, migrate_spaces
+
+    dry_run = not apply
+    spaces_result = migrate_spaces(dry_run=dry_run)
+    for line in spaces_result.messages:
+        print(line)
+    for line in spaces_result.errors:
+        _print_error(line)
+    rc = 1 if spaces_result.errors else 0
+    if spaces_only:
+        return rc
+
+    batch = migrate_all_projects(dry_run=dry_run)
+    for line in batch.messages:
+        print(line)
+    for line in batch.errors:
+        _print_error(line)
+    return 1 if (rc or batch.errors) else 0
 
 
 def _print_focus_result(result) -> None:
@@ -2129,6 +2186,18 @@ def _legacy_dispatch(raw: List[str]) -> int:
             return _run_start_like(
                 ck, "focus", tid, no_input=no_input, assume_yes=assume_yes)
         elif cmd == "migrate":
+            spaces_only = "--spaces" in rest
+            batch_all = "--all" in rest
+            if spaces_only or batch_all:
+                apply = "--apply" in rest or "-y" in rest or "--yes" in rest
+                dry_run = "--dry-run" in rest
+                if apply and dry_run:
+                    _print_error(
+                        "ERROR: `--apply` and `--dry-run` are mutually "
+                        "exclusive.")
+                    return 2
+                return _run_batch_migrate(
+                    apply=apply, spaces_only=spaces_only and not batch_all)
             apply = "--apply" in rest or "-y" in rest or "--yes" in rest
             dry_run = "--dry-run" in rest
             if apply and dry_run:

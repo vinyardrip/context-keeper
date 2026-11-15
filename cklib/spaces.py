@@ -1467,33 +1467,67 @@ class SpaceManager:
         self._write_state(state)
 
     def _all_note_entries(self) -> dict[int, list[dict]]:
-        """All task note entries in the space's sidecar (valid entries).
+        """All task note entries visible in the space (valid entries).
 
         Keys are task IDs (ints); values are ordered ``{"text",
-        "created"}`` arrays. Orphaned notes (task since removed) are
-        harmless: the list renderer only looks up IDs the plan still
-        has.
+        "created"}`` arrays. Two sources merge here:
+
+        - the JSON sidecar ledger (the runtime store ``ck <space>
+          note`` appends to);
+        - the task nodes' INLINE ``* Note`` entries in the space
+          Markdown — the v0.13 shape the spaces migration writes
+          (sidecar notes moved into the file, sidecar retired). A
+          migrated space therefore renders and archives its notes
+          exactly like a v0.13 project plan.
+
+        Inline entries come FIRST (they predate any sidecar note
+        written after the migration) and same-text duplicates from
+        the sidecar are skipped. Orphaned notes (task since removed)
+        are harmless: the list renderer only looks up IDs the plan
+        still has.
         """
         raw = self._read_state().get("notes")
-        if not isinstance(raw, dict):
-            return {}
         out: dict[int, list[dict]] = {}
-        for key, value in raw.items():
-            try:
-                tid = int(key)
-            except (TypeError, ValueError):
+        if isinstance(raw, dict):
+            for key, value in raw.items():
+                try:
+                    tid = int(key)
+                except (TypeError, ValueError):
+                    continue
+                entries = [
+                    {"text": item["text"], "created": item["created"]}
+                    for item in value
+                    if isinstance(item, dict)
+                    and isinstance(item.get("text"), str)
+                    and item.get("text")
+                    and isinstance(item.get("created"), str)
+                    and item.get("created")
+                ] if isinstance(value, list) else []
+                if entries:
+                    out[tid] = entries
+        try:
+            tasks = self.load().tasks
+        except (OSError, ValueError):
+            tasks = []
+        for task in tasks:
+            inline = [
+                {"text": entry.get("text"), "created": entry.get("created", "")}
+                for entry in (task.notes or ())
+                if isinstance(entry, dict)
+                and isinstance(entry.get("text"), str)
+                and entry.get("text").strip()
+            ]
+            if not inline:
                 continue
-            entries = [
-                {"text": item["text"], "created": item["created"]}
-                for item in value
-                if isinstance(item, dict)
-                and isinstance(item.get("text"), str)
-                and item.get("text")
-                and isinstance(item.get("created"), str)
-                and item.get("created")
-            ] if isinstance(value, list) else []
-            if entries:
-                out[tid] = entries
+            # Inline entries predate any sidecar note added after the
+            # migration: they lead, sidecar-only texts append.
+            merged = [dict(entry) for entry in inline]
+            seen = {entry["text"] for entry in merged}
+            for entry in out.get(task.id, []):
+                if entry["text"] not in seen:
+                    merged.append(entry)
+                    seen.add(entry["text"])
+            out[task.id] = merged
         return out
 
     def _all_notes(self) -> dict[int, str]:

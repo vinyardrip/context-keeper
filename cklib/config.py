@@ -236,6 +236,9 @@ This project uses Context Keeper (ck) as its memory layer.
 - Do not edit `.ck/PLAN.md` by hand when a command exists:
   use `ck add <text>`, `ck done <ID>`, `ck focus <ID>`,
   `ck note <ID> <text>`.
+- Global spaces (`~/.config/ck/spaces/<name>.md`, including the daily
+  `today` journal) are also managed via ck: `ck <space> <command>`,
+  e.g. `ck todo add <text>`, `ck today done 1`.
 - Completed work is recorded automatically; do not write `[x]`
   lines into `.ck/PLAN.md`.
 """

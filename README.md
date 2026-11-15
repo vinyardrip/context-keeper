@@ -139,6 +139,8 @@ ck -v    # → ck version 0.13.0
 | ck init | Initialize the project locally (.ck/ structure and gitignore rules); does not touch the global registry |
 | ck init --register | Initialize locally and register the project in `~/.config/ck/projects.json` |
 | ck migrate [--apply] | One-time upgrade of a pre-0.13 project (the `.ck/state.json` monolith) to the split layout. Default is a DRY-RUN preview (`Dry run: nothing written. Re-run with --apply.`); `--apply` backs the whole `.ck/` up to `.ck_backup_<version>/`, moves completed `[x]` rows into HISTORY.md, stamps every task with a stable UUID, inlines the legacy `state.json` notes beneath their tasks, creates `JOURNAL.md` / `version` / `meta.json` / `links.json` / `AGENTS.md` and deletes `state.json`. Write commands on an unmigrated project refuse with `Run `ck migrate` to upgrade it, then retry.` |
+| ck migrate --spaces [--apply] | Batch-upgrade ALL global spaces in `~/.config/ck/spaces/` to the v0.13 inline-note format (same engine as the project migration). Default is a DRY-RUN plan (`Spaces migration plan for <dir> (schema -> v0.13):` with one `- <name>: …` line per space); `--apply` copies the spaces directory to `~/.config/ck/spaces_backup_0.13.1/` first, then per REGULAR space: completed `[x]` rows move into `<name>.HISTORY.md` as dated `<!-- id: uuid -->` ledger entries (sidecar notes travel beneath), every remaining task is stamped with a UUID, and the `<name>.json` note sidecar is inlined beneath its tasks and deleted. DAILY spaces (`today.md`) keep NO history: their completed rows are deleted permanently, exactly like the midnight rollover |
+| ck migrate --all [--apply] | The `--spaces` migration PLUS every project registered in `~/.config/ck/projects.json` (spaces first, then the projects in registry order). Prints a per-project summary — `[ok] Project <name>: migrated`, `[!] Project <name>: already at v0.13.0`, `[!] Project <name>: path missing, skipped (<path>)` — and one failing project never aborts the batch (the walk continues, exit 1 only when something failed). An empty registry answers `No registered projects; nothing to migrate.` |
 | ck add \<text\> | Add a new open task (inserted before `## Completed`). On a freshly initialized plan holding only the untouched `ck init` seed task (`Describe the first task` / `Описать первую задачу`), the seed is replaced in place instead of appending a second entry |
 | ck move \<ID\> \<pos\|top\|bottom\> | Move a PENDING/ACTIVE task (`[ ]` / `[>]`) to a 1-based position among the active tasks, or to the first/last slot. The other active tasks shift to close the gap; titles, status markers and the focus are left untouched |
 | ck swap \<ID1\> \<ID2\> | Exchange the positions of two active tasks |
@@ -724,6 +726,27 @@ pre-0.13 projects (notes inside the `.ck/state.json` monolith) are
 upgraded by `ck migrate --apply`, which inlines every note beneath its
 task (after backing the whole `.ck/` up). Read-only commands never
 rewrite the plan.
+
+**Global spaces and migration.** Spaces use the same inline-note
+format — their sidecar lives at `~/.config/ck/spaces/<name>.json`.
+Whole fleets of spaces and projects can be upgraded in one pass:
+
+```bash
+ck migrate --spaces --apply   # every space in ~/.config/ck/spaces/
+ck migrate --all --apply      # spaces + every registered project
+```
+
+`--spaces` moves each completed `[x]` row into `<name>.HISTORY.md`
+(dated ledger entry + UUID, notes travel beneath), stamps the remaining
+tasks with UUIDs, and inlines the `<name>.json` sidecar beneath its
+tasks before deleting it — after backing the whole spaces directory up
+to `~/.config/ck/spaces_backup_0.13.1/`. Daily spaces (`today.md`)
+keep no history, so their completed rows are deleted permanently,
+matching the midnight rollover. `--all` continues with every project in
+`~/.config/ck/projects.json`, printing a per-project `[ok]` / `[!]`
+summary; projects already at v0.13.0 are skipped and one failing
+project never aborts the batch. Both commands dry-run by default —
+add `--apply` to write.
 
 ### Switching focus
 
@@ -1720,6 +1743,28 @@ HISTORY.md несёт полную метку `(YYYY-MM-DD HH:MM UTC)`.
 `ck migrate --apply`, которая переносит каждую заметку под её задачу
 (предварительно бэкапя весь `.ck/`). Команды только для чтения никогда не
 перезаписывают план.
+
+**Глобальные пространства и миграция.** Пространства используют тот же
+инлайновый формат заметок — их sidecar лежит в
+`~/.config/ck/spaces/<name>.json`. Целый парк пространств и проектов
+обновляется за один проход:
+
+```bash
+ck migrate --spaces --apply   # все пространства из ~/.config/ck/spaces/
+ck migrate --all --apply      # пространства + все зарегистрированные проекты
+```
+
+`--spaces` переносит каждую завершённую строку `[x]` в
+`<name>.HISTORY.md` (запись реестра с датой и UUID, заметки следуют под
+ней), проставляет UUID оставшимся задачам, переносит заметки из sidecar
+`<name>.json` под задачи и удаляет sidecar — предварительно бэкапя весь
+каталог пространств в `~/.config/ck/spaces_backup_0.13.1/`. Ежедневные
+пространства (`today.md`) не ведут историю: их завершённые строки
+удаляются навсегда, как и при перекате в полночь. `--all` продолжает с
+каждым проектом из `~/.config/ck/projects.json` и печатает построчный
+итог `[ok]` / `[!]`; проекты, уже находящиеся на v0.13.0, пропускаются,
+а сбой одного проекта не прерывает пакет. Обе команды по умолчанию
+выполняют пробный прогон — добавьте `--apply`, чтобы записать изменения.
 
 ### Переключение фокуса
 
