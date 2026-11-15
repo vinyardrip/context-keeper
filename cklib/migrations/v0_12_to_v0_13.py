@@ -14,12 +14,22 @@ monolith) to the v0.13.0 split layout:
 - ``state.json``   — DELETED (its notes move into PLAN.md, its
   registry fields become obsolete).
 
+The plan is also standardized: a symlinked ``.ck/PLAN.md`` (the
+dev-mode ``.ck/PLAN.md -> ROADMAP.md`` link) is replaced by a REAL
+file first — the shared atomic-write helper resolves symlinks, so a
+write through the link would mutate the target instead. Legacy
+active sections (``## Backlog`` / ``## Active`` / custom) are
+merged into one ``## Current Sprint``, and every header left with
+an empty section (``### ...`` and the emptied ``## Completed``) is
+stripped afterwards.
+
 Safety contract: a full ``.ck_backup_<version>/`` copy of ``.ck/`` is
 written BEFORE any mutation, failures are logged to
 ``.ck/migrate.log``, and the dry-run preview is the default.
 """
 
 import json
+import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,11 +48,169 @@ from ..config import (
 )
 from ..models import TaskStatus, history_timestamp, new_task_uuid
 from ..notes import file_mtime_iso
-from ..parser import parse_plan_file, write_plan
+from ..parser import _atomic_write_text, parse_plan_file, render_plan
 from .base import Migration, MigrationResult
 
 LEGACY_STATE_FILENAME = "state.json"
 COMPLETED_SECTION_TITLE = "completed"
+SPRINT_SECTION_TITLE = "current sprint"
+
+# ``##`` and deeper headings (the h1 document title is never touched).
+_HEADER_RE = re.compile(r"^(#{2,6})\s")
+
+
+def _header_level(line: str) -> int:
+    """Markdown heading level (2..6), or 0 for non-heading lines."""
+    match = _HEADER_RE.match(line)
+    return len(match.group(1)) if match else 0
+
+
+def _header_title(line: str) -> str:
+    """The heading text, lowercased (``## Backlog`` -> ``backlog``)."""
+    return line.lstrip("#").strip().lower()
+
+
+def dereference_plan_symlink(plan_file: Path) -> bool:
+    """Replace a symlinked ``.ck/PLAN.md`` with a REAL file.
+
+    The dev-mode entry links ``.ck/PLAN.md -> ROADMAP.md``, and the
+    shared atomic-write helper deliberately RESOLVES symlinks (so
+    dotfile-managed plans keep their links). A migration writing
+    through that helper would therefore silently mutate the link
+    target — the root ``ROADMAP.md``. Migration owns ``.ck/PLAN.md``
+    exclusively: the linked content is materialized as a regular
+    file and the link is removed. The target file itself is never
+    opened for writing.
+
+    Returns True when a symlink was replaced.
+    """
+    if not plan_file.is_symlink():
+        return False
+    text = plan_file.read_text(encoding="utf-8")
+    plan_file.unlink()
+    plan_file.write_text(text, encoding="utf-8")
+    return True
+
+
+def _trim_blanks(lines: list[str]) -> list[str]:
+    """Copy of ``lines`` without leading/trailing blank lines."""
+    body = list(lines)
+    while body and not body[0].strip():
+        body.pop(0)
+    while body and not body[-1].strip():
+        body.pop()
+    return body
+
+
+def _tidy(lines: list[str]) -> str:
+    """Collapse blank runs, trim the edges, single trailing newline."""
+    out: list[str] = []
+    for line in lines:
+        if not line.strip() and (not out or not out[-1].strip()):
+            continue
+        out.append(line)
+    while out and not out[-1].strip():
+        out.pop()
+    return "\n".join(out) + ("\n" if out else "")
+
+
+def normalize_plan_layout(text: str) -> tuple[str, list[str]]:
+    """Merge every active section into one ``## Current Sprint``.
+
+    Roadmap-style legacy plans spread active work across several
+    sections (``## Backlog``, ``## Active``, custom ones). The v0.13
+    plan carries a single canonical sprint section, so the migration
+    folds every non-completed section into ``## Current Sprint``:
+
+    - all active task lines (and their inline notes / prose) keep
+      their original document order;
+    - a legacy ``## Current Sprint`` section (when present) comes
+      first and keeps the document's h1 / front matter;
+    - ``## Completed`` sections are preserved for the AST pass —
+      their ``[x]`` rows move into HISTORY.md and
+      :func:`strip_empty_headers` then removes the empty headers;
+    - when the legacy document has NO sprint section at all, the
+      front matter (``# title`` / prose before the first section) is
+      dropped: the link target (e.g. ``ROADMAP.md``) remains the
+      titled document and the plan becomes the derived working list
+      that starts with ``## Current Sprint``.
+
+    Returns ``(normalized_text, merged_titles)`` — the second value
+    lists the section titles folded into the sprint (empty when the
+    document needed no change).
+    """
+    lines = text.splitlines()
+    front: list[str] = []
+    blocks: list[list] = []  # [header_line, level, title, body]
+    current: list | None = None
+    for line in lines:
+        level = _header_level(line)
+        if level:
+            current = [line, level, _header_title(line), []]
+            blocks.append(current)
+        elif current is None:
+            front.append(line)
+        else:
+            current[3].append(line)
+
+    sprint: list | None = None
+    completed: list[list] = []
+    merged: list[list] = []
+    in_completed = False
+    for block in blocks:
+        _, level, title, _body = block
+        if level == 2:
+            in_completed = title == COMPLETED_SECTION_TITLE
+        if in_completed:
+            completed.append(block)
+        elif title == SPRINT_SECTION_TITLE:
+            sprint = block
+        else:
+            merged.append(block)
+
+    if sprint is None and not merged:
+        return text, []  # nothing to standardize
+
+    out: list[str] = []
+    if sprint is not None:
+        # Regular legacy plan: keep the document title / front prose.
+        out.extend(_trim_blanks(front))
+    out.append("## Current Sprint")
+    for block in ([sprint] if sprint is not None else []) + merged:
+        # Bodies concatenate without separators: a blank between two
+        # task rows would split the sprint list, and the folded
+        # sections form one flat working list.
+        out.extend(_trim_blanks(block[3]))
+    for block in completed:
+        if out and out[-1].strip():
+            out.append("")
+        out.append(block[0])
+        out.extend(block[3])
+    return _tidy(out), [block[2] for block in merged]
+
+
+def strip_empty_headers(text: str) -> str:
+    """Drop headings whose section carries no content lines.
+
+    After the completed tasks graduate into HISTORY.md, their headers
+    would remain as empty scaffolding. Every heading of level >= 3
+    (``###`` and deeper) is removed when its section holds nothing
+    but blank lines; a level-2 heading is removed only when it is the
+    ``## Completed`` section. The canonical ``## Current Sprint``
+    scaffold is kept even when empty, so ``ck add`` always has a
+    home. Blank-line runs are collapsed.
+    """
+    lines = text.splitlines()
+    idxs = [i for i, ln in enumerate(lines) if _header_level(ln)]
+    drop: set[int] = set()
+    for n, i in enumerate(idxs):
+        end = idxs[n + 1] if n + 1 < len(idxs) else len(lines)
+        if any(ln.strip() for ln in lines[i + 1:end]):
+            continue  # section still has content
+        level = _header_level(lines[i])
+        if level >= 3 or _header_title(lines[i]) == COMPLETED_SECTION_TITLE:
+            drop.add(i)
+    return _tidy([ln for i, ln in enumerate(lines) if i not in drop])
 
 
 class MigrateV012ToV013(Migration):
@@ -64,11 +232,15 @@ class MigrateV012ToV013(Migration):
             return result
 
         found = self._stored_version(ck)
-        if found == VERSION:
+        if found == VERSION and not plan_file.is_symlink():
             result.say(
                 f"Project is already at v{VERSION}; nothing to migrate.")
             result.applied = True
             return result
+        if found == VERSION and plan_file.is_symlink():
+            result.say(
+                f"Project is at v{VERSION}, but {plan_file} is still "
+                "a symlink; healing it into a real file.")
 
         try:
             tl = parse_plan_file(plan_file)
@@ -95,6 +267,21 @@ class MigrateV012ToV013(Migration):
         result.say(
             f"  - inline {note_count} legacy process note(s) from "
             "state.json into PLAN.md")
+        if plan_file.is_symlink():
+            result.say(
+                "  - replace the .ck/PLAN.md symlink with a REAL file "
+                f"({plan_file.resolve().name} stays untouched)")
+        try:
+            raw = plan_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            raw = ""
+        _normalized, merged_titles = normalize_plan_layout(raw)
+        if merged_titles:
+            listing = ", ".join(f"## {t.title()}" for t in merged_titles)
+            result.say(
+                f"  - merge {listing} into one '## Current Sprint' "
+                "section")
+        result.say("  - strip empty headers left behind in PLAN.md")
         result.say(
             f"  - create {JOURNAL_FILENAME} / {VERSION_FILENAME} / "
             f"{META_FILENAME} / {LINKS_FILENAME} / {AGENTS_FILENAME}")
@@ -135,6 +322,50 @@ class MigrateV012ToV013(Migration):
             return
 
         ts = history_timestamp()
+
+        plan_file = ck / "PLAN.md"
+
+        # 1b) Materialize a symlinked PLAN.md BEFORE any mutation:
+        #     the shared atomic-write helper resolves symlinks (so
+        #     dotfile-managed plans keep their links), which would
+        #     silently redirect every migration write into the link
+        #     target (the root ROADMAP.md). Migration owns the plan
+        #     path: link -> real file, target never written to.
+        try:
+            if dereference_plan_symlink(plan_file):
+                result.say(
+                    "PLAN.md: symlink replaced with a real file "
+                    "(the link target was not modified).")
+        except OSError as exc:
+            message = f"PLAN.md dereference failed: {exc}"
+            result.fail(message)
+            log_lines.append(message)
+            self._write_log(ck, log_lines)
+            return
+
+        # 1c) Standardize the layout: fold the legacy active sections
+        #     (Backlog / Active / custom) into one Current Sprint.
+        try:
+            raw = plan_file.read_text(encoding="utf-8")
+            normalized, merged_titles = normalize_plan_layout(raw)
+            if normalized != raw:
+                _atomic_write_text(plan_file, normalized)
+                if merged_titles:
+                    listing = ", ".join(
+                        f"## {t.title()}" for t in merged_titles)
+                    result.say(
+                        f"PLAN.md: merged {listing} into "
+                        "'## Current Sprint'.")
+                else:
+                    result.say(
+                        "PLAN.md: layout normalized to "
+                        "'## Current Sprint'.")
+        except (OSError, ValueError, UnicodeDecodeError) as exc:
+            message = f"PLAN.md normalization failed: {exc}"
+            result.fail(message)
+            log_lines.append(message)
+            self._write_log(ck, log_lines)
+            return
 
         try:
             tl = parse_plan_file(ck / "PLAN.md")
@@ -363,32 +594,22 @@ class MigrateV012ToV013(Migration):
 
     @staticmethod
     def _finalize_plan(plan_file: Path, tl) -> None:
-        """Write PLAN.md: no ``[x]`` rows, no empty ``## Completed``.
+        """Write PLAN.md: no ``[x]`` rows, no empty headers.
 
         Completed tasks are dropped (their content lives in
-        HISTORY.md now) and a ``## Completed`` header whose section
-        is left empty disappears with its section.
+        HISTORY.md now); :func:`strip_empty_headers` then removes
+        any heading left with an empty section (``### ...`` and the
+        emptied ``## Completed``) while the canonical ``## Current
+        Sprint`` scaffold survives for ``ck add``.
         """
         if tl is None:
             raise ValueError("Plan AST missing; cannot rewrite PLAN.md")
 
-        completed_headers = [
-            s.line_number for s in tl.sections
-            if s.title.strip().lower() == COMPLETED_SECTION_TITLE
-        ]
         done = [t for t in tl.tasks if t.status == TaskStatus.DONE]
         for task in done:
             tl.delete(task.id)
-        # Drop a Completed header whose section is now empty.
-        remaining_in_section = {
-            t.line_number for t in tl.tasks
-            if (t.section or "").strip().lower()
-            == COMPLETED_SECTION_TITLE
-        }
-        if not remaining_in_section:
-            for header_line in completed_headers:
-                tl.removed_lines.add(header_line)
-        write_plan(plan_file, tl)
+        text = strip_empty_headers(render_plan(tl))
+        _atomic_write_text(plan_file, text)
 
     @staticmethod
     def _write_metadata(root: Path, ck: Path, state: dict) -> None:

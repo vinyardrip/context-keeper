@@ -44,6 +44,10 @@ from cklib import registry as ckregistry
 from cklib import ui as ckui
 from cklib.cli import main
 from cklib.core import ContextKeeper, FocusExistsError
+from cklib.migrations.v0_12_to_v0_13 import (
+    normalize_plan_layout,
+    strip_empty_headers,
+)
 from cklib.models import TaskStatus
 from cklib.parser import parse_plan_file
 
@@ -592,6 +596,130 @@ class TestMigrateApply(_LegacyProject):
                             expected_code=2)
         self.assertIn("pre-0.13 schema", out)
         self.assertIn("Run `ck migrate` to upgrade it, then retry", out)
+
+
+# ---------------------------------------------------------------------------
+# 7. migrate format pass: symlink, section merge, empty headers
+# ---------------------------------------------------------------------------
+
+
+_ROADMAP_PLAN = (
+    "# Roadmap\n"
+    "\n"
+    "Long-term plan for the sample project.\n"
+    "\n"
+    "## Backlog\n"
+    "- [ ] backlog item\n"
+    "\n"
+    "### Someday\n"
+    "\n"
+    "## Active\n"
+    "- [>] active item\n"
+    "- [ ] another active\n"
+    "\n"
+    "## Completed\n"
+    "- [x] finished item\n"
+)
+
+
+class _SymlinkProject(_LegacyProject):
+    """Legacy project whose PLAN.md is a symlink to root ROADMAP.md."""
+
+    def _symlink_ck(self, roadmap: str) -> tuple[ContextKeeper, Path]:
+        ck = self._legacy_ck()
+        roadmap_file = ck.root / "ROADMAP.md"
+        roadmap_file.write_text(roadmap, encoding="utf-8")
+        ck.plan_file.unlink()
+        ck.plan_file.symlink_to(roadmap_file)
+        return ck, roadmap_file
+
+
+class TestMigrateSymlink(_SymlinkProject):
+    def test_dry_run_leaves_the_symlink_alone(self):
+        ck, roadmap = self._symlink_ck(_ROADMAP_PLAN)
+        before = roadmap.read_bytes()
+
+        out = self._run_cli(["migrate"], ck.root)
+
+        self.assertIn("Migration plan", out)
+        self.assertIn(
+            "replace the .ck/PLAN.md symlink with a REAL file "
+            "(ROADMAP.md stays untouched)", out)
+        self.assertIn(
+            "merge ## Backlog, ## Someday, ## Active into one "
+            "'## Current Sprint' section", out)
+        self.assertIn("Dry run: nothing written. Re-run with --apply.",
+                      out)
+        self.assertTrue(ck.plan_file.is_symlink())
+        self.assertEqual(roadmap.read_bytes(), before)
+
+    def test_apply_materializes_plan_and_spares_the_target(self):
+        ck, roadmap = self._symlink_ck(_ROADMAP_PLAN)
+        before = roadmap.read_bytes()
+
+        out = self._run_cli(["migrate", "--apply"], ck.root)
+
+        self.assertNotIn("ERROR", out)
+        self.assertIn(
+            "PLAN.md: symlink replaced with a real file", out)
+        plan_file = ck.ck_path / "PLAN.md"
+        self.assertFalse(plan_file.is_symlink())
+        # The link target kept its exact bytes.
+        self.assertEqual(roadmap.read_bytes(), before)
+
+        plan = plan_file.read_text(encoding="utf-8")
+        self.assertTrue(plan.startswith("## Current Sprint\n"))
+        # Backlog / Active folded in document order; the h1 and the
+        # front prose are dropped for roadmap-style documents.
+        self.assertLess(plan.index("backlog item"),
+                        plan.index("active item"))
+        self.assertLess(plan.index("active item"),
+                        plan.index("another active"))
+        self.assertNotIn("# Roadmap", plan)
+        self.assertNotIn("###", plan)
+        self.assertNotIn("Completed", plan)
+        for task in parse_plan_file(plan_file).tasks:
+            self.assertRegex(task.uuid, r"^[0-9a-z]{8}$")
+
+        history = ck.history_file.read_text(encoding="utf-8")
+        self.assertIn("finished item", history)
+        self.assertFalse((ck.ck_path / "state.json").exists())
+
+    def test_current_version_gate_heals_a_stale_symlink(self):
+        ck, _roadmap = self._symlink_ck(_LEGACY_PLAN)
+        (ck.ck_path / "version").write_text(
+            f"{ckconfig.VERSION}\n", encoding="utf-8")
+
+        out = self._run_cli(["migrate", "--apply"], ck.root)
+
+        self.assertIn("healing it into a real file", out)
+        self.assertFalse(ck.plan_file.is_symlink())
+        self.assertNotIn(
+            "- [x]", ck.plan_file.read_text(encoding="utf-8"))
+        history = ck.history_file.read_text(encoding="utf-8")
+        out2 = self._run_cli(["migrate"], ck.root)
+        self.assertIn(f"already at v{ckconfig.VERSION}", out2)
+        self.assertEqual(
+            ck.history_file.read_text(encoding="utf-8"), history)
+
+
+class TestMigrationTextHelpers(unittest.TestCase):
+    def test_strip_empty_headers_spares_the_sprint_scaffold(self):
+        text = (
+            "## Current Sprint\n"
+            "### Sub\n"
+            "\n"
+            "## Completed\n"
+            "\n"
+        )
+        self.assertEqual(
+            strip_empty_headers(text), "## Current Sprint\n")
+
+    def test_normalize_folds_active_sections_in_order(self):
+        normalized, merged = normalize_plan_layout(_ROADMAP_PLAN)
+        self.assertEqual(merged, ["backlog", "someday", "active"])
+        self.assertTrue(normalized.startswith("## Current Sprint\n"))
+        self.assertIn("- [x] finished item", normalized)
 
 
 if __name__ == "__main__":
