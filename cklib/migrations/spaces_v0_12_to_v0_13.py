@@ -38,7 +38,7 @@ from ..parser import _atomic_write_text, parse_plan, render_plan
 from .v0_12_to_v0_13 import strip_empty_headers
 
 #: Backup-directory tag for the spaces migration (this release).
-SPACES_BACKUP_TAG = "0.13.1"
+SPACES_BACKUP_TAG = "0.13.3"
 
 
 @dataclass
@@ -334,7 +334,9 @@ class MigrateSpacesV012ToV013:
         # 3) Drop the completed rows from the plan, strip the empty
         #    headers they leave behind, and write atomically under
         #    the space's fail-closed lock.
-        for task in done_tasks:
+        # Delete highest id first: tl.delete() shifts positional ids,
+        # so removing from the top keeps the remaining ids stable.
+        for task in sorted(done_tasks, key=lambda t: t.id, reverse=True):
             tl.delete(task.id)
         if plan.done_count or plan.note_count or plan.uuid_missing:
             with file_lock(plan.file):

@@ -20,3 +20,6 @@
 - [ ] ck export: сборка PLAN.md + HISTORY.md + (опционально) git log -n 5 в единый Markdown для STDOUT <!-- id: yt87h6to -->
 - [ ] BUG: ck delete <ID> не поддерживает списки/диапазоны ID, из-за позиционных индексов последовательное удаление (например, 63, потом 64) удаляет не те задачи. Добавить поддержку 'ck delete 63-64' или 'ck delete 63,64' с обработкой сдвига индексов. <!-- id: mseghv3h -->
 - [ ] BUG: ck add выводит глобальный ID (например, 106), а ck list — позиционный (63). Из-за этого команды delete/done не работают с ID из вывода add. Синхронизировать вывод ck add с реальной позицией в PLAN.md. <!-- id: drs124n0 -->
+- [ ] Fix remaining pre-existing test failures unrelated to v0.13.x <!-- id: m3mffqzd -->
+- [ ] Remove .ck_backup_* dirs after user verifies 12 migrated projects <!-- id: ucpibo83 -->
+- [ ] Keep version in sync across config/pyproject/README (single source: cklib/config.py) <!-- id: tvumm871 -->

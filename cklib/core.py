@@ -962,19 +962,26 @@ class ContextKeeper:
         return None
 
     def is_migrated(self) -> bool:
-        """True when the project schema matches this ck version."""
+        """True when the project schema matches this ck version.
+
+        Compared on major.minor only: patch releases (0.13.1 vs
+        0.13.2) share the schema and are compatible.
+        """
         found = self.project_schema_version()
-        return found is not None and found == VERSION
+        return found is not None and str(found).split(".")[:2] == str(
+            VERSION).split(".")[:2]
 
     def schema_mismatch(self) -> bool:
         """True when a schema version exists but differs from VERSION.
 
+        Compared on major.minor only: patch releases are compatible.
         A project with NO version markers at all is LEGACY (None) —
         also a mismatch for write commands, but the wording of the
         error differs (see :meth:`_require_migrated`).
         """
         found = self.project_schema_version()
-        return found is None or found != VERSION
+        return found is None or str(found).split(".")[:2] != str(
+            VERSION).split(".")[:2]
 
     def _require_migrated(self) -> None:
         """Write-command gate: refuse mutations on a foreign schema.
@@ -988,7 +995,7 @@ class ContextKeeper:
         if self.ck_path is None or not self.ck_path.is_dir():
             return  # nothing initialized; the plan guard reports that
         found = self.project_schema_version()
-        if found == VERSION:
+        if str(found).split(".")[:2] == str(VERSION).split(".")[:2]:
             return
         if found is None:
             raise ValueError(
@@ -2678,7 +2685,7 @@ class ContextKeeper:
                 "ERROR: Run `ck migrate` first "
                 "(legacy project layout detected).")
             return None
-        if found != VERSION:
+        if str(found).split(".")[:2] != str(VERSION).split(".")[:2]:
             printer(
                 f"ERROR: Project schema is {found}; this ck is {VERSION}. "
                 "Run `ck migrate`.")

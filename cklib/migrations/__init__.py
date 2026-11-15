@@ -139,7 +139,9 @@ def migrate_all_projects(*, dry_run: bool = True) -> ProjectMigrationBatch:
         # the batch answers directly.
         plan_file = ck / "PLAN.md"
         stored = stored_schema_version(ck)
-        if stored == VERSION and not plan_file.is_symlink():
+        # major.minor only: patch releases share the schema.
+        if str(stored).split(".")[:2] == str(VERSION).split(".")[:2] \
+                and not plan_file.is_symlink():
             batch.entries.append(ProjectBatchEntry(
                 name=entry.name, path=entry.path, status="already"))
             batch.say(f"[!] Project {entry.name}: already at v{VERSION}")

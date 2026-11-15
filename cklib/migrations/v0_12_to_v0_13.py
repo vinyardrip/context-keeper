@@ -259,12 +259,16 @@ class MigrateV012ToV013(Migration):
             return result
 
         found = self._stored_version(ck)
-        if found == VERSION and not plan_file.is_symlink():
+        # major.minor only: patch releases (0.13.2 vs 0.13.3) share
+        # the schema, so an older-patch project is still "migrated".
+        if str(found).split(".")[:2] == str(VERSION).split(".")[:2] \
+                and not plan_file.is_symlink():
             result.say(
                 f"Project is already at v{VERSION}; nothing to migrate.")
             result.applied = True
             return result
-        if found == VERSION and plan_file.is_symlink():
+        if str(found).split(".")[:2] == str(VERSION).split(".")[:2] \
+                and plan_file.is_symlink():
             result.say(
                 f"Project is at v{VERSION}, but {plan_file} is still "
                 "a symlink; healing it into a real file.")
@@ -631,7 +635,10 @@ class MigrateV012ToV013(Migration):
                 path.write_text(text, encoding="utf-8")
 
         put(ck / JOURNAL_FILENAME, "")
-        put(ck / VERSION_FILENAME, f"{VERSION}\n")
+        # The version marker is NOT a "missing file only" write: a
+        # project migrating from an earlier v0.13.x keeps its old
+        # .ck/version, and put() would silently leave it stale.
+        (ck / VERSION_FILENAME).write_text(f"{VERSION}\n", encoding="utf-8")
         put(ck / LINKS_FILENAME, "{}\n")
         put(ck / AGENTS_FILENAME, DEFAULT_AGENTS_MD)
         meta = {}

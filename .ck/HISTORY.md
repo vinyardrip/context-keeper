@@ -93,3 +93,4 @@
 - [x] 2026-11-15 02:05: Надёжное разрешение бинаря на каждый TAB: исполняемый `CK_BIN`, иначе fallback на `ck` из `PATH` — устойчиво к `mise`, subshell и устаревшему dev-пути (`v0.8.20`) <!-- id: iuqphvek -->
 - [x] 2026-11-15 02:05: `ck <TAB>` без filename-fallback (никакого `-o default` / `-o bashdefault`); таблица примеров автодополнения в README (`v0.8.20`) <!-- id: qp4ni1wq -->
 - [x] 2026-11-15 02:05: Sandbox registry safeguard: production-регистрация `.sandbox/`-путей отклоняется, completion скрывает устаревшие fixture-записи (`v0.8.20`) <!-- id: qcm3hzcv -->
+- [x] 2026-11-15 06:05: smoke test v0.13.3 <!-- id: sro53huc -->

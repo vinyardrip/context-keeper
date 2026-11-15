@@ -1,6 +1,7 @@
 """Context Keeper — modular Python package.
 
-Version: 0.13.1 (kept in sync with :data:`cklib.config.VERSION`).
+The single source of truth for the version is
+:data:`cklib.config.VERSION`; ``__version__`` mirrors it.
 """
 
 from .config import VERSION
