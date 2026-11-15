@@ -92,3 +92,6 @@ __pycache__/
 .venv/
 venv/
 env/
+
+# Context Keeper
+.ck/*.md.gz
