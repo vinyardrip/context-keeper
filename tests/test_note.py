@@ -1,38 +1,38 @@
-"""Tests for the active-task process note (`ck note`).
+"""Tests for append-only process notes (v0.13.0 inline model).
 
-Covers:
+Notes live INLINE in ``PLAN.md`` as ``* Note (...)`` lines directly
+beneath their task bullet — ``state.json`` no longer exists. Coverage:
 
-- ``ck note <text>`` persists the note in ``.ck/state.json`` under
-  the ``notes`` ledger, with ``active_task`` carrying only id, title
-  and updated_at, for the CURRENT active task (focused, else first
-  open).
-- ``ck st`` displays the note as a prominent ``* Note: <text>``
-  line — in both plain and colored modes.
-- ``ck done`` on the noted task purges the note completely; done on
-  a DIFFERENT task keeps it.
-- Error paths: empty note text, no active task.
-- CLI dispatch through ``main()`` (note → st → done lifecycle) and
-  the NO_COLOR plain-text guarantee.
-- DEV MODE: the note write is redirected into the sandbox; the real
-  ``.ck/state.json`` is never created.
+- Persistence: ``ck note`` appends timestamped entries to the active
+  (or addressed) task's inline ledger; sanitization; empty/orphan
+  rejections.
+- Display: ``ck st`` renders the note under CURRENT FOCUS and the
+  WORK CONTEXT item; noted tasks keep their note across focus
+  switches (``[~]`` parked tasks keep the note; noted open tasks
+  surface in the Paused block).
+- Lifecycle: ``ck done`` graduates the note into HISTORY.md; other
+  tasks' notes are untouched; done always appends the ledger line.
+- Focus semantics (v0.13.0): ``ck start`` REFUSES to steal a focus;
+  ``ck focus`` parks the old task as ``[~]`` (with the interactive
+  note prompt on a TTY); ``start 0``/``focus 0`` resets to open —
+  never parked, never prompted into a wrong message.
+- Paused ledger: ``_paused_tasks()`` = ``[~]`` rows + noted open
+  tasks, in document order; corrupt plan degrades to empty.
+- DEV MODE: note writes land in the sandbox mirror; production
+  ``PLAN.md`` is never touched.
 """
 
 from __future__ import annotations
 
-# Filesystem isolation safety net: importing the tests package
-# pins CK_SANDBOX_ROOT to an OS-temp directory (see tests/__init__),
-# so no test in this module can create or wipe the repository's own
-# .sandbox/ — under ANY runner, including bare `unittest discover`.
-import tests  # noqa: F401
-
 import io
-import json
 import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
+
+import tests  # noqa: F401  (filesystem isolation safety net)
 
 from cklib import config as ckconfig
 from cklib import registry as ckregistry
@@ -102,15 +102,17 @@ class _NoteHarness(_IsolatedHome, unittest.TestCase):
         ck = ContextKeeper(root=root)
         ck.ck_path.mkdir(parents=True, exist_ok=True)
         ck.plan_file.write_text(plan, encoding="utf-8")
+        # v0.13.0 write-gate: raw fixtures carry the current marker.
+        ck.ck_path.joinpath("version").write_text(
+            ckconfig.VERSION + "\n", encoding="utf-8")
         return ck
 
-    def _read_state_file(self, ck: ContextKeeper) -> dict:
-        self.assertTrue(ck.state_file.exists(), "state.json must exist")
-        return json.loads(ck.state_file.read_text(encoding="utf-8"))
+    def _plan_text(self, ck: ContextKeeper) -> str:
+        return ck.plan_file.read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
-# Persistence: ck note -> state.json
+# Persistence: ck note -> inline ``* Note`` lines in PLAN.md
 # ---------------------------------------------------------------------------
 
 
@@ -119,48 +121,54 @@ class TestNotePersistence(_NoteHarness):
         ck = self._ck()
         info = ck.set_note("checking API mapping")
 
-        state = self._read_state_file(ck)
-        active = state["active_task"]
-        # The note attaches to the FOCUSED task (active task).
-        self.assertEqual(active["id"], 2)
-        self.assertEqual(active["title"], "implement API mapping")
-        self.assertNotIn("note", active)
-        self.assertTrue(active["updated_at"])
-        self.assertEqual(
-            state["notes"]["2"][-1]["text"], "checking API mapping")
+        # The note attaches to the FOCUSED task (active task) and is
+        # carried as its newest inline entry.
         self.assertEqual(info["id"], 2)
+        self.assertEqual(info["title"], "implement API mapping")
         self.assertEqual(info["note"], "checking API mapping")
+        entries = ck.get_note_entries(2)
+        self.assertEqual(entries[-1]["text"], "checking API mapping")
+        self.assertTrue(entries[-1]["created"].endswith("+00:00"))
+        plan = self._plan_text(ck)
+        self.assertRegex(
+            plan,
+            r"- \[>\] implement API mapping\n"
+            r"  \* Note \(\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC\): "
+            r"checking API mapping\n",
+        )
 
     def test_note_attaches_to_first_open_when_no_focus(self):
         ck = self._ck("# P\n- [ ] alpha\n- [ ] beta\n")
         ck.set_note("scratch")
-        state = self._read_state_file(ck)
-        active = state["active_task"]
-        self.assertEqual(active["id"], 1)
-        self.assertEqual(active["title"], "alpha")
-        self.assertNotIn("note", active)
-        self.assertEqual(state["notes"]["1"][-1]["text"], "scratch")
+        entries = ck.get_note_entries(1)
+        self.assertEqual(entries[-1]["text"], "scratch")
+        plan = self._plan_text(ck)
+        self.assertRegex(
+            plan,
+            r"- \[ \] alpha\n  \* Note \(.*\): scratch\n",
+        )
+        self.assertNotIn("beta\n  * Note", plan)
 
     def test_note_update_appends_newest_entry(self):
         ck = self._ck()
         ck.set_note("first draft")
         ck.set_note("stopped at line 42 before lunch")
-        state = self._read_state_file(ck)
-        active = state["active_task"]
-        self.assertNotIn("note", active)
+        entries = ck.get_note_entries(2)
         self.assertEqual(
-            [e["text"] for e in state["notes"]["2"]],
+            [e["text"] for e in entries],
             ["first draft", "stopped at line 42 before lunch"],
         )
+        plan = self._plan_text(ck)
+        self.assertEqual(plan.count("* Note ("), 2)
+        self.assertLess(plan.index("first draft"),
+                        plan.index("stopped at line 42"))
 
     def test_note_text_is_sanitized(self):
-        """ANSI noise pasted into ck note can never corrupt state."""
+        """ANSI noise pasted into ck note can never corrupt the plan."""
         ck = self._ck()
         ck.set_note("\x1b[31mred\x1b[0m   spaced\t\tout\nnewline")
-        state = self._read_state_file(ck)
-        self.assertNotIn("note", state["active_task"])
-        self.assertEqual(
-            state["notes"]["2"][-1]["text"], "red spaced out newline")
+        entries = ck.get_note_entries(2)
+        self.assertEqual(entries[-1]["text"], "red spaced out newline")
 
     def test_empty_note_rejected(self):
         ck = self._ck()
@@ -172,7 +180,7 @@ class TestNotePersistence(_NoteHarness):
         with self.assertRaises(ValueError):
             ck.set_note("orphan note")
         # And nothing was written.
-        self.assertFalse(ck.state_file.exists())
+        self.assertNotIn("* Note", self._plan_text(ck))
 
     def test_get_note_roundtrip(self):
         ck = self._ck()
@@ -192,13 +200,15 @@ class TestNoteDisplay(_NoteHarness):
         ck.set_note("checking API mapping")
         out = ck.status()
         self.assertIn("* Note: checking API mapping", out)
-        # The note appears twice by design: once in the top-level
-        # CURRENT FOCUS block and once under the task in WORK CONTEXT.
+        # The focused task's note renders once, in the top-level
+        # CURRENT FOCUS block (the WORK CONTEXT item is the same task
+        # shown compactly, without repeating its scratchpad).
         lines = out.splitlines()
         note_lines = [i for i, l in enumerate(lines) if "* Note:" in l]
-        self.assertEqual(len(note_lines), 2)
-        self.assertLess(note_lines[0], note_lines[1])
-        self.assertLess(note_lines[1], len(lines) - 1)
+        self.assertEqual(len(note_lines), 1)
+        focus_idx = next(
+            i for i, l in enumerate(lines) if "-> CURRENT FOCUS:" in l)
+        self.assertEqual(note_lines[0], focus_idx + 1)
 
     def test_status_without_note_has_no_note_line(self):
         ck = self._ck()
@@ -206,16 +216,19 @@ class TestNoteDisplay(_NoteHarness):
 
     def test_note_survives_focus_change_display(self):
         """The note stays visible while its task still exists, even
-        if focus moved elsewhere (it is a task scratchpad)."""
+        after the task was parked as ``[~]`` (it is a scratchpad)."""
         ck = self._ck()
         ck.set_note("paused mid-refactor")
-        ck.start(3)  # focus a different task
-        self.assertIn("* Note: paused mid-refactor", ck.status())
+        ck.focus(3)  # park task 2 as [~], focus task 3
+        out = ck.status()
+        self.assertIn("* Note: paused mid-refactor", out)
+        self.assertIn("    [~] Paused:", out)
 
     def test_stale_note_for_removed_task_not_shown(self):
         ck = self._ck()
         ck.set_note("note on task 2")
-        # Externally rewrite the plan so task 2 no longer exists.
+        # Externally rewrite the plan so task 2 (and its inline note
+        # line) no longer exists.
         ck.plan_file.write_text("# P\n- [ ] only task\n", encoding="utf-8")
         self.assertNotIn("* Note:", ck.status())
 
@@ -226,7 +239,7 @@ class TestNoteDisplay(_NoteHarness):
                 ckui, "get_palette", return_value=ckui.Palette(True)):
             out = ck.status()
         self.assertIn(
-            f"{ckui.BOLD}{ckui.CYAN}       * Note: checking API mapping"
+            f"{ckui.BOLD}{ckui.CYAN}    * Note: checking API mapping"
             f"{ckui.RESET}",
             out,
         )
@@ -238,44 +251,61 @@ class TestNoteDisplay(_NoteHarness):
 
 
 # ---------------------------------------------------------------------------
-# Lifecycle: ck done purges the note
+# Lifecycle: ck done graduates the note into HISTORY.md
 # ---------------------------------------------------------------------------
 
 
 class TestNotePurgeOnDone(_NoteHarness):
-    def test_done_of_noted_task_purges_note(self):
+    def test_done_of_noted_task_graduates_note(self):
         ck = self._ck()
         ck.set_note("checking API mapping")
         ck.done("2")  # complete the noted (focused) task
 
-        state = self._read_state_file(ck)
-        self.assertNotIn("active_task", state)
+        # The active task is now the first open one (noteless) — no
+        # active note anymore.
+        self.assertIsNone(ck.get_note())
         self.assertNotIn("* Note:", ck.status())
+        # The note travels into HISTORY.md under the graduated entry.
+        history = ck.history_file.read_text(encoding="utf-8")
+        self.assertIn("implement API mapping", history)
+        self.assertRegex(
+            history,
+            r"\* Note \(\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC\): "
+            r"checking API mapping",
+        )
+        self.assertNotIn("* Note", self._plan_text(ck))
+        # v0.13.0: no state file is ever created.
+        self.assertFalse((ck.ck_path / "state.json").exists())
 
     def test_done_of_different_task_keeps_note(self):
         ck = self._ck()
         ck.set_note("note on focused task")
         ck.done("3")  # complete the NEXT task, not the noted one
 
-        state = self._read_state_file(ck)
-        self.assertNotIn("note", state["active_task"])
-        self.assertEqual(
-            state["notes"]["2"][-1]["text"], "note on focused task")
+        self.assertEqual(ck.get_note()["note"], "note on focused task")
         self.assertIn("* Note: note on focused task", ck.status())
+        history = ck.history_file.read_text(encoding="utf-8")
+        self.assertIn("write docs", history)
+        self.assertNotIn("implement API mapping", history)
 
-    def test_done_range_including_noted_task_purges(self):
+    def test_done_range_including_noted_task_graduates(self):
         ck = self._ck()
         ck.set_note("bulk cleanup note")
         ck.done("2-3")
-        state = self._read_state_file(ck)
-        self.assertNotIn("active_task", state)
+        self.assertIsNone(ck.get_note())
+        history = ck.history_file.read_text(encoding="utf-8")
+        self.assertIn("bulk cleanup note", history)
+        self.assertNotIn("* Note", self._plan_text(ck))
 
-    def test_done_without_note_writes_no_state(self):
-        """A project that never had a note must not gain a state
-        file from ck done."""
+    def test_done_without_note_still_appends_history(self):
+        """A noteless task still graduates into HISTORY.md — the
+        ledger is unconditional; only DAILY spaces skip it."""
         ck = self._ck()
         ck.done("3")
-        self.assertFalse(ck.state_file.exists())
+        history = ck.history_file.read_text(encoding="utf-8")
+        self.assertIn("write docs", history)
+        self.assertNotIn("* Note", history)
+        self.assertFalse((ck.ck_path / "state.json").exists())
 
 
 # ---------------------------------------------------------------------------
@@ -284,14 +314,13 @@ class TestNotePurgeOnDone(_NoteHarness):
 
 
 class TestUnfocusedPausedContext(_NoteHarness):
-    """Focus-loss handling per spec:
+    """v0.13.0 focus semantics:
 
-    - A noted open task that loses focus (``ck start <NEW_ID>`` or a
-      reset) renders in the dedicated "Unfocused / Paused Context"
-      block of ``ck st`` / ``ck dashboard -v`` with its note intact.
-    - A noteless demotion lets the CLI emit the soft attach-a-note
-      hint.
-    - ``ck done`` archives the note into HISTORY.md and clears it.
+    - ``ck focus <NEW>`` parks the old ``[>]`` as ``[~]`` (inline
+      notes preserved) — the task stays visible in the Paused block.
+    - A noteless parked task gets the soft attach-a-note hint.
+    - ``ck done`` archives the note into HISTORY.md.
+    - ``ck start 0`` / ``ck focus 0`` RESET to open — never parked.
     """
 
     def _run_cli(self, argv, cwd: Path) -> str:
@@ -316,17 +345,16 @@ class TestUnfocusedPausedContext(_NoteHarness):
     def test_switch_moves_noted_task_to_paused_block(self):
         ck = self._ck()
         ck.set_note("paused mid-refactor")
-        ck.start(3)
+        ck.focus(3)
         out = ck.status()
-        self.assertIn("Unfocused / Paused Context:", out)
+        self.assertIn("    [~] Paused:", out)
         self.assertIn("- [2] implement API mapping", out)
         # The note travels with the paused task and appears exactly
         # once — NOT duplicated under the new Focus.
         self.assertEqual(out.count("* Note: paused mid-refactor"), 1)
         lines = out.splitlines()
         paused_idx = next(
-            i for i, l in enumerate(lines)
-            if "Unfocused / Paused Context:" in l)
+            i for i, l in enumerate(lines) if "[~] Paused:" in l)
         note_idx = next(
             i for i, l in enumerate(lines)
             if "* Note: paused mid-refactor" in l)
@@ -335,35 +363,42 @@ class TestUnfocusedPausedContext(_NoteHarness):
 
     def test_switch_without_note_prints_soft_hint(self):
         ck = self._ck()
-        out = self._run_cli(["start", "3"], ck.root)
+        out = self._run_cli(["focus", "3"], ck.root)
         self.assertIn("-> Focused [3]: write docs", out)
         self.assertIn(
-            "[!] Task #2 lost focus without a note. "
-            "Attach one via `ck note <text>`.", out)
-        # A noteless demotion does NOT claim a paused block.
-        self.assertNotIn("Unfocused / Paused Context:", out)
+            "[!] Task #2 parked as [~] without a note. "
+            "Attach one via `ck note <ID> <text>`.", out)
+        # A noteless parked task STILL occupies the Paused block.
+        status = ck.status()
+        self.assertIn("    [~] Paused:", status)
+        self.assertIn("- [2] implement API mapping", status)
 
     def test_switch_with_note_reports_paused_block_via_cli(self):
         ck = self._ck()
         ck.set_note("half done")
-        out = self._run_cli(["start", "3"], ck.root)
+        out = self._run_cli(["focus", "3"], ck.root)
         self.assertIn(
-            "[i] Task [2] implement API mapping lost focus — moved to "
-            "Unfocused / Paused Context (note preserved; archived by "
-            "`ck done`).", out)
-        self.assertNotIn("lost focus without a note", out)
+            "[i] Task [2] implement API mapping parked as [~] — paused "
+            "(notes preserved; graduate into HISTORY.md on `ck done`).",
+            out)
+        self.assertNotIn("parked as [~] without a note", out)
 
-    def test_done_archives_note_into_history_and_clears_state(self):
+    def test_done_archives_note_into_history(self):
         ck = self._ck()
         ck.set_note("finish the mapping")
         ck.done("2")
         self.assertIsNone(ck.get_note())
-        self.assertNotIn("active_task", self._read_state_file(ck))
         history = ck.history_file.read_text(encoding="utf-8")
-        self.assertIn("[2] implement API mapping", history)
-        self.assertIn("* Note: finish the mapping", history)
+        self.assertIn("implement API mapping", history)
+        self.assertRegex(
+            history,
+            r"\* Note \(\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC\): "
+            r"finish the mapping",
+        )
+        # The plan no longer carries the noted task at all.
+        self.assertNotIn("implement API mapping", self._plan_text(ck))
 
-    def test_done_of_other_task_keeps_note_and_history_untouched(self):
+    def test_done_of_other_task_keeps_note(self):
         ck = self._ck()
         ck.set_note("still working")
         before = (
@@ -376,19 +411,16 @@ class TestUnfocusedPausedContext(_NoteHarness):
             ck.history_file.read_text(encoding="utf-8")
             if ck.history_file.exists() else ""
         )
-        self.assertEqual(before, after)
-
-    def test_noteless_done_writes_no_history(self):
-        ck = self._ck()
-        ck.done("2")
-        self.assertFalse(ck.state_file.exists())
-        self.assertFalse(ck.history_file.exists())
+        # Only task 3 was appended; the noted task's ledger entry
+        # (none) is untouched.
+        self.assertEqual(after, before + after[len(before):])
+        self.assertNotIn("implement API mapping", after)
 
     def test_focus_reset_keeps_note_visible(self):
-        """After ``ck start 0`` the demoted task is the auto-resolved
-        Next candidate, so its note renders inline under Next — the
-        dedicated paused block is reserved for tasks superseded by
-        another explicit focus (nothing is buried either way)."""
+        """After ``ck start 0`` the demoted task is back to OPEN (not
+        paused) and keeps its inline note — it surfaces as the Next
+        candidate and in the Paused (noted) block, so nothing is
+        buried either way."""
         ck = self._ck()
         ck.set_note("wip")
         result = ck.start(0)
@@ -396,10 +428,14 @@ class TestUnfocusedPausedContext(_NoteHarness):
         self.assertEqual(result.demoted_id, 2)
         self.assertTrue(result.had_note)
         self.assertEqual(ck._load_plan().focused, [])
+        # The reset task is OPEN again, not [~].
+        from cklib.models import TaskStatus
+        tl = ck._load_plan()
+        self.assertEqual(tl.by_id(2).status, TaskStatus.OPEN)
         out = ck.status()
         self.assertIn("[>] Next:", out)
         self.assertIn("* Note: wip", out)
-        self.assertNotIn("Unfocused / Paused Context:", out)
+        self.assertNotIn("-> CURRENT FOCUS:", out)
 
     def test_reset_without_focus_is_noop(self):
         # An UNFOCUSED plan: nothing to demote, nothing reported.
@@ -423,13 +459,12 @@ class TestUnfocusedPausedContext(_NoteHarness):
 
     def test_dashboard_verbose_shows_paused_block_for_registered_project(
             self):
-        from cklib import registry as ckregistry
         from cklib.core import _render_dashboard
         from cklib.parser import parse_plan_file
 
         ck = self._ck()
         ck.set_note("paused mid-refactor")
-        ck.start(3)
+        ck.focus(3)
         ckregistry.register_project(ck.root, name="project")
         out = _render_dashboard(
             ck,
@@ -442,7 +477,6 @@ class TestUnfocusedPausedContext(_NoteHarness):
         self.assertIn("* Note: paused mid-refactor", out)
 
     def test_dashboard_verbose_shows_inline_note_under_focus(self):
-        from cklib import registry as ckregistry
         from cklib.core import _render_dashboard
         from cklib.parser import parse_plan_file
 
@@ -465,11 +499,11 @@ class TestUnfocusedPausedContext(_NoteHarness):
 
 
 class TestInteractiveNotePrompt(_NoteHarness):
-    """``ck start <NEW_ID>`` offers to capture context before demoting
+    """``ck focus <NEW_ID>`` offers to capture context before demoting
     a noteless focused task — but only on an interactive TTY."""
 
     def _run(self, argv, cwd: Path, *, stdin_tty=True, stdout_tty=True,
-             inputs=None):
+             inputs=None, expected_code=0):
         buf = io.StringIO()
         prompts: list[str] = []
         scripted = list(inputs or [])
@@ -492,7 +526,8 @@ class TestInteractiveNotePrompt(_NoteHarness):
                                    return_value=stdout_tty), \
                         mock.patch("builtins.input", side_effect=fake_input):
                     code = main(argv)
-            self.assertEqual(code, 0, f"exit {code} for {argv!r}")
+            self.assertEqual(code, expected_code,
+                             f"exit {code} for {argv!r}")
         finally:
             os.chdir(orig_cwd)
         # ANSI-STRIPPED: these tests assert note CONTENT, never colour
@@ -502,66 +537,64 @@ class TestInteractiveNotePrompt(_NoteHarness):
     def test_tty_yes_saves_note_then_switches(self):
         ck = self._ck()
         out, prompts = self._run(
-            ["start", "3"], ck.root,
+            ["focus", "3"], ck.root,
             inputs=["y", "paused mid-refactor"])
         self.assertIn(
             "Task #2 lost focus. Add a process note? [y/N]: ", prompts)
         self.assertIn("Note text: ", prompts)
         self.assertIn("* Note saved for [2]: paused mid-refactor", out)
         self.assertIn("-> Focused [3]: write docs", out)
-        self.assertNotIn("lost focus without a note", out)
-        # The note moved into the paused registry with the task.
+        self.assertNotIn("parked as [~] without a note", out)
+        # The note moved into the paused plan state with the task.
         paused = ck._paused_tasks()
         self.assertEqual(paused[0]["id"], 2)
         self.assertEqual(paused[0]["note"], "paused mid-refactor")
 
     def test_tty_no_falls_back_to_soft_hint(self):
         ck = self._ck()
-        out, prompts = self._run(["start", "3"], ck.root, inputs=["n"])
+        out, prompts = self._run(["focus", "3"], ck.root, inputs=["n"])
         self.assertIn(
             "Task #2 lost focus. Add a process note? [y/N]: ", prompts)
         self.assertIn("-> Focused [3]: write docs", out)
         self.assertIn(
-            "[!] Task #2 lost focus without a note. "
-            "Attach one via `ck note <text>`.", ckui.strip_ansi(out))
+            "[!] Task #2 parked as [~] without a note. "
+            "Attach one via `ck note <ID> <text>`.", out)
         self.assertEqual(prompts, [prompts[0]])  # no Note text prompt
-        # Still recorded in the ledger (noteless pause).
+        # Still parked as [~] (noteless).
         self.assertEqual(ck._paused_tasks()[0]["id"], 2)
 
     def test_bare_enter_declines(self):
         ck = self._ck()
-        out, _ = self._run(["start", "3"], ck.root, inputs=[""])
+        out, _ = self._run(["focus", "3"], ck.root, inputs=[""])
         self.assertIn("-> Focused [3]: write docs", out)
-        self.assertIn("lost focus without a note", out)
+        self.assertIn("parked as [~] without a note", out)
 
     def test_eof_declines_without_crash(self):
         ck = self._ck()
-        out, _ = self._run(["start", "3"], ck.root)
+        out, _ = self._run(["focus", "3"], ck.root)
         self.assertIn("-> Focused [3]: write docs", out)
-        self.assertIn("lost focus without a note", out)
+        self.assertIn("parked as [~] without a note", out)
 
     def test_non_tty_never_prompts(self):
-        ck = self._ck()
         for stdin_tty, stdout_tty in ((False, True), (True, False),
                                       (False, False)):
-            # Reset focus so each round starts from the same state.
-            self._run(["start", "2"], ck.root,
-                      stdin_tty=stdin_tty, stdout_tty=stdout_tty)
-            out, prompts = self._run(["start", "3"], ck.root,
+            # Fresh fixture each round: task 2 holds the focus.
+            ck = self._ck()
+            out, prompts = self._run(["focus", "3"], ck.root,
                                      stdin_tty=stdin_tty,
                                      stdout_tty=stdout_tty)
             self.assertEqual(prompts, [])
-            self.assertIn("lost focus without a note", out)
+            self.assertIn("parked as [~] without a note", out)
 
     def test_no_input_flag_skips_prompt_even_on_tty(self):
         ck = self._ck()
-        out, prompts = self._run(["start", "--no-input", "3"], ck.root)
+        out, prompts = self._run(["focus", "--no-input", "3"], ck.root)
         self.assertEqual(prompts, [])
         self.assertIn("-> Focused [3]: write docs", out)
 
     def test_y_flag_asks_text_only(self):
         ck = self._ck()
-        out, prompts = self._run(["start", "-y", "3"], ck.root,
+        out, prompts = self._run(["focus", "-y", "3"], ck.root,
                                  inputs=["from -y flag"])
         self.assertNotIn("Add a process note?", "\n".join(prompts))
         self.assertIn("Note text: ", prompts)
@@ -570,25 +603,39 @@ class TestInteractiveNotePrompt(_NoteHarness):
     def test_prompt_not_shown_when_task_has_note(self):
         ck = self._ck()
         ck.set_note("already noted")
-        out, prompts = self._run(["start", "3"], ck.root, inputs=["y", "x"])
+        out, prompts = self._run(["focus", "3"], ck.root, inputs=["y", "x"])
         self.assertEqual(prompts, [])
         self.assertIn("-> Focused [3]: write docs", out)
 
     def test_prompt_not_shown_on_reset_without_prior_focus(self):
         ck = self._ck("# P\n- [ ] alpha\n- [ ] beta\n")
-        out, prompts = self._run(["start", "0"], ck.root)
+        out, prompts = self._run(["focus", "0"], ck.root)
         self.assertEqual(prompts, [])
 
     def test_blank_note_text_aborts_capture(self):
         ck = self._ck()
-        out, prompts = self._run(["start", "3"], ck.root,
+        out, prompts = self._run(["focus", "3"], ck.root,
                                  inputs=["y", "  "])
         self.assertIn("-> Focused [3]: write docs", out)
         self.assertNotIn("* Note saved", out)
 
+    def test_refused_start_never_prompts(self):
+        """``ck start <OTHER>`` aborts with the ``ck focus`` redirect
+        BEFORE any note prompt — the old task lost nothing."""
+        ck = self._ck()
+        out, prompts = self._run(
+            ["start", "3"], ck.root, inputs=["y", "x"],
+            expected_code=1)
+        self.assertEqual(prompts, [])
+        self.assertIn(
+            "ERROR: Task #2 is already focused. "
+            "Use: ck focus 3 to pause it and switch.", out)
+        # Nothing was written: the plan is byte-identical.
+        self.assertNotIn("* Note", self._plan_text(ck))
+
 
 # ---------------------------------------------------------------------------
-# Paused ledger: registry semantics and multi-task rendering
+# Paused ledger: ``[~]`` rows + noted open tasks, in document order
 # ---------------------------------------------------------------------------
 
 
@@ -597,28 +644,24 @@ class TestPausedLedger(_NoteHarness):
     def test_multiple_pauses_all_render_in_paused_block(self):
         ck = self._ck("# P\n- [>] a\n- [ ] b\n- [ ] c\n- [ ] d\n")
         ck.set_note("a note")
-        ck.start(2)  # a paused w/ note
-        ck.start(3)  # b paused noteless
-        ck.start(4)  # c paused noteless
+        ck.focus(2)  # a parked w/ note
+        ck.focus(3)  # b parked noteless
+        ck.focus(4)  # c parked noteless
         out = ck.status()
-        self.assertEqual(out.count("Unfocused / Paused Context:"), 1)
+        self.assertEqual(out.count("    [~] Paused:"), 1)
         self.assertIn("- [1] a", out)
         self.assertIn("* Note: a note", out)
         self.assertIn("- [2] b", out)
         self.assertIn("- [3] c", out)
-        # Paused tasks excluded from the generic skipped list —
-        # with every passed-over open task paused, no Skipped section
-        # is rendered at all.
-        self.assertNotIn("[!] Skipped", out)
-        self.assertIn("- [4] d", out)
+        # The new focus renders with the [#N] marker.
+        self.assertIn("- [#4] d", out)
 
     def test_paused_note_survives_intermediate_switches(self):
         ck = self._ck("# P\n- [>] a\n- [ ] b\n- [ ] c\n- [ ] d\n")
         ck.set_note("a note")
-        ck.start(2)
-        ck.start(3)
-        ck.start(4)
-        ck.start(5 if False else 4)  # switch among non-noted tasks
+        ck.focus(2)
+        ck.focus(3)
+        ck.focus(4)
         st = ck.status()
         self.assertIn("* Note: a note", st)
         self.assertIn("- [1] a", st)
@@ -626,14 +669,13 @@ class TestPausedLedger(_NoteHarness):
     def test_refocus_restores_note_and_removes_ledger_entry(self):
         ck = self._ck("# P\n- [>] a\n- [ ] b\n- [ ] c\n")
         ck.set_note("a note")
-        ck.start(2)
-        ck.start(3)
-        ck.start(1)
+        ck.focus(2)
+        ck.focus(3)
+        ck.focus(1)  # resume a: b and c stay parked
         self.assertEqual(ck.get_note()["note"], "a note")
-        # Tasks 2 and 3 were both paused along the way; only task 1's
-        # entry was consumed by the restore.
+        # Tasks 2 and 3 remain parked, in DOCUMENT order.
         self.assertEqual(
-            [e["id"] for e in ck._paused_tasks()], [3, 2])
+            [e["id"] for e in ck._paused_tasks()], [2, 3])
         st = ck.status()
         # The restored note renders inline under Focus.
         self.assertIn("* Note: a note", st)
@@ -641,11 +683,13 @@ class TestPausedLedger(_NoteHarness):
     def test_done_purges_completed_tasks_from_ledger(self):
         ck = self._ck("# P\n- [>] a\n- [ ] b\n- [ ] c\n")
         ck.set_note("a note")
-        ck.start(2)
-        ck.start(3)
+        ck.focus(2)
+        ck.focus(3)
         ck.done("1")  # complete the paused, noted task
+        # The plan re-indexes on deletion, so match by TITLE: only the
+        # not-yet-completed parked task remains.
         self.assertEqual(
-            [e["id"] for e in ck._paused_tasks()], [2])
+            [e["title"] for e in ck._paused_tasks()], ["b"])
         self.assertIn("a note", ck.history_file.read_text())
 
     def test_peek_reports_focus_loss(self):
@@ -657,12 +701,21 @@ class TestPausedLedger(_NoteHarness):
         info = ck.pending_focus_loss()
         self.assertEqual(info["id"], 1)
         self.assertTrue(info["has_note"])
-        ck.start(2)
+        ck.focus(2)  # park task 1 (noteless now)
         self.assertFalse(ck.pending_focus_loss()["has_note"])
 
-    def test_corrupt_state_degrades_to_empty_ledger(self):
+    def test_noted_open_task_counts_as_paused_context(self):
+        """A note attached directly to an ordinary open task is active
+        context too — it surfaces in the paused ledger."""
+        ck = self._ck("# P\n- [ ] alpha\n- [ ] beta\n")
+        ck.set_note("beta scratch", task_id=2)
+        paused = ck._paused_tasks()
+        self.assertEqual([e["id"] for e in paused], [2])
+        self.assertEqual(paused[0]["note"], "beta scratch")
+
+    def test_corrupt_plan_degrades_to_empty_ledger(self):
         ck = self._ck()
-        ck.state_file.write_text("{not json", encoding="utf-8")
+        ck.plan_file.write_text("{not json", encoding="utf-8")
         self.assertEqual(ck._paused_tasks(), [])
 
 
@@ -675,7 +728,7 @@ class TestStartIdempotency(_NoteHarness):
     """Re-focusing the already-focused task is a clean no-op."""
 
     def _run(self, argv, cwd: Path, *, stdin_tty=True, stdout_tty=True,
-             inputs=None):
+             inputs=None, expected_code=0):
         buf = io.StringIO()
         prompts: list[str] = []
         scripted = list(inputs or [])
@@ -698,7 +751,8 @@ class TestStartIdempotency(_NoteHarness):
                                    return_value=stdout_tty), \
                         mock.patch("builtins.input", side_effect=fake_input):
                     code = main(argv)
-            self.assertEqual(code, 0, f"exit {code} for {argv!r}")
+            self.assertEqual(code, expected_code,
+                             f"exit {code} for {argv!r}")
         finally:
             os.chdir(orig_cwd)
         # ANSI-STRIPPED: these tests assert note CONTENT, never colour
@@ -711,7 +765,7 @@ class TestStartIdempotency(_NoteHarness):
         self.assertEqual(prompts, [])
         self.assertIn("Task #2 is already focused.", out)
         self.assertNotIn("-> Focused", out)
-        self.assertNotIn("lost focus", out)
+        self.assertNotIn("parked as [~]", out)
         self.assertEqual(ck.get_note(), None)
 
     def test_already_focused_even_when_task_carries_note(self):
@@ -731,8 +785,20 @@ class TestStartIdempotency(_NoteHarness):
 
     def test_switching_to_a_different_task_still_works(self):
         ck = self._ck()
-        out, _ = self._run(["start", "3"], ck.root)
+        out, _ = self._run(["focus", "3"], ck.root)
         self.assertIn("-> Focused [3]: write docs", out)
+
+    def test_start_refuses_to_steal_focus(self):
+        """v0.13.0: ``ck start`` never silently switches — another
+        task holding ``[>]`` produces the ``ck focus`` redirect."""
+        ck = self._ck()
+        out, _ = self._run(["start", "3"], ck.root, expected_code=1)
+        self.assertIn("ERROR: Task #2 is already focused.", out)
+        self.assertIn("Use: ck focus 3 to pause it and switch.", out)
+        # The refusal is total: task 3 never became focused.
+        from cklib.models import TaskStatus
+        self.assertEqual(
+            ck._load_plan().by_id(3).status, TaskStatus.OPEN)
 
     def test_idempotent_reset_zero_still_demotes(self):
         """The no-op guard covers only a positive already-focused ID;
@@ -740,6 +806,14 @@ class TestStartIdempotency(_NoteHarness):
         ck = self._ck()
         out, _ = self._run(["start", "0"], ck.root)
         self.assertIn("[ok] Focus reset.", ckui.strip_ansi(out))
+
+    def test_reset_reports_open_return_not_paused(self):
+        """The reset message must not claim the task was parked as
+        ``[~]`` — a reset returns it to OPEN by definition."""
+        ck = self._ck()
+        out, _ = self._run(["start", "0"], ck.root)
+        self.assertIn("returned to open", ckui.strip_ansi(out))
+        self.assertNotIn("parked as [~]", ckui.strip_ansi(out))
 
 
 class TestCurrentFocusLine(_NoteHarness):
@@ -776,8 +850,8 @@ class TestCurrentFocusLine(_NoteHarness):
     def test_focus_restored_from_ledger_shows_in_current_focus(self):
         ck = self._ck()
         ck.set_note("wip")
-        ck.start(3)
-        ck.start(2)  # re-focus: note restored from the paused ledger
+        ck.focus(3)   # park task 2 (noted) as [~]
+        ck.focus(2)   # resume: note intact, back under CURRENT FOCUS
         lines = ck.status().splitlines()
         focus_idx = next(
             i for i, l in enumerate(lines)
@@ -823,8 +897,8 @@ class TestNotesCommand(_NoteHarness):
     def test_paused_section_lists_all_paused_tasks(self):
         ck = self._ck("# P\n- [>] a\n- [ ] b\n- [ ] c\n- [ ] d\n")
         ck.set_note("a note")
-        ck.start(2)  # a paused w/ note
-        ck.start(3)  # b paused noteless
+        ck.focus(2)  # a parked w/ note
+        ck.focus(3)  # b parked noteless
         out = self._run(["notes"], ck.root)
         self.assertIn("[>] Active Focus:", out)
         self.assertIn("- [3] c", out)
@@ -837,9 +911,9 @@ class TestNotesCommand(_NoteHarness):
     def test_note_survives_intermediate_switches_in_notes_view(self):
         ck = self._ck("# P\n- [>] a\n- [ ] b\n- [ ] c\n- [ ] d\n")
         ck.set_note("a note")
-        ck.start(2)
-        ck.start(3)
-        ck.start(4)
+        ck.focus(2)
+        ck.focus(3)
+        ck.focus(4)
         out = self._run(["notes"], ck.root)
         self.assertIn("* Note: a note", out)
         self.assertIn("- [1] a", out)
@@ -891,13 +965,14 @@ class TestNoteCli(_NoteHarness):
             out = self._run(["st"], ck.root)
             self.assertIn("* Note: checking API mapping", out)
 
-            # 3. ck done closes the task and clears the note.
+            # 3. ck done graduates the task and its note into HISTORY.
             self._run(["done", "2"], ck.root)
             out = self._run(["st"], ck.root)
             self.assertNotIn("* Note:", out)
 
-        state = self._read_state_file(ck)
-        self.assertNotIn("active_task", state)
+        history = ck.history_file.read_text(encoding="utf-8")
+        self.assertIn("checking API mapping", history)
+        self.assertNotIn("* Note", self._plan_text(ck))
 
     def test_cli_note_no_args_is_usage_error(self):
         ck = self._ck()
@@ -933,7 +1008,7 @@ class TestNoteCli(_NoteHarness):
         self.assertNotIn("\033[", out)
         self.assertIn("* Note: checking API mapping", out)
         self.assertIn("[>] Focus:", out)
-        self.assertIn("- [2] implement API mapping", out)
+        self.assertIn("[#2] implement API mapping", out)
 
     def test_cli_st_forces_color_when_requested(self):
         """FORCE_COLOR=1 keeps colors even though stdout is a pipe."""
@@ -970,26 +1045,30 @@ class TestNoteDevMode(_NoteHarness):
             ck.set_note("sandboxed note")
             # Read-your-writes inside the dev session.
             self.assertEqual(ck.get_note()["note"], "sandboxed note")
-            sandbox_state = resolve_write_path(ck.state_file)
-        self.assertTrue(sandbox_state.exists())
-        data = json.loads(sandbox_state.read_text(encoding="utf-8"))
-        self.assertNotIn("note", data["active_task"])
-        self.assertEqual(
-            data["notes"]["2"][-1]["text"], "sandboxed note")
-        # Production state.json was never created.
-        self.assertFalse(ck.state_file.exists())
+            sandbox_plan = resolve_write_path(ck.plan_file)
+        self.assertTrue(sandbox_plan.exists())
+        text = sandbox_plan.read_text(encoding="utf-8")
+        self.assertIn("* Note (", text)
+        self.assertIn("sandboxed note", text)
+        # The production plan was never touched.
+        self.assertNotIn("* Note", self._plan_text(ck))
 
     def test_dev_mode_done_purges_sandbox_note(self):
         ck = self._ck()
         with mock.patch.dict(os.environ, {"CK_SANDBOX": "1"}):
             # Resolve the sandbox target while dev mode is active —
             # outside the patch the mapping falls back to the real path.
-            sandbox_state = resolve_write_path(ck.state_file)
+            sandbox_plan = resolve_write_path(ck.plan_file)
             ck.set_note("temp note")
             ck.done("2")
             self.assertIsNone(ck.get_note())
-        data = json.loads(sandbox_state.read_text(encoding="utf-8"))
-        self.assertNotIn("active_task", data)
+        text = sandbox_plan.read_text(encoding="utf-8")
+        self.assertNotIn("* Note", text)
+        self.assertNotIn("implement API mapping", text)
+        # Production plan never gained the note nor lost the task.
+        prod = self._plan_text(ck)
+        self.assertNotIn("* Note", prod)
+        self.assertIn("implement API mapping", prod)
 
 
 if __name__ == "__main__":

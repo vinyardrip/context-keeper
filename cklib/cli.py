@@ -18,6 +18,7 @@ from .config import (
 )
 from .core import (
     ContextKeeper,
+    FocusExistsError,
     UpdateResult,
     is_standalone_install,
     maybe_notify_update_for,
@@ -54,8 +55,9 @@ from .sandbox import (
 _HELP_GROUPS: List[tuple] = [
     ("TASKS", [
         ("add <text>", "Add a new task"),
-        ("start <ID>", "Focus a task (0 resets)"),
-        ("done <ID|range>", "Mark task(s) done"),
+        ("start <ID>", "Focus a task (0 resets; refuses to steal focus)"),
+        ("focus <ID>", "Switch focus: pause the current task ([~])"),
+        ("done <ID|range>", "Mark task(s) done -> HISTORY.md"),
         ("delete <ID>", "Delete a task (alias: rm)"),
         ("move <ID> <pos>", "Move a task"),
         ("swap <ID1> <ID2>", "Swap two tasks"),
@@ -66,12 +68,13 @@ _HELP_GROUPS: List[tuple] = [
         ("notes", "List active process notes"),
     ]),
     ("VIEW", [
-        ("st", "Status overview (Previous / Focus / Next)"),
+        ("st", "Status: Focus / Next / Paused / last history"),
+        ("st --history N", "Show the last N completed entries"),
         ("list [project]", "Print task list (pipe-friendly)"),
         ("dashboard [-v]", "Cross-project dashboard"),
     ]),
     ("SAVE", [
-        ("save", "Save context + optional local git commit"),
+        ("save", "Checkpoint to JOURNAL.md + optional local git commit"),
         ("edit", "Open PLAN.md in editor"),
         ("log [--all]", "View HISTORY.md (all archives with --all)"),
     ]),
@@ -93,6 +96,8 @@ _HELP_GROUPS: List[tuple] = [
     ]),
     ("PROJECTS", [
         ("init [--register]", "Initialize a project locally"),
+        ("migrate [--apply]", "Upgrade a legacy project to v0.13.0 "
+                              "(dry-run by default)"),
         ("register", "Add project to global registry"),
         ("unregister", "Remove project from registry"),
         ("prune", "Purge missing projects"),
@@ -277,6 +282,26 @@ def build_parser() -> "argparse.ArgumentParser":
         help="Also register the project in the global registry",
     )
 
+    p_migrate = sub.add_parser(
+        "migrate",
+        help="Upgrade a legacy (.ck/state.json) project to the "
+             "v0.13.0 split layout (dry-run preview by default)",
+    )
+    p_migrate.add_argument(
+        "--apply", action="store_true",
+        help="Apply the migration (writes a .ck_backup_<version>/ "
+             "backup first)",
+    )
+    p_migrate.add_argument(
+        "--dry-run", dest="dry_run", action="store_true",
+        help="Preview only (the default; mutually exclusive with "
+             "--apply)",
+    )
+    p_migrate.add_argument(
+        "-y", "--yes", dest="assume_yes", action="store_true",
+        help="Accepted with --apply as a no-op confirmation alias",
+    )
+
     p_st = sub.add_parser(
         "st",
         help="Status of current project (-l: list tasks, -e: edit plan, "
@@ -289,6 +314,10 @@ def build_parser() -> "argparse.ArgumentParser":
     p_st.add_argument("-g", "--global", dest="global_dash", action="store_true",
                       help="Show the global dashboard (same as `ck dashboard`)")
     p_st.add_argument("--all", action="store_true", help="Include full PLAN.md")
+    p_st.add_argument(
+        "--history", type=int, default=None, metavar="N",
+        help="Show the last N completed entries from HISTORY.md "
+             "(default 3; PLAN.md holds active tasks only)")
     p_st.add_argument(
         "project_name", nargs="?", default=None,
         help="Registered project to show (default: the current "
@@ -316,6 +345,21 @@ def build_parser() -> "argparse.ArgumentParser":
         "--no-input", dest="no_input", action="store_true",
         help="Never prompt for a note on focus loss (non-interactive)")
     p_start.add_argument(
+        "-y", "--yes", dest="assume_yes", action="store_true",
+        help="Assume 'yes' at the note prompt (asks only for the text)")
+
+    p_focus = sub.add_parser(
+        "focus",
+        help="Switch focus: pause the current task ([~]) and focus "
+             "another (0 resets)")
+    p_focus.add_argument(
+        "task_id", type=int,
+        help="Task ID to focus; 0 resets focus (focused task returns "
+             "to open, never paused)")
+    p_focus.add_argument(
+        "--no-input", dest="no_input", action="store_true",
+        help="Never prompt for a note on focus loss (non-interactive)")
+    p_focus.add_argument(
         "-y", "--yes", dest="assume_yes", action="store_true",
         help="Assume 'yes' at the note prompt (asks only for the text)")
 
@@ -489,10 +533,10 @@ def build_parser() -> "argparse.ArgumentParser":
 # Legacy positional parser (for backward compatibility with old ck
 # invocations like `ck add foo bar`).
 _LEGACY_CHOICES = (
-    "init", "st", "dashboard", "start", "done", "add", "note", "notes",
-    "save", "edit", "log", "install", "uninstall", "update", "help",
-    "list", "register", "unregister", "prune", "info",
-    "move", "swap", "reorder",
+    "init", "st", "dashboard", "start", "focus", "done", "add", "note",
+    "notes", "save", "edit", "log", "install", "uninstall", "update",
+    "help", "list", "register", "unregister", "prune", "info",
+    "move", "swap", "reorder", "migrate",
     "delete", "rm",
     "local", "remote", "today", "space",
     "completion",
@@ -551,10 +595,11 @@ _STATUS_SHORTCUTS = frozenset({"-l", "--list", "-e", "--edit",
 _LEGACY_FLAGS: dict[str, frozenset] = {
     "init": frozenset({"--register"}),
     "st": frozenset({"-l", "--list", "-e", "--edit", "-g", "--global",
-                     "--all"}),
+                     "--all", "--history"}),
     "dashboard": frozenset({"-v", "--verbose"}),
     "list": frozenset(),
     "start": frozenset({"--no-input", "-y", "--yes"}),
+    "focus": frozenset({"--no-input", "-y", "--yes"}),
     "done": frozenset(),
     "add": frozenset(),
     "move": frozenset(),
@@ -571,6 +616,7 @@ _LEGACY_FLAGS: dict[str, frozenset] = {
     "register": frozenset({"-n", "--name", "--path"}),
     "unregister": frozenset({"--path"}),
     "prune": frozenset(),
+    "migrate": frozenset({"--apply", "--dry-run", "-y", "--yes"}),
     "local": frozenset(),
     "remote": frozenset(),
     "today": frozenset(),
@@ -788,29 +834,107 @@ def _prompt_note_before_switch(ck: ContextKeeper, *, no_input: bool = False,
     print(f"* Note saved for [{saved['id']}]: {saved['note']}")
 
 
-def _print_focus_result(result) -> None:
-    """Print ``ck start`` output: the new focus, plus the Unfocused /
-    Paused Context handling for the task that lost it.
+def _run_start_like(ck: ContextKeeper, verb: str, task_id: int, *,
+                    no_input: bool = False, assume_yes: bool = False) -> int:
+    """Shared runner for ``ck start <ID>`` / ``ck focus <ID>``.
 
-    - The demoted task carries a note -> its scratchpad was archived
-      to HISTORY.md and a paused-context block is printed.
+    - IDEMPOTENCY: re-focusing the already-focused task is a clean
+      no-op — no note prompt, no plan mutation.
+    - ``0`` RESETS focus (the focused task returns to open, never
+      paused by a reset).
+    - ``start`` REFUSES to steal an existing focus: another task
+      holding ``[>]`` aborts with a redirect hint to
+      ``ck focus <NEW_ID>``.
+    - ``focus`` PARKS the old task as ``[~]`` (paused) after the
+      optional note prompt.
+
+    Returns the process exit code.
+    """
+    if task_id > 0 and ck.is_already_focused(task_id):
+        print(f"Task #{task_id} is already focused.")
+        return 0
+    if not (verb == "start" and task_id > 0):
+        # A positive ``start`` never demotes anything: with no focus
+        # set there is nothing to lose (the prompt would decline
+        # anyway), and with a foreign focus the command aborts below
+        # with the ``ck focus`` redirect — asking "Task #N lost
+        # focus?" before that refusal would be false.
+        _prompt_note_before_switch(
+            ck, no_input=no_input, assume_yes=assume_yes)
+    try:
+        if verb == "focus":
+            result = ck.focus(task_id)
+        else:
+            result = ck.start(task_id)
+    except FocusExistsError as exc:
+        _print_error(
+            f"ERROR: Task #{exc.task_id} is already focused. "
+            f"Use: ck focus {task_id} to pause it and switch.")
+        return 1
+    _print_focus_result(result)
+    return 0
+
+
+def _run_migrate(ck: ContextKeeper, args) -> int:
+    """Run ``ck migrate`` — legacy → v0.13.0 layout upgrade.
+
+    Dry-run is the DEFAULT: without ``--apply`` the command only
+    previews the actions it would take. ``--apply`` performs the
+    migration after writing a ``.ck_backup_<version>/`` backup of
+    the whole ``.ck/`` directory. Errors are logged to
+    ``.ck/migrate.log`` by the migration itself; the CLI maps them
+    to exit code 1.
+    """
+    apply = bool(getattr(args, "apply", False))
+    try:
+        result = ck.migrate(dry_run=not apply)
+    except ValueError as e:
+        _print_error(f"ERROR: {e}")
+        return 1
+    except OSError as e:
+        _print_error(f"ERROR: I/O error: {e}")
+        return 4
+    for line in result.messages:
+        print(line)
+    for line in result.errors:
+        _print_error(line)
+    if result.errors:
+        return 1
+    if not result.applied and not result.dry_run:
+        return 1
+    return 0
+
+
+def _print_focus_result(result) -> None:
+    """Print ``ck start``/``ck focus`` output: the new focus, plus the
+    paused task handling.
+
+    - The demoted task carries a note -> its scratchpad stays with
+      the task (inline in PLAN.md) and a paused-context block is
+      printed.
     - The demoted task had NO note -> a soft hint nudges the user to
-      attach one before switching (the task stays safely open).
+      attach one before switching (the task stays safely parked).
     """
     if result.task_id > 0:
         print(f"-> Focused [{result.task_id}]: {result.title}")
     else:
         _notice(ui.OK, "Focus reset.")
     if result.demoted_id is not None:
-        if result.had_note:
+        if result.task_id == 0:
+            # RESET: the demoted task returned to OPEN — it lost the
+            # focus but was deliberately NOT parked as ``[~]``.
+            _notice(ui.INFO,
+                    f"Task #{result.demoted_id} lost focus — returned "
+                    "to open (not paused).")
+        elif result.had_note:
             _notice(ui.INFO,
                     f"Task [{result.demoted_id}] {result.demoted_title} "
-                    "lost focus — moved to Unfocused / Paused Context "
-                    "(note preserved; archived by `ck done`).")
+                    "parked as [~] — paused (notes preserved; "
+                    "graduate into HISTORY.md on `ck done`).")
         else:
             _notice(ui.WARN,
-                    f"Task #{result.demoted_id} lost focus without a "
-                    "note. Attach one via `ck note <text>`.")
+                    f"Task #{result.demoted_id} parked as [~] without a "
+                    "note. Attach one via `ck note <ID> <text>`.")
 
 
 def _help_via_argparse(argv: List[str]) -> int:
@@ -989,6 +1113,8 @@ def _dispatch(argv: Optional[List[str]] = None) -> int:
                 rest.append("-g")
             elif args.all:
                 rest.append("--all")
+            if getattr(args, "history", None) is not None:
+                rest.extend(["--history", str(args.history)])
             return _run_status(ck, rest)
         elif args.command == "dashboard":
             print(ck.dashboard(verbose=getattr(args, "verbose", False)))
@@ -1016,18 +1142,15 @@ def _dispatch(argv: Optional[List[str]] = None) -> int:
                     rest.append("-y")
             return _run_space_mgmt(rest)
         elif args.command == "start":
-            # IDEMPOTENCY: re-focusing the already-focused task is a
-            # clean no-op — no note prompt, no plan mutation.
-            if args.task_id > 0 and ck.is_already_focused(args.task_id):
-                print(f"Task #{args.task_id} is already focused.")
-                return 0
-            _prompt_note_before_switch(
-                ck,
-                no_input=getattr(args, "no_input", False),
-                assume_yes=getattr(args, "assume_yes", False),
-            )
-            result = ck.start(args.task_id)
-            _print_focus_result(result)
+            _run_start_like(ck, "start", args.task_id,
+                            no_input=getattr(args, "no_input", False),
+                            assume_yes=getattr(args, "assume_yes", False))
+        elif args.command == "focus":
+            _run_start_like(ck, "focus", args.task_id,
+                            no_input=getattr(args, "no_input", False),
+                            assume_yes=getattr(args, "assume_yes", False))
+        elif args.command == "migrate":
+            return _run_migrate(ck, args)
         elif args.command == "done":
             spec = args.spec
             if not spec:
@@ -1560,11 +1683,17 @@ def _run_task_delete(cmd: str, rest: List[str]) -> int:
         f"Deleted task #{removed['id']}: {removed['title']} from "
         f"space '{target_space}' ({removed['remaining']} task(s) "
         "remaining, IDs re-indexed).")
-    if removed["notes_archived"]:
+    if removed.get("notes_archived"):
         _notice(
             ui.INFO,
             f"Archived {removed['notes_archived']} process note(s) "
             f"to HISTORY.md of space '{target_space}'.")
+    # v0.13.0: the refreshed listing (new positional IDs) prints right
+    # after the confirmation — the next `ck done N` always points at
+    # what the user just saw.
+    listing = removed.get("listing")
+    if listing:
+        print(listing)
     return 0
 
 
@@ -1824,6 +1953,39 @@ def _run_status(ck: ContextKeeper, rest: List[str]) -> int:
     Returns the exit code (0 = rendered, 1 = unknown project,
     2 = usage).
     """
+    # ``--history N`` (or ``--history=N``) caps the History section.
+    # Extracted FIRST so its numeric VALUE can never be mistaken for
+    # a positional project name below.
+    history_shown: Optional[int] = None
+    cleaned: List[str] = []
+    index = 0
+    while index < len(rest):
+        token = rest[index]
+        if token == "--history":
+            if index + 1 >= len(rest):
+                _print_error("ERROR: `--history` requires a number.")
+                return 2
+            try:
+                history_shown = int(rest[index + 1])
+            except ValueError:
+                _print_error(
+                    f"ERROR: Invalid --history value: {rest[index + 1]!r}")
+                return 2
+            index += 2
+            continue
+        if token.startswith("--history="):
+            try:
+                history_shown = int(token.split("=", 1)[1])
+            except ValueError:
+                _print_error(
+                    f"ERROR: Invalid --history value: {token!r}")
+                return 2
+            index += 1
+            continue
+        cleaned.append(token)
+        index += 1
+    rest = cleaned
+
     positionals = [tok for tok in rest if not tok.startswith("-")]
     if len(positionals) > 1:
         _print_error("ERROR: Usage: ck st [<project_name>] "
@@ -1860,10 +2022,16 @@ def _run_status(ck: ContextKeeper, rest: List[str]) -> int:
     elif "-g" in rest or "--global" in rest:
         print(target.dashboard())
     elif "--all" in rest:
-        print(target.status())
+        warn = target._warn_if_unmigrated()
+        if warn:
+            print(ui.notice(ui.WARN, warn))
+        print(target.status(history_shown=history_shown))
         _print_full_plan(target)
     else:
-        print(target.status())
+        warn = target._warn_if_unmigrated()
+        if warn:
+            print(ui.notice(ui.WARN, warn))
+        print(target.status(history_shown=history_shown))
     return 0
 
 
@@ -1936,15 +2104,53 @@ def _legacy_dispatch(raw: List[str]) -> int:
                 _print_error(
                     f"ERROR: Invalid task ID: {id_tokens[0]!r}")
                 return 2
-            # IDEMPOTENCY: re-focusing the already-focused task is
-            # a clean no-op — no note prompt, no plan mutation.
-            if tid > 0 and ck.is_already_focused(tid):
-                print(f"Task #{tid} is already focused.")
-                return 0
-            _prompt_note_before_switch(
-                ck, no_input=no_input, assume_yes=assume_yes)
-            result = ck.start(tid)
-            _print_focus_result(result)
+            return _run_start_like(
+                ck, "start", tid, no_input=no_input, assume_yes=assume_yes)
+        elif cmd == "focus":
+            no_input = False
+            assume_yes = False
+            id_tokens: List[str] = []
+            for tok in rest:
+                if tok == "--no-input":
+                    no_input = True
+                elif tok in ("-y", "--yes"):
+                    assume_yes = True
+                else:
+                    id_tokens.append(tok)
+            if not id_tokens:
+                print("Usage: ck focus <ID>")
+                return 2
+            try:
+                tid = int(id_tokens[0])
+            except ValueError:
+                _print_error(
+                    f"ERROR: Invalid task ID: {id_tokens[0]!r}")
+                return 2
+            return _run_start_like(
+                ck, "focus", tid, no_input=no_input, assume_yes=assume_yes)
+        elif cmd == "migrate":
+            apply = "--apply" in rest or "-y" in rest or "--yes" in rest
+            dry_run = "--dry-run" in rest
+            if apply and dry_run:
+                _print_error(
+                    "ERROR: `--apply` and `--dry-run` are mutually "
+                    "exclusive.")
+                return 2
+            try:
+                result = ck.migrate(dry_run=not apply)
+            except ValueError as e:
+                _print_error(f"ERROR: {e}")
+                return 1
+            except OSError as e:
+                _print_error(f"ERROR: I/O error: {e}")
+                return 4
+            for line in result.messages:
+                print(line)
+            for line in result.errors:
+                _print_error(line)
+            if result.errors:
+                return 1
+            return 0
         elif cmd == "done":
             spec = rest[0] if rest else ""
             if not spec:
@@ -2429,8 +2635,8 @@ def _run_space_command(space: str, rest: List[str]) -> int:
             _notice(ui.OK, "Focus reset.")
         if result.get("demoted_id") is not None:
             _notice(ui.INFO, f"Task #{result['demoted_id']} "
-                             f"{result['demoted_title']} lost focus "
-                             "(demoted to open).")
+                             f"{result['demoted_title']} parked as [~] "
+                             "(paused).")
         return 0
 
     if action == "note":

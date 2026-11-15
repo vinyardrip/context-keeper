@@ -140,6 +140,9 @@ class TestDefaultTaskReplacement(_IsolatedHome):
                 "\n## Completed\n",
                 encoding="utf-8",
             )
+            # v0.13.0 write-gate: raw fixtures carry the current marker.
+            ck.ck_path.joinpath("version").write_text(
+                ckconfig.VERSION + "\n", encoding="utf-8")
 
             ck.add_task("собрать релиз")
 
@@ -176,6 +179,9 @@ class TestDefaultTaskReplacement(_IsolatedHome):
                 "\n## Completed\n",
                 encoding="utf-8",
             )
+            # v0.13.0 write-gate: raw fixtures carry the current marker.
+            ck.ck_path.joinpath("version").write_text(
+                ckconfig.VERSION + "\n", encoding="utf-8")
 
             new_id = ck.add_task("second task")
 
@@ -196,6 +202,9 @@ class TestDefaultTaskReplacement(_IsolatedHome):
                 "\n## Completed\n",
                 encoding="utf-8",
             )
+            # v0.13.0 write-gate: raw fixtures carry the current marker.
+            ck.ck_path.joinpath("version").write_text(
+                ckconfig.VERSION + "\n", encoding="utf-8")
 
             new_id = ck.add_task("third task")
 
@@ -216,6 +225,9 @@ class TestDefaultTaskReplacement(_IsolatedHome):
                 "\n## Completed\n",
                 encoding="utf-8",
             )
+            # v0.13.0 write-gate: raw fixtures carry the current marker.
+            ck.ck_path.joinpath("version").write_text(
+                ckconfig.VERSION + "\n", encoding="utf-8")
 
             new_id = ck.add_task("post-completion task")
 
@@ -235,6 +247,9 @@ class TestDefaultTaskReplacement(_IsolatedHome):
                 "\n## Completed\n",
                 encoding="utf-8",
             )
+            # v0.13.0 write-gate: raw fixtures carry the current marker.
+            ck.ck_path.joinpath("version").write_text(
+                ckconfig.VERSION + "\n", encoding="utf-8")
 
             new_id = ck.add_task("post-focus task")
 
@@ -663,7 +678,8 @@ class TestSpaceCommandRouting(_IsolatedHome):
         self.assertIn("-> Focused [2]: second task", out)
         text = self._space_text("local")
         self.assertIn("- [>] second task", text)
-        self.assertIn("- [ ] first task", text)
+        # The demoted task is parked as [~] (v0.13.0).
+        self.assertIn("- [~] first task", text)
 
     def test_local_focus_is_idempotent(self):
         self._seed("local", "first task", "second task")
@@ -725,7 +741,8 @@ class TestSpaceCommandRouting(_IsolatedHome):
         self.assertIn("-> Focused [2]: open firewall", out)
         text = self._space_text("remote")
         self.assertIn("- [>] open firewall", text)
-        self.assertIn("- [ ] provision VPS", text)
+        # The demoted task is parked as [~] (v0.13.0).
+        self.assertIn("- [~] provision VPS", text)
 
     def test_remote_focus_reset_with_zero(self):
         self._seed("remote", "provision VPS")
@@ -1401,17 +1418,15 @@ class TestSpaceStatusEditStart(_IsolatedHome):
         self.assertEqual(
             lines[4], " -> CURRENT FOCUS: [#2] second task")
         self.assertEqual(lines[5], "    * Note: halfway through")
-        # 4) work context sections
+        # 4) work context sections (v0.13.0 layout)
         self.assertEqual(lines[7], " -> WORK CONTEXT:")
-        self.assertEqual(lines[8], "    << Done:")
-        self.assertEqual(lines[9], "       - [1] first task [x]")
-        self.assertEqual(lines[10], "    [>] Focus:")
-        self.assertEqual(lines[11], "       - [2] second task")
-        self.assertEqual(lines[12], "       * Note: halfway through")
-        self.assertEqual(lines[13], "    >> Upcoming:")
-        self.assertEqual(lines[14], "       - [3] third task [ ]")
-        self.assertEqual(lines[15], "    >> Backlog: 2 tasks remaining")
-        self.assertEqual(lines[16], bar)
+        self.assertEqual(lines[8], "    [>] Focus:")
+        self.assertEqual(lines[9], "       - [#2] second task")
+        self.assertEqual(lines[10], "    [~] Paused: (none)")
+        self.assertEqual(lines[11], "    [x] History (last 3):")
+        self.assertEqual(lines[12], "       - [x] 1. first task")
+        self.assertEqual(lines[13], "    >> Backlog: 2 tasks remaining")
+        self.assertEqual(lines[14], bar)
 
     def test_status_is_exact_alias_of_st(self):
         self._seed("local", "first task", "second task")
@@ -1448,7 +1463,7 @@ class TestSpaceStatusEditStart(_IsolatedHome):
         code, out = self._run(["local", "st"])
 
         self.assertEqual(code, 0)
-        self.assertIn("    Unfocused / Paused Context:", out)
+        self.assertIn("    [~] Paused:", out)
         self.assertIn("       - [1] alpha", out)
         self.assertIn("         * Note: not started", out)
         self.assertIn("       - [3] gamma", out)
@@ -1519,7 +1534,7 @@ class TestSpaceStatusEditStart(_IsolatedHome):
         self.assertEqual(
             focus_switch,
             "-> Focused [3]: third task\n"
-            "[i] Task #2 second task lost focus (demoted to open).\n",
+            "[i] Task #2 second task parked as [~] (paused).\n",
         )
         self.assertIn("[ok] Focus reset.", start_reset)
 

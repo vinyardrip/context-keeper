@@ -1,6 +1,6 @@
 # ROADMAP / PLAN
 
-Current version: v0.12.1
+Current version: v0.13.0
 
 ## Backlog
 - [x] Инициализировать базовую структуру проекта (.ck/)
@@ -71,6 +71,15 @@ Current version: v0.12.1
 - [ ] BUG: ck delete <ID> не поддерживает списки/диапазоны ID, из-за позиционных индексов последовательное удаление (например, 63, потом 64) удаляет не те задачи. Добавить поддержку 'ck delete 63-64' или 'ck delete 63,64' с обработкой сдвига индексов.
 - [ ] BUG: ck add выводит глобальный ID (например, 106), а ck list — позиционный (63). Из-за этого команды delete/done не работают с ID из вывода add. Синхронизировать вывод ck add с реальной позицией в PLAN.md.
 ## Completed
+
+### v0.13.0
+- [x] Разделение PLAN/HISTORY (MAJOR): `PLAN.md` хранит только активные задачи (`[ ]`/`[>]`/`[~]`) с инлайновыми заметками `* Note (<ts> UTC):`; `HISTORY.md` — реестр завершённых `- [x] <ts>: <title> <!-- id: uuid -->`, куда `ck done` переводит задачу целиком (`v0.13.0`)
+- [x] Стабильные UUID: каждая задача несёт `<!-- id: 8 символов -->` (генерирует `ck add`, проставляет миграция); реиндексация и перестановки никогда не перегенерируют ссылку (`v0.13.0`)
+- [x] Статус `[~]` (paused) и разделение start/focus: `ck focus <ID>` паркует старый фокус как `[~]` (заметки сохраняются, беззаметочная парковка предупреждает), `ck start` возобновляет только без чужого фокуса, иначе отказ с подсказкой `ck focus`; `start 0`/`focus 0` сбрасывают в `[ ]`, не в `[~]` (`v0.13.0`)
+- [x] Новый `ck st`: блоки `[>] Focus`/`Next`, `[~] Paused`, `[x] History (last 3, --history N)` из HISTORY.md и баннер `>> Backlog` (open+focused+paused, без `[x]`) (`v0.13.0`)
+- [x] `ck save` пишет чекпоинты в `.ck/JOURNAL.md` (HISTORY.md больше не принимает записи `ck save`), ротация журнала под тем же локом (`v0.13.0`)
+- [x] `ck migrate [--dry-run|--apply]`: dry-run по умолчанию, `--apply` бэкапит `.ck/` в `.ck_backup_<version>/`, переносит `[x]` в HISTORY.md, инлайнит заметки `state.json`, создаёт version/meta.json/links.json/AGENTS.md/JOURNAL.md и удаляет `state.json`; write-команды на проекте без маркера отказывают с подсказкой `ck migrate` (`v0.13.0`)
+- [x] README (EN+RU), `prompt.md`, ROADMAP и `tests/test_split.py` обновлены; полный набор тестов зелёный (`v0.13.0`)
 
 ### v0.12.1
 - [x] `ck today`, `ck today st` и `ck today list` выводят байт-в-байт одинаковый плоский список: датированный заголовок `## Current Sprint (YYYY-MM-DD, <weekday>)`, задачи и заметки, без progress / CURRENT FOCUS / WORK CONTEXT / Skipped / Backlog (`v0.12.1`)

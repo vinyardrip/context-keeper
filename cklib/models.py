@@ -8,11 +8,77 @@ and a deterministic full-file ``render_plan``.
 
 from __future__ import annotations
 
+import secrets
+import string
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
-from . import sequence
+from . import sequence, notes as note_store
+
+# UUID alphabet: lowercase letters + digits (the spec's example IDs
+# such as ``a1b2c3d4`` / ``e5f6g7h8`` are 8-char lowercase
+# alphanumeric tokens — base36, not plain hex).
+_UUID_ALPHABET = string.ascii_lowercase + string.digits
+_UUID_LENGTH = 8
+
+
+def new_task_uuid() -> str:
+    """A fresh 8-char lowercase alphanumeric stable task reference.
+
+    Cryptographically random (``secrets``) so two tasks can never
+    collide in practice; the value is written once, as a hidden HTML
+    comment on the task line, and never regenerated afterwards.
+    """
+    return "".join(secrets.choice(_UUID_ALPHABET) for _ in range(_UUID_LENGTH))
+
+
+def note_stamp(created: str) -> str:
+    """Human stamp for an inline note: ``YYYY-MM-DD HH:MM UTC``.
+
+    Unparseable/empty inputs render as-is (or empty), so legacy
+    values never crash the renderer.
+    """
+    if not isinstance(created, str) or not created:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(created.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return created
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def history_timestamp(now: Optional[datetime] = None) -> str:
+    """The completion timestamp written into HISTORY.md lines."""
+    ts = now or datetime.now(timezone.utc)
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
+
+
+@dataclass
+class HistoryEntry:
+    """One completed task parsed from HISTORY.md (v0.13.0).
+
+    ``timestamp`` keeps the ``YYYY-MM-DD HH:MM`` completion stamp,
+    ``title`` the task text, and ``uuid`` the stable reference that
+    links the entry back to the (long-gone) plan position.
+    """
+
+    timestamp: str
+    title: str
+    uuid: str = ""
+    notes: list = field(default_factory=list)
+
+    def to_line(self) -> str:
+        """Render as ``- [x] <ts>: <title> <!-- id: <uuid> -->``."""
+        line = f"- [x] {self.timestamp}: {self.title}".rstrip()
+        if self.uuid:
+            line += f" <!-- id: {self.uuid} -->"
+        return line
 
 
 # ---------------------------------------------------------------------------
@@ -21,23 +87,30 @@ from . import sequence
 
 
 class TaskStatus(str, Enum):
-    """The three canonical task states."""
+    """The four canonical task states (v0.13.0).
+
+    ``OPEN`` / ``FOCUSED`` / ``PAUSED`` are the ACTIVE states: they
+    live in ``PLAN.md``. ``DONE`` is terminal: a completed task moves
+    to ``HISTORY.md`` with a timestamp, so PLAN.md holds work only.
+    """
 
     OPEN = "open"
     FOCUSED = "focused"
+    PAUSED = "paused"
     DONE = "done"
 
     @property
     def canonical_marker(self) -> str:
-        """Canonical CommonMark marker — always ``[ ]`` / ``[>]`` / ``[x]``.
+        """Canonical CommonMark marker — ``[ ]`` / ``[>]`` / ``[~]`` / ``[x]``.
 
         This is what the writer emits; the parser also accepts the
         legacy no-space form ``[]`` for backward compatibility.
         """
         return {
             TaskStatus.OPEN: " ",       # "- [ ] title"
-            TaskStatus.FOCUSED: ">",   # "- [>] title"
-            TaskStatus.DONE: "x",      # "- [x] title"
+            TaskStatus.FOCUSED: ">",    # "- [>] title"
+            TaskStatus.PAUSED: "~",     # "- [~] title"
+            TaskStatus.DONE: "x",       # "- [x] title"
         }[self]
 
     @property
@@ -46,6 +119,7 @@ class TaskStatus(str, Enum):
         return {
             TaskStatus.OPEN: "",        # "- [] title"
             TaskStatus.FOCUSED: ">",    # "- [>] title"
+            TaskStatus.PAUSED: "~",     # "- [~] title"
             TaskStatus.DONE: "x",       # "- [x] title"
         }[self]
 
@@ -56,9 +130,16 @@ class TaskStatus(str, Enum):
             return cls.OPEN
         if m == ">":
             return cls.FOCUSED
+        if m == "~":
+            return cls.PAUSED
         if m in {"x"}:
             return cls.DONE
         raise ValueError(f"Unknown task marker: {marker!r}")
+
+    @property
+    def is_active(self) -> bool:
+        """True for the statuses that live in PLAN.md (not ``[x]``)."""
+        return self is not TaskStatus.DONE
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +169,14 @@ class Task:
     text found inside ``[...]`` on disk (preserving legacy vs canonical
     distinctions for read-only purposes); ``line_number`` is the 1-based
     source line. ``section`` is the most recent ``##`` header text.
+
+    ``uuid`` is the STABLE task reference (v0.13.0): an 8-character
+    lowercase alphanumeric token rendered as a hidden HTML comment
+    (``<!-- id: a1b2c3d4 -->``) at the end of the task line. Numeric IDs
+    are positional and shift on every deletion/re-index; the UUID never
+    changes, so agents and external tooling can address a task across
+    renumbering. An empty string means "no UUID yet" (legacy content) —
+    the renderer simply omits the comment until one is assigned.
     """
 
     id: int
@@ -96,8 +185,9 @@ class Task:
     line_number: int
     marker_raw: str
     section: str = ""
-    notes: list[str] = field(default_factory=list)
+    notes: list = field(default_factory=list)
     legacy_syntax: bool = False
+    uuid: str = ""
     # 1-based source position where a NEW task should be inserted
     # (end of the ``## Current Sprint`` section). Parsed tasks never
     # carry this hint; it routes the renderer through the INSERT
@@ -107,8 +197,16 @@ class Task:
     # ---- rendering ----
 
     def to_line(self) -> str:
-        """Render to canonical CommonMark (``- [ ]`` / ``- [>]`` / ``- [x]``)."""
-        return f"- [{self.status.canonical_marker}] {self.title}".rstrip()
+        """Render to canonical CommonMark (``- [ ]`` / ``- [>]`` / ...).
+
+        The stable UUID is appended as a hidden HTML comment so the
+        reference survives renumbering:
+        ``- [ ] title <!-- id: a1b2c3d4 -->``.
+        """
+        line = f"- [{self.status.canonical_marker}] {self.title}".rstrip()
+        if self.uuid:
+            line += f" <!-- id: {self.uuid} -->"
+        return line
 
     def to_legacy_line(self) -> str:
         """Render using legacy no-space marker for ``OPEN`` tasks only.
@@ -178,18 +276,26 @@ class TaskList:
         return [t for t in self.tasks if t.status == TaskStatus.FOCUSED]
 
     @property
-    def done(self) -> list[Task]:
-        return [t for t in self.tasks if t.status == TaskStatus.DONE]
+    def paused(self) -> list[Task]:
+        """Tasks whose focus was switched away (``[~]``), in doc order."""
+        return [t for t in self.tasks if t.status == TaskStatus.PAUSED]
 
     @property
     def total(self) -> int:
         return len(self.tasks)
 
-    @property
-    def completion_pct(self) -> float:
+    def completion_pct(self, done_count: int = 0) -> float:
+        """Percent of work done given an EXTERNAL completed count.
+
+        v0.13.0 moved completed tasks into HISTORY.md, so the plan
+        itself no longer carries ``[x]`` rows and cannot self-report
+        its completion ratio. Callers pass the count of completed
+        tasks read from HISTORY.md (projects) or counted in-file
+        (spaces, which keep their own ``[x]`` rows).
+        """
         if not self.tasks:
             return 0.0
-        return round(100.0 * len(self.done) / len(self.tasks), 1)
+        return round(100.0 * done_count / len(self.tasks), 1)
 
     def gap_ids(self) -> list[int]:
         """Detect literal missing numeric IDs in the task sequence.
@@ -219,7 +325,8 @@ class TaskList:
 
     def add(self, title: str, status: TaskStatus = TaskStatus.OPEN,
             section: str = "", line_number: int | None = None,
-            insert_line: int | None = None) -> Task:
+            insert_line: int | None = None,
+            uuid: str | None = None) -> Task:
         """Append a new task node and return it.
 
         New nodes are placed **past the end of the source document**
@@ -233,6 +340,10 @@ class TaskList:
         source position (used by ``ck add`` to place the task at the
         end of ``## Current Sprint`` instead of just before
         ``## Completed``).
+
+        ``uuid`` pins a specific stable reference (the migration
+        preserves the task's original UUID); when omitted a fresh
+        one is generated so every new task is addressable forever.
         """
         new_id = (max((t.id for t in self.tasks), default=0)) + 1
         if line_number is None:
@@ -259,18 +370,26 @@ class TaskList:
             section=section,
             legacy_syntax=False,
             insert_line=insert_line,
+            uuid=uuid if uuid is not None else new_task_uuid(),
         )
         self.tasks.append(task)
         return task
 
     def focus(self, task_id: int) -> Task:
-        """Mark ``task_id`` as focused; demote any other focused task to OPEN."""
+        """Switch focus to ``task_id``; the old focus becomes PAUSED.
+
+        v0.13.0 semantics: a focus SWITCH never discards the previous
+        work context — the demoted task is marked ``[~]`` (paused) so
+        it stays visible in the plan and can be resumed later.
+        ``start 0`` / ``focus 0`` (the explicit reset path) demotes
+        back to OPEN instead, which is handled by the callers.
+        """
         target = self.by_id(task_id)
         if target is None:
             raise KeyError(f"No task with id {task_id}")
         for t in self.tasks:
             if t.status == TaskStatus.FOCUSED and t.id != task_id:
-                t.status = TaskStatus.OPEN
+                t.status = TaskStatus.PAUSED
         target.status = TaskStatus.FOCUSED
         return target
 
@@ -290,12 +409,17 @@ class TaskList:
         return transitioned
 
     def edit_note(self, task_id: int, note: str) -> Task:
-        """Append a note string to a task's node (in-memory; HISTORY.md is separate)."""
+        """Append a note entry to a task's node (in-memory).
+
+        v0.13.0 notes live INLINE in PLAN.md as timestamped
+        ``* Note (...)`` lines. Entries are dicts ``{"text",
+        "created"}`` — the same shape every note renderer consumes.
+        """
         t = self.by_id(task_id)
         if t is None:
             raise KeyError(f"No task with id {task_id}")
         if note:
-            t.notes.append(note)
+            t.notes.append({"text": note, "created": note_store.now_iso()})
         return t
 
     def remove(self, task_id: int) -> Optional[Task]:
@@ -516,5 +640,9 @@ __all__ = [
     "TaskStatus",
     "Section",
     "Notes",
+    "HistoryEntry",
     "CompletedTaskError",
+    "new_task_uuid",
+    "note_stamp",
+    "history_timestamp",
 ]

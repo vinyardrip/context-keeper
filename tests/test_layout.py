@@ -429,27 +429,28 @@ class TestTruncateEllipsis(unittest.TestCase):
 
 
 class TestWorkContext(_IsolatedHome, unittest.TestCase):
-    """``ck st`` renders the ordered WORK CONTEXT block:
+    """``ck st`` renders the ordered WORK CONTEXT block (v0.13.0):
 
-    1. ``<< Done``      — the completed tasks (last 2 shown, count +
-       overflow line when more)
-    2. ``[!] Skipped``  — opens genuinely passed over between the last
-       completion and an *explicit* focus, BY NAME, capped at 2
-       (count header + ``... (+N more skipped)`` when more). Omitted
-       entirely when there is no real execution gap; sequential
-       pending tasks are never labelled Skipped.
-    3. ``[>] Focus`` / ``[>] Next`` — explicit focus, or the
-       auto-resolved first pending candidate (no mutation)
-    4. ``>> Upcoming``  — the next pending task after Focus/Next
-    5. ``Unfocused / Paused Context`` — still-open tasks that lost
-       focus (with their bound notes)
-    6. ``>> Backlog``   — the highlighted BOTTOM BANNER: a single
-       ``N tasks remaining`` count of the TOTAL remaining
-       uncompleted tasks (Total − Done — never reduced by the
-       tasks named in the sections above)
+    1. ``[>] Focus`` / ``[>] Next`` — explicit focus (``[#N]``), or the
+       auto-resolved first pending candidate (``[N] ... [ ]``, display
+       only — the plan is never mutated)
+    2. ``[~] Paused`` — tasks parked by ``ck focus`` (``[~]``), plus
+       noted open tasks; each item carries its inline notes
+    3. ``[x] History (last N):`` — the LAST N entries from
+       ``.ck/HISTORY.md`` (``+M more in .ck/HISTORY.md`` overflow;
+       ``(none completed)`` when empty). In-file ``[x]`` rows feed the
+       progress ratio but are NOT displayed here.
+    4. ``>> Backlog`` — the highlighted BOTTOM BANNER: a single
+       ``N task(s) remaining`` count of ALL active tasks (Total − Done
+       — never reduced by the tasks named in the sections above)
+
+    The v0.12 ``<< Done`` / ``[!] Skipped`` / ``>> Upcoming`` sections
+    are GONE: completions moved to HISTORY.md, pass-over gaps ride the
+    progress line as ``(gaps: ...)``, and everything after the first
+    open task is simply backlog.
 
     Every active section is a header line with its task items
-    indented on new lines below it (``- [ID] Title [st]`` per line).
+    indented on new lines below it.
     """
 
     def _ck(self, tmp: Path, plan: str) -> ContextKeeper:
@@ -458,50 +459,76 @@ class TestWorkContext(_IsolatedHome, unittest.TestCase):
         ck = ContextKeeper(root=root)
         ck.ck_path.mkdir(parents=True, exist_ok=True)
         ck.plan_file.write_text(plan, encoding="utf-8")
+        # v0.13.0 write-gate: raw fixtures carry the current marker.
+        ck.ck_path.joinpath("version").write_text(
+            ckconfig.VERSION + "\n", encoding="utf-8")
         return ck
 
-    def _status(self, plan: str) -> str:
+    def _status(self, plan: str, history: str | None = None) -> str:
         with tempfile.TemporaryDirectory() as td:
             ck = self._ck(Path(td), plan)
+            if history is not None:
+                ck.history_file.write_text(history, encoding="utf-8")
             tl = parse_plan(ck.plan_file.read_text(encoding="utf-8"))
             # Plain palette: byte-exact assertions must never depend
             # on whether the test runner's stdout is a TTY.
             return _render_local_status(ck, tl, palette=ckui.Palette(False))
 
-    # ---- element 1: << Done (last 2 shown, count + overflow) ------ #
+    # ---- element: [x] History (HISTORY.md ledger, last N shown) ---- #
 
-    def test_done_shows_last_two_completed_before_focus(self):
-        plan = "# P\n- [x] old\n- [x] mid\n- [x] nearer\n- [>] cur\n"
-        out = self._status(plan)
-        # The LAST 2 completions before the focus — not just one.
-        self.assertIn("<< Done (3 tasks):", out)
-        self.assertIn("- [2] mid [x]", out)
-        self.assertIn("- [3] nearer [x]", out)
-        self.assertIn("... (+1 more done)", out)
-        # Overflow: the earliest completion is folded into the count.
-        self.assertNotIn("[1] old", out)
+    _HIST4 = (
+        "## Completed\n"
+        "- [x] 2026-11-01 09:00: old\n"
+        "- [x] 2026-11-02 10:00: mid\n"
+        "- [x] 2026-11-03 11:00: nearer\n"
+        "- [x] 2026-11-04 12:00: freshest\n"
+    )
 
-    def test_done_without_focus_is_last_two_shown(self):
-        plan = "# P\n- [x] old\n- [x] newer\n- [ ] cur\n"
-        out = self._status(plan)
-        # Exactly 2 tasks: all shown, no count header, no overflow.
-        self.assertIn("<< Done:", out)
-        self.assertNotIn("<< Done (", out)
-        self.assertIn("- [1] old [x]", out)
-        self.assertIn("- [2] newer [x]", out)
+    def test_history_shows_last_three_with_overflow(self):
+        out = self._status("# P\n- [>] cur\n", history=self._HIST4)
+        # The LAST 3 ledger entries — not just one — plus the
+        # overflow line folding the earliest into a count.
+        self.assertIn("    [x] History (last 3):", out)
+        self.assertIn("- [x] 2026-11-02 10:00: mid", out)
+        self.assertIn("- [x] 2026-11-03 11:00: nearer", out)
+        self.assertIn("- [x] 2026-11-04 12:00: freshest", out)
+        self.assertIn("... (+1 more in .ck/HISTORY.md)", out)
+        # The earliest entry is folded into the overflow count.
+        self.assertNotIn("2026-11-01 09:00: old", out)
 
-    def test_done_single_completion(self):
-        out = self._status("# P\n- [x] only\n- [>] cur\n")
-        self.assertIn("<< Done:", out)
-        self.assertIn("- [1] only [x]", out)
-        # No count header and no overflow when under the limit.
-        self.assertNotIn("tasks):", out.split("<< Done")[1].split("[>")[0])
+    def test_history_shows_all_when_under_limit(self):
+        hist = (
+            "## Completed\n"
+            "- [x] 2026-11-01 09:00: old\n"
+            "- [x] 2026-11-02 10:00: newer\n"
+        )
+        out = self._status("# P\n- [ ] cur\n", history=hist)
+        # Exactly 2 entries: all shown, no overflow.
+        self.assertIn("    [x] History (last 3):", out)
+        self.assertIn("- [x] 2026-11-01 09:00: old", out)
+        self.assertIn("- [x] 2026-11-02 10:00: newer", out)
+        self.assertNotIn("more in", out)
 
-    def test_done_none_hint(self):
+    def test_history_single_entry_no_overflow(self):
+        hist = "## Completed\n- [x] 2026-11-01 09:00: only\n"
+        out = self._status("# P\n- [>] cur\n", history=hist)
+        self.assertIn("- [x] 2026-11-01 09:00: only", out)
+        self.assertNotIn("more in", out)
+
+    def test_history_none_hint(self):
         out = self._status("# P\n- [>] only focus\n")
-        self.assertIn("<< Done: (none completed)", out)
+        self.assertIn("    [x] History (last 3):", out)
+        self.assertIn("       (none completed)", out)
 
-    # ---- element 2: [!] Skipped (named gaps, capped at 2) --------- #
+    def test_in_file_done_rows_feed_progress_not_history(self):
+        """A hand-written ``[x]`` row counts toward the progress ratio
+        but is never displayed as a History ledger entry."""
+        out = self._status("# P\n- [x] hand done\n- [>] cur\n")
+        self.assertIn(" [%] Progress: 1/2 tasks done (50.0%)", out)
+        self.assertIn("       (none completed)", out)
+        self.assertNotIn("hand done", out.split("History")[1])
+
+    # ---- backlog: Total − Done, sections never subtract ------------- #
 
     def test_sequential_after_done_is_backlog_not_skipped(self):
         """The motivating case: opens following a done task are just
@@ -515,37 +542,36 @@ class TestWorkContext(_IsolatedHome, unittest.TestCase):
         )
         out = self._status(plan)
         self.assertNotIn("[!] Skipped", out)
-        # Total − Done = 9 − 1: Focus/Next and Upcoming are NOT
-        # subtracted from the backlog count.
+        # Total − Done = 9 − 1: every open task counts.
         self.assertIn(">> Backlog: 8 tasks remaining", out)
         self.assertIn("- [1] task 1 [ ]", out)
-        self.assertIn("- [2] task 2 [ ]", out)
 
     def test_backlog_is_total_minus_done(self):
-        """Backlog = Total − Done: the tasks shown as Focus/Next and
-        Upcoming are NOT subtracted from the remaining count."""
+        """Backlog = Total − Done: the Next candidate and the tail are
+        NOT subtracted from the remaining count."""
         plan = (
             "# P\n- [x] done\n"
             + "\n".join(f"- [ ] t{i}" for i in range(1, 7))
             + "\n"
         )
         out = self._status(plan)
-        # Total=7, Done=1 → 6 remaining (current=t1, upcoming=t2 stay
-        # counted); no Skipped block either.
         self.assertNotIn("[!] Skipped", out)
         self.assertIn(">> Backlog: 6 tasks remaining", out)
         self.assertIn("- [2] t1 [ ]", out)
-        self.assertIn("- [3] t2 [ ]", out)
 
-    def test_backlog_counts_skipped_tasks(self):
-        """Skipped tasks are NOT subtracted from the backlog count —
-        the banner is always Total − Done."""
-        # Skipped (a, b passed over before focus c) + upcoming d.
+    def test_passed_over_opens_are_plain_backlog(self):
+        """Open tasks positioned before the focus are NOT named in
+        any section (the old Skipped block is gone) — they only count
+        toward the backlog banner."""
         out = self._status("# P\n- [ ] a\n- [ ] b\n- [>] c\n- [ ] d\n")
-        self.assertIn("[!] Skipped:", out)
-        self.assertIn("- [1] a [ ]", out)
-        self.assertIn("- [2] b [ ]", out)
+        self.assertNotIn("[!] Skipped", out)
         self.assertIn(">> Backlog: 4 tasks remaining", out)  # 4 − 0
+        # With an explicit focus, only the focus is named; the
+        # passed-over opens and the tail stay unnamed.
+        self.assertIn("- [#3] c", out)
+        self.assertNotIn("- [1] a", out)
+        self.assertNotIn("- [2] b", out)
+        self.assertNotIn("- [4] d", out)
 
     def test_backlog_singular_grammar(self):
         """Exactly one remaining task reads '1 task remaining'."""
@@ -559,108 +585,61 @@ class TestWorkContext(_IsolatedHome, unittest.TestCase):
 
     def test_backlog_banner_renders_below_paused_context(self):
         """PLACEMENT: the Backlog banner is the VERY LAST line of the
-        WORK CONTEXT block — after ``Unfocused / Paused Context`` —
-        directly above the closing border."""
+        WORK CONTEXT block — after ``[~] Paused`` — directly above
+        the closing border."""
         with tempfile.TemporaryDirectory() as td:
             ck = self._ck(
                 Path(td),
-                "# P\n- [ ] a\n- [ ] b\n- [>] c\n- [ ] d\n",
+                "# P\n- [ ] a\n- [ ] b\n- [ ] c\n- [ ] d\n",
             )
             ck.set_note("a note")
-            ck.start(2)  # a -> paused (with note), b -> skipped
-            ck.start(3)  # b -> paused (noteless), c -> focus
+            ck.focus(2)  # a -> [~] (with note)
+            ck.focus(3)  # b -> [~] (noteless), c -> focus
             tl = parse_plan(ck.plan_file.read_text(encoding="utf-8"))
             out = _render_local_status(ck, tl, palette=ckui.Palette(False))
-        self.assertIn("Unfocused / Paused Context:", out)
-        idx_paused = out.index("Unfocused / Paused Context:")
+        self.assertIn("    [~] Paused:", out)
+        idx_paused = out.index("    [~] Paused:")
         idx_banner = out.index(">> Backlog:")
         self.assertGreater(idx_banner, idx_paused)
         lines = out.splitlines()
         self.assertEqual(lines[-1], "=" * 61)
         self.assertIn(">> Backlog:", lines[-2])
-        # Total − Done = 4 − 0: paused/skipped tasks are NOT subtracted.
+        # Total − Done = 4 − 0: parked tasks are NOT subtracted.
         self.assertIn(">> Backlog: 4 tasks remaining", out)
 
-    def test_skipped_under_limit_has_no_count_header(self):
-        out = self._status("# P\n- [ ] a\n- [ ] b\n- [>] c\n")
-        self.assertIn("[!] Skipped:", out)
-        self.assertNotIn("Skipped (", out)
-        self.assertIn("- [1] a [ ]", out)
-        self.assertIn("- [2] b [ ]", out)
-
-    def test_skipped_passover_before_focus(self):
-        """Open tasks positioned before the focus were passed over."""
-        out = self._status("# P\n- [ ] a\n- [ ] b\n- [>] c\n")
-        self.assertIn("[!] Skipped:", out)
-        self.assertIn("- [1] a [ ]", out)
-        self.assertIn("- [2] b [ ]", out)
-
-    def test_skipped_absent_when_opens_follow_the_focus(self):
-        """Regression: opens AFTER the focus are Pending/Upcoming,
-        never Skipped, even when a completion sits before them."""
-        out = self._status(
-            "# P\n- [x] one\n- [>] two\n- [ ] three\n- [ ] four\n")
-        self.assertNotIn("[!] Skipped", out)
-        # The first open after the focus is still the Upcoming slot.
-        self.assertIn(">> Upcoming:", out)
-        self.assertIn("- [3] three [ ]", out)
-        # Total − Done = 4 − 1: focus + upcoming + tail all count.
-        self.assertIn(">> Backlog: 3 tasks remaining", out)
-
-    def test_skipped_only_before_focus(self):
-        """An open before the focus is Skipped; opens after it stay
-        Pending/Upcoming regardless of later completions."""
-        out = self._status(
-            "# P\n- [ ] a\n- [>] b\n- [x] c\n- [ ] d\n- [ ] e\n")
-        skipped_block = out.split("[!] Skipped")[1].split("[>] Focus")[0]
-        self.assertIn("- [1] a [ ]", skipped_block)
-        # d/e follow the focus -> not skipped (d is the Upcoming slot).
-        self.assertNotIn("[4] d", skipped_block)
-        self.assertNotIn("[5] e", skipped_block)
-        self.assertIn(">> Upcoming:", out)
-        self.assertIn("- [4] d [ ]", out)
-
-    def test_skipped_section_omitted_when_clean(self):
-        out = self._status("# P\n- [ ] a\n- [x] b\n")
-        self.assertNotIn("[!] Skipped", out)
-        # Total − Done = 2 − 1 (singular wording).
-        self.assertIn(">> Backlog: 1 task remaining", out)
-
     def test_sequential_opens_are_backlog_not_skipped(self):
-        """With NO focus the first two opens become the Next candidate
-        and Upcoming; the rest is backlog — not Skipped."""
+        """With NO focus the first open becomes the Next candidate;
+        the rest is backlog — not Skipped, not Upcoming."""
         out = self._status("# P\n- [x] d\n- [ ] one\n- [ ] two\n- [ ] three\n")
         self.assertIn("[>] Next:", out)
         self.assertIn("- [2] one [ ]", out)
-        self.assertIn(">> Upcoming:", out)
-        self.assertIn("- [3] two [ ]", out)
         self.assertNotIn("[!] Skipped", out)
-        # Total − Done = 4 − 1: Next + Upcoming + tail all count.
+        self.assertNotIn(">> Upcoming:", out)
+        # Total − Done = 4 − 1: the tail all counts.
         self.assertIn(">> Backlog: 3 tasks remaining", out)
 
-    # ---- element 3: [>] Focus / Next ------------------------------- #
+    # ---- element: [>] Focus / Next ---------------------------------- #
 
-    def test_note_renders_under_focus_task(self):
-        """A note on the FOCUSED task is shown inline under ``[>]
-        Focus:`` (plus duplicated at the top ``CURRENT FOCUS``)."""
+    def test_note_renders_under_current_focus(self):
+        """A note on the FOCUSED task renders once, directly under the
+        top ``CURRENT FOCUS`` line."""
         with tempfile.TemporaryDirectory() as td:
             ck = self._ck(Path(td), "# P\n- [x] done\n- [>] alpha\n- [ ] beta\n")
             ck.set_note("checking API mapping")
             tl = parse_plan(ck.plan_file.read_text(encoding="utf-8"))
             out = _render_local_status(ck, tl, palette=ckui.Palette(False))
-        self.assertIn("[>] Focus:", out)
-        self.assertIn("- [2] alpha", out)
-        self.assertIn("* Note: checking API mapping", out)
-        # The note sits BELOW the focus item line (slice from the
-        # WORK CONTEXT header so the top CURRENT FOCUS copy of the
-        # task title cannot skew the ordering check).
-        work = out[out.index("-> WORK CONTEXT:"):]
-        self.assertGreater(work.index("* Note: checking API mapping"),
-                           work.index("- [2] alpha"))
+        self.assertIn("-> CURRENT FOCUS: [#2] alpha", out)
+        self.assertEqual(out.count("* Note: checking API mapping"), 1)
+        focus_idx = out.index("-> CURRENT FOCUS:")
+        note_idx = out.index("* Note: checking API mapping")
+        work_idx = out.index("-> WORK CONTEXT:")
+        self.assertLess(focus_idx, note_idx)
+        self.assertLess(note_idx, work_idx)
 
-    def test_note_renders_under_next_candidate(self):
+    def test_note_renders_under_paused_block_for_next_candidate(self):
         """A note on the auto-resolved ``[>] Next`` candidate is NOT
-        hidden by the focus state — it renders under the task line."""
+        hidden by the focus state — the noted open task surfaces in
+        the ``[~] Paused`` block with its scratchpad."""
         with tempfile.TemporaryDirectory() as td:
             ck = self._ck(Path(td), "# P\n- [ ] alpha\n- [ ] beta\n")
             ck.set_note("backing later")
@@ -668,13 +647,16 @@ class TestWorkContext(_IsolatedHome, unittest.TestCase):
             out = _render_local_status(ck, tl, palette=ckui.Palette(False))
         self.assertIn("[>] Next:", out)
         self.assertIn("- [1] alpha [ ]", out)
+        self.assertIn("    [~] Paused:", out)
+        self.assertIn("- [1] alpha", out)
         self.assertIn("* Note: backing later", out)
-        self.assertGreater(out.index("* Note: backing later"),
-                           out.index("- [1] alpha [ ]"))
+        paused_idx = out.index("    [~] Paused:")
+        note_idx = out.index("* Note: backing later")
+        self.assertLess(paused_idx, note_idx)
 
     def test_note_survives_focus_switch_and_renders_under_paused(self):
         """Focusing another task never swallows the note: it travels
-        into ``Unfocused / Paused Context`` with its task."""
+        into the ``[~] Paused`` block with its task."""
         with tempfile.TemporaryDirectory() as td:
             ck = self._ck(
                 Path(td), "# P\n- [x] done\n- [ ] alpha\n- [ ] beta\n")
@@ -682,42 +664,44 @@ class TestWorkContext(_IsolatedHome, unittest.TestCase):
             ck.start(3)                    # focus moves to beta
             tl = parse_plan(ck.plan_file.read_text(encoding="utf-8"))
             out = _render_local_status(ck, tl, palette=ckui.Palette(False))
-        self.assertIn("Unfocused / Paused Context:", out)
+        self.assertIn("    [~] Paused:", out)
         self.assertIn("- [2] alpha", out)
         self.assertIn("* Note: backing later", out)
-        # The Next block must NOT be silenced by the switch: the note
-        # is still visible (under the paused block).
         self.assertIn("[>] Focus:", out)
-        self.assertIn("- [3] beta", out)
+        self.assertIn("- [#3] beta", out)
 
-    def test_note_binds_to_focused_task_over_next_candidate(self):
-        """``ck start <NEW_ID>`` AFTER ``ck note`` re-binds the note to
-        the newly focused task — the active slot is the single source
-        of truth and the note stays visible under Focus."""
+    def test_note_stays_bound_to_its_task_across_refocus(self):
+        """``ck note`` binds the note to a TASK, not to the active
+        slot: refocusing another task never re-binds or hides it."""
         with tempfile.TemporaryDirectory() as td:
             ck = self._ck(
                 Path(td), "# P\n- [x] done\n- [ ] alpha\n- [ ] beta\n")
-            ck.set_note("backing later")   # active task = alpha (2)
-            ck.start(3)                    # re-binds the note to beta
+            ck.set_note("backing later")   # binds to alpha
+            ck.start(3)                    # focus beta; note stays on alpha
             tl = parse_plan(ck.plan_file.read_text(encoding="utf-8"))
             out = _render_local_status(ck, tl, palette=ckui.Palette(False))
-        self.assertIn("* Note: backing later", out)
-        self.assertIn("- [3] beta", out)
+            # The note is still alpha's (visible in the Paused block),
+            # and the focused beta carries no note.
+            self.assertIn("* Note: backing later", out)
+            self.assertIn("- [2] alpha", out)
+            self.assertEqual(ck.get_note_entries(3), [])
+            self.assertEqual(
+                ck.get_note_entries(2)[-1]["text"], "backing later")
 
     def test_focus_renders_focus_label(self):
         out = self._status("# P\n- [>] focused task\n")
-        self.assertIn("[>] Focus:", out)
-        self.assertIn("- [1] focused task", out)
+        self.assertIn("    [>] Focus:", out)
+        self.assertIn("- [#1] focused task", out)
         # Focus item carries no [ ] suffix (it is already [>]).
         focus_line = [l for l in out.splitlines()
-                      if "- [1] focused task" in l][0]
+                      if "- [#1] focused task" in l][0]
         self.assertFalse(focus_line.endswith("[ ]"))
 
     def test_no_focus_auto_resolves_first_pending_as_next(self):
         """focus=None resolves to the first available pending task as
         the Next candidate — no more 'no focus selected' dead end."""
         out = self._status("# P\n- [ ] alpha\n- [ ] beta\n")
-        self.assertIn("[>] Next:", out)
+        self.assertIn("    [>] Next:", out)
         self.assertIn("- [1] alpha [ ]", out)
         self.assertNotIn("no focus selected", out)
 
@@ -735,55 +719,52 @@ class TestWorkContext(_IsolatedHome, unittest.TestCase):
 
     def test_no_open_tasks_next_hint(self):
         out = self._status("# P\n- [x] a\n- [x] b\n")
-        self.assertIn("[>] Next: (no open tasks)", out)
+        self.assertIn("    [>] Next: (no open tasks)", out)
 
-    # ---- element 4: >> Upcoming ------------------------------------ #
+    # ---- removed sections: Upcoming / Skipped are gone -------------- #
 
-    def test_upcoming_follows_focus(self):
-        plan = "# P\n- [>] f\n- [x] d\n- [ ] future\n"
-        out = self._status(plan)
-        # Upcoming skips DONE tasks after the focus.
-        self.assertIn(">> Upcoming:", out)
-        self.assertIn("- [3] future [ ]", out)
+    def test_upcoming_section_removed(self):
+        """v0.13.0: the ``>> Upcoming`` section is gone — everything
+        after the first open task is the backlog banner."""
+        out = self._status("# P\n- [>] f\n- [x] d\n- [ ] future\n")
+        self.assertNotIn(">> Upcoming:", out)
+        # The future task only counts toward the backlog.
+        self.assertIn(">> Backlog: 2 tasks remaining", out)
+        self.assertNotIn("- [3] future", out)
 
-    def test_upcoming_follows_auto_candidate(self):
-        out = self._status("# P\n- [x] d\n- [ ] first open\n- [ ] second\n")
-        # Next = first open (candidate); Upcoming follows it.
-        self.assertIn("[>] Next:", out)
-        self.assertIn("- [2] first open [ ]", out)
-        self.assertIn(">> Upcoming:", out)
-        self.assertIn("- [3] second [ ]", out)
+    def test_upcoming_none_hint_replaced_by_next_hint(self):
+        out = self._status("# P\n- [x] done\n")
+        self.assertNotIn(">> Upcoming:", out)
+        self.assertIn("    [>] Next: (no open tasks)", out)
 
-    def test_upcoming_none_hint(self):
-        out = self._status("# P\n- [>] all done after\n- [x] done\n")
-        self.assertIn(">> Upcoming: (none)", out)
-
-    # ---- structure -------------------------------------------------- #
+    # ---- structure --------------------------------------------------- #
 
     def test_strict_vertical_order(self):
-        plan = (
-            "# P\n## Current Sprint\n"
-            "- [x] finished first\n"
-            "- [x] finished second\n"
-            "- [>] focused task\n"
-            "- [ ] next up\n"
+        plan = "# P\n## Current Sprint\n- [>] focused task\n- [ ] next up\n"
+        hist = (
+            "## Completed\n"
+            "- [x] 2026-11-01 09:00: finished first\n"
+            "- [x] 2026-11-02 10:00: finished second\n"
         )
-        out = self._status(plan)
+        out = self._status(plan, history=hist)
         self.assertIn("-> WORK CONTEXT:", out)
-        idx_done = out.index("<< Done:")
-        idx_focus = out.index("[>] Focus:")
-        idx_focus_item = out.index("- [3] focused task")
-        idx_upcoming = out.index(">> Upcoming:")
+        idx_focus = out.index("    [>] Focus:")
+        idx_focus_item = out.index("- [#1] focused task")
+        idx_paused = out.index("    [~] Paused:")
+        idx_history = out.index("    [x] History (last 3):")
         idx_backlog = out.index(">> Backlog:")
-        for a, b in ((idx_done, idx_focus), (idx_focus, idx_focus_item),
-                     (idx_focus_item, idx_upcoming),
-                     (idx_upcoming, idx_backlog)):
+        for a, b in ((idx_focus, idx_focus_item),
+                     (idx_focus_item, idx_paused),
+                     (idx_paused, idx_history),
+                     (idx_history, idx_backlog)):
             self.assertLess(a, b)
-        # No execution gap -> the Skipped section is absent.
+        # v0.12 sections are gone.
         self.assertNotIn("[!] Skipped", out)
-        # Done items sit on indented lines under the header.
-        self.assertIn("- [1] finished first [x]", out)
-        self.assertIn("- [2] finished second [x]", out)
+        self.assertNotIn("<< Done:", out)
+        self.assertNotIn(">> Upcoming:", out)
+        # Ledger entries render under the History header.
+        self.assertIn("- [x] 2026-11-01 09:00: finished first", out)
+        self.assertIn("- [x] 2026-11-02 10:00: finished second", out)
         # BOTTOM PLACEMENT: the Backlog banner is the very last line
         # of WORK CONTEXT, directly above the closing border.
         lines = out.splitlines()
@@ -792,16 +773,17 @@ class TestWorkContext(_IsolatedHome, unittest.TestCase):
 
     def test_empty_plan_renders_section_hints(self):
         out = self._status("# P\n")
-        self.assertIn("<< Done: (none completed)", out)
-        self.assertIn("[>] Next: (no open tasks)", out)
-        self.assertIn(">> Upcoming: (none)", out)
+        self.assertIn("    [>] Next: (no open tasks)", out)
+        self.assertIn("    [~] Paused: (none)", out)
+        self.assertIn("    [x] History (last 3):", out)
+        self.assertIn("       (none completed)", out)
         self.assertIn(">> Backlog: 0 tasks remaining", out)
-        # No Skipped section without an execution gap.
+        # v0.12 sections are gone.
         self.assertNotIn("[!] Skipped", out)
+        self.assertNotIn(">> Upcoming:", out)
 
     def test_exact_spec_layout(self):
-        """Byte-exact rendering of the vertical-list spec structure
-        (gap-free plan so the progress line stays compact)."""
+        """Byte-exact rendering of the vertical-list spec structure."""
         from cklib.config import VERSION
         plan = (
             "# Demo\n"
@@ -820,12 +802,11 @@ class TestWorkContext(_IsolatedHome, unittest.TestCase):
             " -> CURRENT FOCUS: [#2] focus task",
             "",
             " -> WORK CONTEXT:",
-            "    << Done:",
-            "       - [1] prev task [x]",
             "    [>] Focus:",
-            "       - [2] focus task",
-            "    >> Upcoming:",
-            "       - [3] next task [ ]",
+            "       - [#2] focus task",
+            "    [~] Paused: (none)",
+            "    [x] History (last 3):",
+            "       (none completed)",
             "    >> Backlog: 2 tasks remaining",
             bar,
         ])

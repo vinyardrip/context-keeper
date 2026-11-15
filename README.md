@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.12.1-blue)]()
+[![version](https://img.shields.io/badge/version-0.13.0-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -40,15 +40,15 @@ Context Keeper (ck) acts as a bridge between your brain, AI agents, and Git, per
 - Plain Text Storage: All data stored in human-readable Markdown files — no databases, no lock-in
 - Git Integration: Local commits only — `ck` never pushes, clones, or touches remotes without an explicit `ck update` (fast-forward pull)
 - Auto-Archiving: Automatic rotation of history files when reaching the configurable HISTORY_LIMIT, with gzip-compressed `.md.gz` archives (COMPRESS_ARCHIVES) and FIFO retention via MAX_BAK_FILES
-- Strict Parsing: Task statuses `- [ ]` / `- [>]` / `- [x]` (legacy `- []` input is accepted and canonicalized on write)
+- Strict Parsing: Task statuses `- [ ]` (open) / `- [>]` (focused) / `[~]` (paused) / `- [x]` (completed); PLAN.md holds ACTIVE tasks only — completed rows graduate into `.ck/HISTORY.md`, and every task carries a stable `<!-- id: uuid -->` reference that survives re-indexing (legacy `- []` input is accepted and canonicalized on write)
 - AI-Ready: Optimized context preservation for AI workflows
 - Self-Contained: Templates embedded in the package
 - Self-Installer: ck install / ck uninstall (user-level physical copy — a regular executable file, never a symlink; no sudo)
 - Self-Updater: ck update (git fetch + `pull --ff-only` for checkouts; in-place `install.sh` refresh for standalone installs, preserving `.ck/`; refuses on dirty work tree)
 - CLI Task Management: ck add <text>, ck start <ID>, ck done <ID|range|list>
-- Process Notes: `ck note <ID> <text>` appends a timestamped scratchpad entry to a task (never overwrites) — shown in `ck st`, archived to HISTORY.md on `ck done`, and carried through focus switches via the Unfocused / Paused Context block; `--list` shows one task's notes, `--clear` removes them
+- Process Notes: `ck note <ID> <text>` appends a timestamped scratchpad entry to a task (never overwrites) — stored INLINE beneath its task, shown in `ck st`, graduated into HISTORY.md with the task on `ck done`, and preserved when a focus switch parks the task as `[~]`; `--list` shows one task's notes, `--clear` removes them
 - Global Registry: Cross-project dashboard (ck dashboard) backed by `~/.config/ck/projects.json`; registration is explicit
-- Fail-Closed Locking: Cross-process file locking guards registry, PLAN.md, HISTORY.md and state.json writes
+- Fail-Closed Locking: Cross-process file locking guards registry, PLAN.md, HISTORY.md, JOURNAL.md and global state.json writes
 - Full Plan View: ck st --all
 - Dev Sandbox: `ck-dev` runs any command against real project data read-only, redirecting all writes into a git-ignored `.sandbox/` (`ck-clean` resets it); global spaces are strictly isolated under `.sandbox/config/spaces/`; `ck-dev sandbox setup` builds a disposable mock environment with bulk test data; entry keeps `ROADMAP.md -> .ck/PLAN.md` safely symlinked
 - Shell Completion: `ck completion bash|zsh` for commands, flags, registered projects and global spaces (Zsh shows the menu on the FIRST `<TAB>` at every position, pins `ck<TAB>` to `ck` without filename fallback, and honors an executable `CK_BIN`)
@@ -104,7 +104,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.12.1
+ck -v    # → ck version 0.13.0
 ```
 
 ---
@@ -112,14 +112,18 @@ ck -v    # → ck version 0.12.1
 ## 📂 Project Structure
 ```bash
 .ck/
-├── state.json
-├── PLAN.md
-├── HISTORY.md
+├── version                (schema marker — write commands refuse pre-0.13 projects)
+├── meta.json              (project metadata)
+├── links.json             (related project links)
+├── AGENTS.md              (AI agent instructions)
+├── PLAN.md                (active tasks only: [ ] / [>] / [~], inline * Note lines)
+├── HISTORY.md             (completed tasks ledger: - [x] <ts>: <title> <!-- id: uuid -->)
+├── JOURNAL.md             (ck save checkpoints)
 ├── prompt.md
 ├── README.md
 ├── .gitignore
-├── HISTORY_*.md.gz      (compressed rotation archives — default)
-└── HISTORY_*.md.bak     (legacy uncompressed archives)
+├── HISTORY_*.md.gz        (compressed rotation archives — default)
+└── HISTORY_*.md.bak       (legacy uncompressed archives)
 ```
 
 ---
@@ -134,20 +138,22 @@ ck -v    # → ck version 0.12.1
 |--------|------------|
 | ck init | Initialize the project locally (.ck/ structure and gitignore rules); does not touch the global registry |
 | ck init --register | Initialize locally and register the project in `~/.config/ck/projects.json` |
+| ck migrate [--apply] | One-time upgrade of a pre-0.13 project (the `.ck/state.json` monolith) to the split layout. Default is a DRY-RUN preview (`Dry run: nothing written. Re-run with --apply.`); `--apply` backs the whole `.ck/` up to `.ck_backup_<version>/`, moves completed `[x]` rows into HISTORY.md, stamps every task with a stable UUID, inlines the legacy `state.json` notes beneath their tasks, creates `JOURNAL.md` / `version` / `meta.json` / `links.json` / `AGENTS.md` and deletes `state.json`. Write commands on an unmigrated project refuse with `Run `ck migrate` to upgrade it, then retry.` |
 | ck add \<text\> | Add a new open task (inserted before `## Completed`). On a freshly initialized plan holding only the untouched `ck init` seed task (`Describe the first task` / `Описать первую задачу`), the seed is replaced in place instead of appending a second entry |
 | ck move \<ID\> \<pos\|top\|bottom\> | Move a PENDING/ACTIVE task (`[ ]` / `[>]`) to a 1-based position among the active tasks, or to the first/last slot. The other active tasks shift to close the gap; titles, status markers and the focus are left untouched |
 | ck swap \<ID1\> \<ID2\> | Exchange the positions of two active tasks |
 | ck reorder \<ID1\> \<ID2\> ... | Set the relative order of the active tasks. Listed IDs move ahead of the unlisted ones, which keep their relative order — so `ck reorder 3 1` simply means "3 before 1". The confirmation is multi-line (applied IDs, then the resulting order with their post-reorder positions) and is followed by the auto-rendered sprint view — the exact `ck list` output for that project |
 | _(reordering a completed task)_ | **Refused.** A completed (`[x]`) task is history and is never reordered: the entire operation aborts with exit code 1 and `[err] Cannot move completed task #<id>. Only pending/active tasks can be reordered.` |
-| ck start \<ID\> | Focus a task (`- [>]`); `ck start 0` resets focus. A noted task that loses focus moves to Unfocused / Paused Context (note preserved until `ck done` archives it); a noteless one gets a soft attach-a-note hint |
-| ck done \<ID\|range\|list\> | Mark task(s) done (`- [x]`), e.g. `3`, `2-4`, `1,3,5`. Bare `ck done` completes the CURRENT FOCUS (usage error without one); the completed task's process note is archived into HISTORY.md and cleared |
-| ck delete \<ID\> [-s \<space\>] / ck rm \<ID\> | Permanently remove ONE task and re-index the remaining task IDs 1..N. The default target is the active project (`project`); `-s` / `--space <name>` targets a global space instead, mutating only that space file and leaving the project's `.ck/state.json` and `PLAN.md` untouched. Prints `Task #<ID>: <title>` and asks `Permanently delete task #<ID> from space '<space>'? [y/N]`; `-f` / `--force` skips the prompt — a non-interactive run without `-f` refuses (exit 2). Notes are archived to the target's `HISTORY.md`; a targeted space archives to `~/.config/ck/spaces/<space>.HISTORY.md`. Whole spaces are removed with the separate `ck space delete <name>` |
+| ck start \<ID\> | Focus a task (`- [>]`) when NO focus is held — this also RESUMES a paused (`[~]`) task; `ck start 0` resets focus to `[ ]` (never paused). Refuses while another task holds focus (exit 1): `ERROR: Task #<old> is already focused. Use: ck focus <ID> to pause it and switch.` |
+| ck focus \<ID\> | Switch focus: the current `[>]` is parked as `[~]` (paused — its notes travel with it; a noteless switch prompts to capture context first, non-interactive runs get a soft hint) and the target becomes focused; `ck focus 0` resets focus to `[ ]` |
+| ck done \<ID\|range\|list\> | Complete task(s) — the row is REMOVED from PLAN.md and graduates into `.ck/HISTORY.md` as a dated `- [x] <ts>: <title> <!-- id: uuid -->` ledger entry (its inline notes travel beneath it); the remaining IDs re-index. Accepts `3`, `2-4`, `1,3,5`; bare `ck done` completes the CURRENT FOCUS (usage error without one) |
+| ck delete \<ID\> [-s \<space\>] / ck rm \<ID\> | Permanently remove ONE task and re-index the remaining task IDs 1..N. The default target is the active project (`project`); `-s` / `--space <name>` targets a global space instead, mutating only that space file and leaving the project's `PLAN.md` untouched. Prints `Task #<ID>: <title>` and asks `Permanently delete task #<ID> from space '<space>'? [y/N]`; `-f` / `--force` skips the prompt — a non-interactive run without `-f` refuses (exit 2). After the confirmation the REFRESHED listing (post re-index) is printed, so the next `ck done N` always points at what you just saw. Notes are archived to the target's `HISTORY.md`; a targeted space archives to `~/.config/ck/spaces/<space>.HISTORY.md`. Whole spaces are removed with the separate `ck space delete <name>` |
 | ck note \<ID\> \<text\> | **Append** a timestamped process note to the task (never overwrite). `ck note <text>` keeps the active-task shortcut. `ck note <ID> --list` prints that task's notes with timestamps; `ck note <ID> --clear` removes all of them. Shown in `ck st`; every entry is archived to HISTORY.md by `ck done` |
 | ck edit | Open PLAN.md in your editor (see [Editor Resolution](#editor-resolution)) |
-| ck save | Checkpoint workflow (does **not** complete the task): append an optional note + short summary to HISTORY.md, then optionally create a **local** Git commit. Completion stays a separate `ck done <ID>` action |
+| ck save | Checkpoint workflow (does **not** complete the task): append an optional note body + short summary to `.ck/JOURNAL.md`, then optionally create a **local** Git commit. Completion stays a separate `ck done <ID>` action |
 | ck log | Open HISTORY.md in your editor (see [Editor Resolution](#editor-resolution)) |
 | ck log --all | View the full history: every rotation archive (`.md.gz` decompressed / legacy `.md.bak`, oldest first) concatenated with the current HISTORY.md |
-| ck st | Status overview (tri-state: Previous / Focus / Next); an explicit focus is duplicated at the top as `-> CURRENT FOCUS: [#<id>] <title>` (with its note). WORK CONTEXT shows `<< Done`, a conditional `[!] Skipped` (only on a real execution gap), `[>] Focus` / `Next`, `>> Upcoming`, and a highlighted bottom banner `>> Backlog: N task(s) remaining` |
+| ck st | Status overview: a top focus line `-> CURRENT FOCUS: [#<id>] <title>` (with its note), then the WORK CONTEXT block — `[>] Focus`, `[~] Paused` (tasks parked by `ck focus`, notes attached), `[x] History (last 3)` (the latest HISTORY.md ledger entries; `ck st --history N` widens it), and a highlighted bottom banner `>> Backlog: N task(s) remaining` |
 | ck notes | List all active process notes: `[>] Active Focus:` plus `[!] Unfocused / Paused Context:` with every entry of each task's note, in append order (`[i] No active process notes found.` when none) |
 | ck st -l / --list | Print the task list to STDOUT. Inside a project this is identical to `ck list`; outside one it follows the `ck st` hierarchy (global-registry fallback), whereas `ck list` deliberately never guesses — see [ck list Outside a Project](#ck-list-outside-a-project) |
 | ck st -e / --edit | Open PLAN.md in your editor (same as `ck edit`) |
@@ -171,7 +177,7 @@ ck -v    # → ck version 0.12.1
 | ck space delete \<name\> [-f] | Permanently delete a space **and** its note sidecar / `.HISTORY.md`, then drop it from the persisted order. The target is validated **first** (a missing space reports `ERROR:` with exit 1 immediately — no stdin read, no prompt; invalid input exits 2), and an existing space asks `Permanently delete …? [y/N]` on a terminal and refuses without confirmation when non-interactive; `-f` / `--force` (or `-y` / `--yes`) skips the prompt. The virtual `project` space and the built-in `local` / `remote` can never be deleted; the daily `today` journal is deletable (`ck space delete today` also clears `today_date`). No `rm` alias — the verb is spelled out, and task deletion stays the separate top-level `ck delete <ID>` |
 | ck local add \<text\> | Add a task to the workstation space (`~/.config/ck/spaces/local.md`; `local`/`remote` are auto-initialized at startup — an existing space file is never overwritten) |
 | ck local list | List workstation space tasks in the project `ck list` layout (`##` section headers, `[ ]`/`[>]`/`[x]` markers), with attached process notes rendered as `* Note:` lines under their tasks |
-| ck local st / ck local status | Detailed workstation space status view — same layout as `ck st` (header bar, progress, CURRENT FOCUS with its process note, WORK CONTEXT: Done / Skipped / Focus / Next / Upcoming / Unfocused-Paused / Backlog) |
+| ck local st / ck local status | Detailed workstation space status view — same layout as `ck st` (header bar, progress, CURRENT FOCUS with its process note, WORK CONTEXT: `[>] Focus` / `[~] Paused` / `[x] History (last 3)` / `>> Backlog`) |
 | ck local st -l / --list | Space task listing (synonym of `ck local list`) |
 | ck local st -e / --edit | Open the space file in the editor (synonym of `ck local edit`) |
 | ck local st -g / --global | Global dashboard (synonym of `ck local dashboard`) |
@@ -638,7 +644,7 @@ Task #3: rotate the API token
 
 A cross-space deletion is isolated: it rewrites only
 `~/.config/ck/spaces/<name>.md`, its `.json` note sidecar and its
-`<name>.HISTORY.md`. The active project's `PLAN.md` and `.ck/state.json` are
+`<name>.HISTORY.md`. The active project's `PLAN.md` is
 never modified or switched. With `-s` omitted the command defaults
 strictly to the active `project` context; it never guesses a space from the
 working directory.
@@ -670,28 +676,28 @@ ID, invalid space name, missing argument.
 
 ## ck save Workflow
 `ck save` records a **checkpoint**; it does not complete the active task.
-Task completion remains the explicit `ck done <ID>` action (which also
-archives that task's note into HISTORY.md).
+Task completion remains the explicit `ck done <ID>` action (which graduates
+the task — notes included — into HISTORY.md).
 
 1. Show the current active task and state plainly that it stays open.
-2. **Step 1 — local history (no Git):** enter an optional note body (inline
+2. **Step 1 — local journal (no Git):** enter an optional note body (inline
    or via your editor), then a short summary; a dated entry is appended to
-   `.ck/HISTORY.md`.
+   `.ck/JOURNAL.md`.
 3. **Step 2 — optional local Git commit:** choose a commit message and
    confirm. Only the Context Keeper artifacts are staged; `ck` never pushes.
-   If Git is unavailable or you decline, the history entry stays saved.
-4. Auto-archive HISTORY.md when the limit is reached (gapless rotation,
+   If Git is unavailable or you decline, the journal entry stays saved.
+4. Auto-archive JOURNAL.md when the limit is reached (gapless rotation,
    original preserved as a compressed `.md.gz` archive by default).
 
 ---
 
-## Process Notes & Unfocused / Paused Context
+## Process Notes & Unfocused / Paused Context (`[~]`)
 
 A **process note** (`ck note <ID> <text>`) is a lightweight scratchpad attached to
 a task. Every call **appends** a new timestamped entry — it never overwrites an
-earlier note. Notes live in `.ck/state.json` (spaces use their
-`~/.config/ck/spaces/<name>.json` sidecar), render under the task they belong
-to, and follow a strict lifecycle:
+earlier note. Notes live INLINE in `.ck/PLAN.md`, directly beneath the task
+they belong to (`* Note (2026-11-04 14:32 UTC): text`), and spaces keep their
+`~/.config/ck/spaces/<name>.json` sidecar. The note lifecycle:
 
 - **Append** — `ck note <ID> <text>` adds a note entry to that task;
   `ck note <text>` keeps the active-task shortcut (focused task, else first open
@@ -701,62 +707,58 @@ to, and follow a strict lifecycle:
   owns it, and `ck dashboard -v` shows them per project (including for
   registered projects viewed from another directory). With two or more entries
   each line carries an `(HH:MM UTC)` marker so the sequence is readable.
-- **Complete** — `ck done <ID>` archives every note entry into `HISTORY.md` in
-  append order, then clears them from the task state. A single note keeps the
-  historical `* Note: <text>` line; multiple notes share one dated entry with
-  one timestamped `* Note` line per note. Notes are user data: they graduate
+- **Complete** — `ck done <ID>` graduates the whole task into `HISTORY.md`:
+  every note entry travels beneath the `- [x]` ledger line in append order,
+  one `* Note (<ts> UTC)` line per note. Notes are user data: they graduate
   into history, they are never silently dropped.
 
 **Note timestamps.** `ck note <ID> --list`, `ck st`, and `ck notes`
 render timestamps uniformly as `HH:MM UTC` for today's notes, and
-`YYYY-MM-DD HH:MM UTC` for older ones. `HISTORY.md` timestamps every
-note when the task has two or more; single-note tasks keep the
-legacy `* Note: <text>` form.
+`YYYY-MM-DD HH:MM UTC` for older ones. HISTORY.md entries stamp every
+inline note with its full `(YYYY-MM-DD HH:MM UTC)` marker.
 
-**Storage and migration.** Notes are stored as ordered arrays of
-`{"text": ..., "created": ...}` entries, where `created` is ISO-8601 UTC with a
-`+00:00` offset. Existing single-string notes from earlier versions are
-converted in memory on load; the array shape is persisted on the next write to
-that file. The deprecated `active_task.note` scalar is migrated into the
-ledger only when that task has no array entry (the array always wins) and is
-removed from every subsequent write. Read-only commands (including `ck notes`)
-never modify `state.json`.
+**Storage and migration.** Since v0.13.0 notes are stored INLINE in
+`PLAN.md` as indented `* Note (<ts> UTC): <text>` lines bound to their
+task node — there is no per-project `state.json` anymore. Legacy
+pre-0.13 projects (notes inside the `.ck/state.json` monolith) are
+upgraded by `ck migrate --apply`, which inlines every note beneath its
+task (after backing the whole `.ck/` up). Read-only commands never
+rewrite the plan.
 
 ### Switching focus
 
-When focus moves away from a task (via `ck start <NEW_ID>` or a focus reset with
-`ck start 0`), the task that lost focus is handled according to whether it
-carries a note:
+Focus is switched with `ck focus <NEW_ID>`: the current `[>]` is parked as
+`[~]` (paused) and the target becomes the new focus. The task that loses
+focus is handled according to whether it carries a note:
 
-- **With a note** — the task moves to a dedicated `Unfocused / Paused Context`
-  block in `ck st` (and `ck dashboard -v`). Its note stays attached and travels
-  with it, so the scratchpad is never orphaned under the new focus:
+- **With a note** — the task stays in PLAN.md with the `[~]` marker and its
+  scratchpad attached (never orphaned under the new focus). In `ck st` it
+  appears in the dedicated `[~] Paused` block:
 
   ```text
-  -> WORK CONTEXT:
-     << Done:
-        - [1] setup repo [x]
-     [>] Focus:
-        - [3] write docs
-     >> Upcoming: (none)
-     >> Backlog: (none)
-     Unfocused / Paused Context:
-        - [2] implement API mapping
-          * Note: paused mid-refactor — mapping layer half done
+   -> WORK CONTEXT:
+      [>] Focus:
+         - [#3] write docs
+      [~] Paused:
+         - [2] implement API mapping
+           * Note: paused mid-refactor — mapping layer half done
+      [x] History (last 3):
+         (none completed)
+      >> Backlog: 2 tasks remaining
   ```
 
-  The switch itself reports the archival:
+  The switch itself reports the parking:
 
   ```text
   -> Focused [3]: write docs
-  [i] Task [2] implement API mapping lost focus — moved to Unfocused / Paused Context (note preserved; archived by `ck done`).
+  [i] Task [2] implement API mapping parked as [~] — paused (notes preserved; graduate into HISTORY.md on `ck done`).
   ```
 
 - **Without a note** — before the switch completes, an interactive TTY session
   offers to capture the context first:
 
   ```text
-  $ ck start 3
+  $ ck focus 3
   Task #2 lost focus. Add a process note? [y/N]: y
   Note text: paused mid-refactor — mapping layer half done
   * Note saved for [2]: paused mid-refactor — mapping layer half done
@@ -768,7 +770,7 @@ carries a note:
 
   ```text
   -> Focused [3]: write docs
-  [!] Task #2 lost focus without a note. Attach one via `ck note <text>`.
+  [!] Task #2 parked as [~] without a note. Attach one via `ck note <ID> <text>`.
   ```
 
   Non-interactive sessions (CI, pipes, scripts — stdin or stdout not a TTY)
@@ -776,51 +778,59 @@ carries a note:
   prompt unconditionally; `-y` / `--yes` assumes "yes" and asks only for the
   note text.
 
-  (Switching back with `ck start 2` resumes the task and restores its note;
-  completing it with `ck done 2` archives the note into HISTORY.md and clears
-  it.)
+  (Switching back with `ck focus 2` parks the new focus as `[~]` and restores
+  the note of the resumed task; completing it with `ck done 2` graduates it —
+  note included — into HISTORY.md.)
 
-- **Idempotency** — `ck start <ID>` on the already-focused task is a clean
-  no-op: it prints `Task #<ID> is already focused.`, never prompts for a note,
-  and does not re-assign focus.
+- **Idempotency** — `ck focus <ID>` / `ck start <ID>` on the already-focused
+  task is a clean no-op: it prints `Task #<ID> is already focused.`, never
+  prompts for a note, and does not re-assign focus.
 
-Every open task that previously held focus — with or without a note — stays
-listed under **Unfocused / Paused Context** in `ck st` and `ck dashboard -v`
-until it is re-focused or completed; paused tasks are excluded from the generic
-`[!] Skipped` list so they are never buried there. A paused task's note stays
-bound to it across further focus switches and is restored as the active note
-when the task is re-focused.
+- **start never steals focus** — `ck start <ID>` while another task holds
+  `[>]` aborts with exit 1 before any change:
+
+  ```text
+  $ ck start 3
+  ERROR: Task #2 is already focused. Use: ck focus 3 to pause it and switch.
+  ```
+
+  With NO focus held, `ck start <ID>` focuses the target — this is how a
+  paused (`[~]`) task is resumed. `ck start 0` / `ck focus 0` RESET focus:
+  the task returns to open (`[ ]`), never parked as paused
+  (`Task #N lost focus — returned to open (not paused).`).
+
+Every task parked as `[~]` — with or without a note — stays listed under
+**`[~] Paused`** in `ck st` and `ck dashboard -v` until it is re-focused
+(`ck focus <ID>`, or `ck start <ID>` with no other focus) or completed
+(`ck done`). A paused task's note stays bound to it across further focus
+switches and graduates into HISTORY.md with it.
 
 ### Status layout (`ck st`)
 
 `ck st` renders a strict, PURE-ASCII WORK CONTEXT block. Sections appear in
 this order:
 
-1. **`<< Done`** — the completed tasks closest to the progress point (last 2
-   shown, with a `(N tasks)` count and `... (+N more done)` overflow when more).
-2. **`[!] Skipped`** — shown **only** when an explicit focus sits after the
-   last completed task and open tasks were passed over *between* that
-   completion and the focus (a literal gap in execution order). Sequential
-   upcoming tasks are **never** labelled Skipped, and the section is omitted
-   entirely when there is no real execution gap.
-3. **`[>] Focus`** (explicit focus via `ck start`) or **`[>] Next`** (the
-   auto-resolved first pending task — display only, `PLAN.md` is never
-   mutated).
-4. **`>> Upcoming`** — exactly one next pending task after Focus/Next.
-5. **`Unfocused / Paused Context`** — still-open tasks that lost focus while
-   carrying a process note (rendered last, with the note attached).
-6. **`>> Backlog`** — the highlighted BOTTOM BANNER of the block: a single
+1. **`[>] Focus`** — the explicitly focused task (`ck start` / `ck focus`).
+   When nothing is focused the slot is labelled **`[>] Next`** instead and
+   shows the first open task (display only, `PLAN.md` is never mutated).
+2. **`[~] Paused`** — tasks parked by a `ck focus` switch, each with its
+   bound process notes; renders `(none)` when nothing is paused.
+3. **`[x] History (last 3)`** — the latest completed tasks from HISTORY.md
+   (`- [x] <ts>: <title>`); `ck st --history N` widens the view to the last
+   N entries.
+4. **`>> Backlog`** — the highlighted BOTTOM BANNER of the block: a single
    count line (`N task(s) remaining`, singular when `N = 1`) for the TOTAL
-   remaining uncompleted tasks, i.e. `Total − Done`. It is deliberately NOT
-   reduced by the tasks shown in Focus/Next, Upcoming, Skipped, or the
-   Unfocused / Paused Context block — those sections name individual tasks,
-   the banner counts the overall remaining workload. Rendered with an
-   orange/amber background highlight (inverted, bold black-on-amber) so it
-   visually pops as the last line of WORK CONTEXT.
+   active workload — open + focused + paused, completed excluded. It is
+   deliberately NOT reduced by the tasks shown in Focus or Paused — those
+   sections name individual tasks, the banner counts the overall remaining
+   workload. Rendered with an orange/amber background highlight (inverted,
+   bold black-on-amber) so it visually pops as the last line of WORK CONTEXT.
 
-When no task is focused but pending work remains, `ck st` prints a read-only
-hint banner — `[!] No active focus set. Run 'ck start <ID>'` — and points at
-`[>] Next`. It never auto-focuses or writes to `PLAN.md`.
+An explicit focus is also duplicated at the top of the card as
+`-> CURRENT FOCUS: [#<id>] <title>` (with its note). When no task is focused
+but pending work remains, `ck st` prints a read-only hint banner —
+`[!] No active focus set. Run 'ck start <ID>'` — and points at `[>] Next`.
+It never auto-focuses or writes to `PLAN.md`.
 
 ### Viewing notes: `ck notes`
 
@@ -955,12 +965,15 @@ The parser accepts both canonical CommonMark and the legacy no-space form; the w
 ```
 - [ ] open task      (canonical, accepted)
 - [] open task       (legacy input — canonicalized to `- [ ]` on write)
-- [>] focused task  (exactly one focus is enforced on write)
-- [x] done task
+- [>] focused task   (exactly one focus is enforced on write)
+- [~] paused task    (parked by `ck focus`; resumes with `ck start` / `ck focus`)
+- [x] done task      (lives in HISTORY.md — never written into PLAN.md)
 ```
 
+Every task line carries a stable `<!-- id: 8-char-uuid -->` comment, written once and never regenerated (re-indexing, reordering and section edits all preserve it). Process notes render as indented `* Note (<ts> UTC): <text>` lines directly beneath their task.
+
 ### Auto-Archive
-When `HISTORY.md` reaches `HISTORY_LIMIT` entries it is rotated into a timestamped archive and a fresh file is started. Rotation is crash-safe: the new content is staged before the old file is renamed.
+When `HISTORY.md` or `JOURNAL.md` reaches `HISTORY_LIMIT` entries it is rotated into a timestamped archive and a fresh file is started. Rotation is crash-safe: the new content is staged before the old file is renamed.
 
 | Parameter | Default | Meaning |
 |-----------|---------|---------|
@@ -972,7 +985,7 @@ When `HISTORY.md` reaches `HISTORY_LIMIT` entries it is rotated into a timestamp
 
 ### Data Integrity & Concurrency
 - All writes are atomic (temp file + rename) — readers never see torn files
-- Registry, PLAN.md, HISTORY.md and state.json mutations serialize on `*.lock` files via `fcntl.flock`
+- Registry, PLAN.md, HISTORY.md, JOURNAL.md and global state.json mutations serialize on `*.lock` files via `fcntl.flock`
 - Locking is **fail-closed**: if a lock cannot be acquired within 5s the operation aborts with a clear error instead of proceeding without protection
 - A corrupt registry (`projects.json`) is never silently wiped: it is moved to a timestamped `.bak` before a fresh registry is created
 - The renderer never overwrites non-task lines (headers/prose are preserved on every mutation)
@@ -1019,7 +1032,7 @@ echo "$CK_SANDBOX_ROOT"
 .sandbox/
 ├── projects/            # redirected per-project writes
 │   └── <name>-<hash>/   # one sandbox dir per real project
-│       └── .ck/         # PLAN.md, HISTORY.md, state.json, locks …
+│       └── .ck/         # PLAN.md, HISTORY.md, JOURNAL.md, locks …
 ├── config/              # sandboxed global registry / state / spaces
 │   └── spaces/          # local/, remote/, custom spaces, today/ (isolated)
 └── dev.log              # debug log (see below)
@@ -1034,7 +1047,7 @@ echo "$CK_SANDBOX_ROOT"
 `ck-dev` is the sandbox entrypoint. It activates `CK_SANDBOX=1` (the `--sandbox` flag and `CK_DEV=1` do the same) and then behaves like `ck`, with one crucial difference:
 
 - **Reads are real for projects** (with sandbox read-your-writes): dashboards, status, and task lists reflect your actual projects — unless a project sandbox copy exists (seeded by a previous dev-mode write or `sandbox setup`), in which case that copy is read so chained dev commands compose. **Global spaces read only the sandbox copy** — production spaces never leak into the session.
-- **Writes are intercepted**: ALL write operations — task mutations (`add` / `start` / `done`), `PLAN.md` edits, `state.json` updates, lock files, backups, spaces (`add` / `focus` / `done` / `note` / `space create|rename|delete`), registry changes — are redirected strictly into `.sandbox/`.
+- **Writes are intercepted**: ALL write operations — task mutations (`add` / `start` / `focus` / `done`), `PLAN.md` edits, JOURNAL.md appends, lock files, backups, spaces (`add` / `focus` / `done` / `note` / `space create|rename|delete`), registry changes — are redirected strictly into `.sandbox/`.
 
 Bare `ck-dev` enters an interactive **session subshell**. On entry the warning banner reports the **active binary**, resolved dynamically at runtime (`command -v ck` semantics — never hardcoded), and after you leave by typing `exit` (or pressing Ctrl+D) the exit handler reports the global binary that takes over:
 
@@ -1135,7 +1148,7 @@ cd .sandbox/projects/sandbox_stress && ck log --all    # full merged history
 
 ### Manual Testing Walkthrough (Contributors)
 
-**Safety first — zero host impact.** The moment a sandbox session starts, every global registry interaction — `register` / `unregister` / `prune` mutations and dashboard reads alike — is re-routed from your host machine's `~/.config/ck/projects.json` to `.sandbox/config/projects.json`, every project write (`PLAN.md`, `state.json`, `HISTORY.md`, lock files, rotation archives) lands under `.sandbox/projects/`, and every global space (files, note sidecars, histories and `spaces_order`) is confined to `.sandbox/config/spaces/` plus `.sandbox/config/state.json`. The host registry and host spaces are never opened, read or written — the test suite verifies they stay byte-identical (content and mtime) across full dev sessions. `sandbox setup` writes only inside `.sandbox/` by construction, and `sandbox clean` removes only `.sandbox/` itself.
+**Safety first — zero host impact.** The moment a sandbox session starts, every global registry interaction — `register` / `unregister` / `prune` mutations and dashboard reads alike — is re-routed from your host machine's `~/.config/ck/projects.json` to `.sandbox/config/projects.json`, every project write (`PLAN.md`, `HISTORY.md`, `JOURNAL.md`, lock files, rotation archives) lands under `.sandbox/projects/`, and every global space (files, note sidecars, histories and `spaces_order`) is confined to `.sandbox/config/spaces/` plus `.sandbox/config/state.json`. The host registry and host spaces are never opened, read or written — the test suite verifies they stay byte-identical (content and mtime) across full dev sessions. `sandbox setup` writes only inside `.sandbox/` by construction, and `sandbox clean` removes only `.sandbox/` itself.
 
 The sandbox infrastructure is the fastest way to exercise `ck` by hand — every command below runs against the mock environment, and your real registry (`~/.config/ck/`) and projects stay untouched. Use it before submitting changes to reproduce dashboard layouts, registry flows, and edge cases (missing projects, task-ID gaps, history rotation) in seconds.
 
@@ -1277,8 +1290,8 @@ Context Keeper (ck) служит мостом между вашим разумо
 - Хранение в тексте
 - Интеграция с Git (только локальные коммиты, без push)
 - Авто-архивация: ротация HISTORY.md по лимиту HISTORY_LIMIT со сжатыми `.md.gz`-архивами (COMPRESS_ARCHIVES) и FIFO-очисткой по MAX_BAK_FILES
-- Процессные заметки: `ck note <ID> <text>` добавляет заметку с меткой времени к задаче (не перезаписывает предыдущую) — видна в `ck st`, архивируется в HISTORY.md по `ck done` и переносится через `Unfocused / Paused Context`; `--list` показывает заметки одной задачи, `--clear` удаляет их
-- Парсинг `- [ ]` / `- [>]` / `- [x]` (устаревший `- []` нормализуется)
+- Процессные заметки: `ck note <ID> <text>` добавляет заметку с меткой времени к задаче (не перезаписывает предыдущую) — хранится прямо в PLAN.md под задачей, видна в `ck st`, уходит в HISTORY.md вместе с задачей по `ck done` и сохраняется при парковке `[~]`; `--list` показывает заметки одной задачи, `--clear` удаляет их
+- Парсинг `- [ ]` / `- [>]` / `[~]` / `- [x]` (устаревший `- []` нормализуется): PLAN.md хранит только активные задачи, завершённые переходят в `.ck/HISTORY.md`; каждая задача несёт стабильную ссылку `<!-- id: uuid -->`
 - Поддержка AI
 - Глобальный реестр проектов и панель мониторинга
 - Fail-closed блокировка файлов, атомарная запись
@@ -1315,9 +1328,13 @@ chmod +x ck
 ## 📂 Структура проекта
 ```bash
 .ck/
-├── state.json
-├── PLAN.md
-├── HISTORY.md
+├── version                # маркер схемы — запись отклоняется для проектов до 0.13
+├── meta.json              # метаданные проекта
+├── links.json             # связанные ссылки
+├── AGENTS.md              # инструкции для ИИ-агентов
+├── PLAN.md                # только активные задачи ([ ] / [>] / [~], инлайновые * Note)
+├── HISTORY.md             # реестр завершённых: - [x] <ts>: <title> <!-- id: uuid -->
+├── JOURNAL.md             # чекпоинты ck save
 ├── prompt.md
 ├── README.md
 ├── .gitignore
@@ -1654,29 +1671,29 @@ $ echo $?
 
 ## Сценарий работы ck save
 `ck save` фиксирует **чекпоинт** и **не завершает** активную задачу.
-Завершение остаётся отдельным явным действием `ck done <ID>` (оно же
-архивирует заметку этой задачи в HISTORY.md).
+Завершение остаётся отдельным явным действием `ck done <ID>` (оно переводит
+задачу — вместе с заметками — в HISTORY.md).
 
 1. Показать активную задачу и явно сообщить, что она остаётся открытой.
-2. **Шаг 1 — локальная история (без Git):** ввести опциональный текст
+2. **Шаг 1 — локальный журнал (без Git):** ввести опциональный текст
    заметки (inline или в редакторе), затем короткое резюме; датированная
-   запись добавляется в `.ck/HISTORY.md`.
+   запись добавляется в `.ck/JOURNAL.md`.
 3. **Шаг 2 — опциональный локальный Git-коммит:** выбрать сообщение
    коммита и подтвердить. Индексируются только артефакты Context Keeper;
    `ck` никогда не выполняет push. Если Git недоступен или вы отказались,
-   запись истории остаётся сохранённой.
-4. Авто-архивация HISTORY.md при превышении лимита (бесшовная ротация,
+   запись журнала остаётся сохранённой.
+4. Авто-архивация JOURNAL.md при превышении лимита (бесшовная ротация,
    оригинал сохраняется как сжатый `.md.gz`-архив).
 
 ---
 
-## Процессные заметки и Unfocused / Paused Context
+## Процессные заметки и контекст `[~]` (paused)
 
 **Процессная заметка** (`ck note <ID> <text>`) — лёгкий блокнот, привязанный к
 задаче. Каждый вызов **добавляет** новую запись с меткой времени и никогда не
-перезаписывает предыдущую. Заметки хранятся в `.ck/state.json` (пространства —
-в sidecar `~/.config/ck/spaces/<name>.json`), отображаются под своей задачей и
-подчиняются строгому жизненному циклу:
+перезаписывает предыдущую. Заметки хранятся ИНЛАЙНОВО в `.ck/PLAN.md`, прямо
+под своей задачей (`* Note (2026-11-04 14:32 UTC): text`); пространства —
+в sidecar `~/.config/ck/spaces/<name>.json`. Жизненный цикл:
 
 - **Добавление** — `ck note <ID> <text>` добавляет запись к указанной задаче;
   `ck note <text>` сохраняет сокращение для активной задачи (сфокусированная,
@@ -1686,26 +1703,43 @@ $ echo $?
   запись под владеющей задачей, а `ck dashboard -v` — по проектам (включая
   зарегистрированные проекты из другого каталога). При двух и более записях
   каждая строка получает маркер `(HH:MM UTC)`, чтобы порядок читался.
-- **Завершение** — `ck done <ID>` архивирует все записи в `HISTORY.md` в
-  порядке добавления, затем очищает состояние задачи. Одна заметка сохраняет
-  исторический формат `* Note: <text>`; несколько заметок попадают в одну
-  датированную запись, по строке `* Note` с меткой времени на каждую. Заметки —
-  это пользовательские данные: они переходят в историю и никогда не теряются
-  молча.
+- **Завершение** — `ck done <ID>` переводит задачу целиком в `HISTORY.md`:
+  все записи перемещаются под строку реестра `- [x]` в порядке добавления,
+  по строке `* Note (<ts> UTC)` на каждую. Заметки — это пользовательские
+  данные: они переходят в историю и никогда не теряются молча.
 
 **Метки времени заметок.** `ck note <ID> --list`, `ck st` и `ck notes`
 единообразно показывают метки времени: `HH:MM UTC` для сегодняшних заметок и
-`YYYY-MM-DD HH:MM UTC` для более старых. `HISTORY.md` проставляет метку каждой
-заметке, если у задачи две или больше; задачи с одной заметкой сохраняют
-устаревший формат `* Note: <text>`.
+`YYYY-MM-DD HH:MM UTC` для более старых. Каждая инлайновая заметка в
+HISTORY.md несёт полную метку `(YYYY-MM-DD HH:MM UTC)`.
 
-**Хранение и миграция.** Заметки хранятся как упорядоченные массивы
-`{"text": ..., "created": ...}`, где `created` — ISO-8601 UTC с суффиксом
-`+00:00`. Старые заметки-строки из предыдущих версий преобразуются в памяти при
-загрузке; массив сохраняется при следующей записи файла. Устаревшее поле
-`active_task.note` переносится в ledger только если у задачи ещё нет массива
-(массив всегда главнее) и удаляется при каждой последующей записи. Команды
-только для чтения (включая `ck notes`) никогда не изменяют `state.json`.
+**Хранение и миграция.** Начиная с v0.13.0 заметки хранятся инлайново в
+`PLAN.md` как отступаемые строки `* Note (<ts> UTC): <text>`, привязанные к
+узлу задачи — отдельного `.ck/state.json` больше нет. Проекты до 0.13
+(заметки внутри монолита `.ck/state.json`) обновляются командой
+`ck migrate --apply`, которая переносит каждую заметку под её задачу
+(предварительно бэкапя весь `.ck/`). Команды только для чтения никогда не
+перезаписывают план.
+
+### Переключение фокуса
+
+Фокус переключается командой `ck focus <NEW_ID>`: текущий `[>]` паркуется как
+`[~]` (paused), целевая задача становится сфокусированной. Задача, потерявшая
+фокус, ведёт себя в зависимости от наличия заметки: с заметкой она остаётся в
+PLAN.md с маркером `[~]` и своим блокнотом (блок `[~] Paused` в `ck st`),
+без заметки интерактивная сессия сначала предлагает её записать
+(`Task #N lost focus. Add a process note? [y/N]`), а при отказе печатает
+подсказку `[!] Task #N parked as [~] without a note. Attach one via
+`ck note <ID> <text>`.`.
+
+`ck start <ID>` работает только БЕЗ активного фокуса: он фокусирует целевую
+задачу (так возобновляется приостановленная `[~]`) и отказывается выполнять
+перехват чужого фокуса (код 1): `ERROR: Task #<old> is already focused.
+Use: ck focus <ID> to pause it and switch.` `ck start 0` / `ck focus 0`
+сбрасывают фокус — задача возвращается в `[ ]`, а не паркуется
+(`Task #N lost focus — returned to open (not paused).`). Повторный
+`ck focus <ID>` / `ck start <ID>` на уже сфокусированной задаче — чистый
+no-op (`Task #<ID> is already focused.`).
 
 ---
 
@@ -1733,8 +1767,8 @@ export EDITOR="nano"  # используется, если VISUAL не зада�
 ---
 
 ## 🔧 Механика работы
-- Формат задач: `- [ ]` / `- [>]` / `- [x]` (устаревший `- []` принимается и нормализуется)
-- Ротация истории (безопасная при сбоях): `HISTORY_LIMIT` записей → архив `HISTORY_*.md.gz` (`COMPRESS_ARCHIVES`, сжатие встроенным модулем `gzip`), удержание `MAX_BAK_FILES` архивов (FIFO-очистка старых); весь журнал — `ck log --all` (архивы `.md.gz` и legacy `.md.bak` читаются прозрачно, повреждённые пропускаются с предупреждением)
+- Формат задач: `- [ ]` / `- [>]` / `[~]` / `- [x]` (устаревший `- []` принимается и нормализуется); каждая задача несёт `<!-- id: uuid -->`, заметки — инлайновые строки `* Note (<ts> UTC):` под задачей; PLAN.md хранит только активные задачи, `[x]` живут в HISTORY.md
+- Ротация истории и журнала (безопасная при сбоях): `HISTORY_LIMIT` записей → архив `*_*.md.gz` (`COMPRESS_ARCHIVES`, сжатие встроенным модулем `gzip`), удержание `MAX_BAK_FILES` архивов (FIFO-очистка старых); весь журнал — `ck log --all` (архивы `.md.gz` и legacy `.md.bak` читаются прозрачно, повреждённые пропускаются с предупреждением)
 - Локальные коммиты Git (без push)
 - Fail-closed блокировка файлов и атомарная запись
 
@@ -1786,7 +1820,7 @@ echo "$CK_SANDBOX_ROOT"
 .sandbox/
 ├── projects/            # перенаправленные записи проектов
 │   └── <имя>-<hash>/    # своя песочница на каждый реальный проект
-│       └── .ck/         # PLAN.md, HISTORY.md, state.json, lock-файлы …
+│       └── .ck/         # PLAN.md, HISTORY.md, JOURNAL.md, lock-файлы …
 ├── config/              # песочные реестр, state и пространства
 │   └── spaces/          # local/, remote/, кастомные пространства, today/ (изолированы)
 └── dev.log              # отладочный лог
@@ -1801,7 +1835,7 @@ echo "$CK_SANDBOX_ROOT"
 `ck-dev` — точка входа в песочницу. Он устанавливает `CK_SANDBOX=1` (аналогично работают флаг `--sandbox` и `CK_DEV=1`) и ведёт себя как `ck` с одним ключевым отличием:
 
 - **Чтение проектов реальное** (с read-your-writes в песочнице): статус, дашборды и списки задач показывают настоящие проекты — если нет песочной копии проекта (созданной предыдущей dev-записью или `sandbox setup`); при её наличии читается копия, чтобы цепочки dev-команд корректно складывались. **Глобальные пространства читаются только из песочной копии** — продакшен-пространства не попадают в сессию.
-- **Записи перехватываются**: ВСЕ операции записи — мутации задач (`add` / `start` / `done`), правки `PLAN.md`, обновления `state.json`, lock-файлы, бэкапы, пространства (`add` / `focus` / `done` / `note` / `space create|rename|delete`), изменения реестра — строго перенаправляются в `.sandbox/`.
+- **Записи перехватываются**: ВСЕ операции записи — мутации задач (`add` / `start` / `focus` / `done`), правки `PLAN.md`, добавления в JOURNAL.md, lock-файлы, бэкапы, пространства (`add` / `focus` / `done` / `note` / `space create|rename|delete`), изменения реестра — строго перенаправляются в `.sandbox/`.
 
 Пока активен `IS_DEV`, продакшен остаётся неизменным: реальный `~/.config/context-keeper/` и реальные `PLAN.md` не модифицируются (проверяется побайтно, включая mtime, в тестах). Дополнительные защитные барьеры в dev-режиме:
 
@@ -1867,7 +1901,7 @@ cd .sandbox/projects/sandbox_stress && ck log --all    # полная объед
 
 ### Ручное тестирование (для контрибьюторов)
 
-**Безопасность прежде всего — нулевое воздействие на хост.** С момента начала песочной сессии каждое взаимодействие с глобальным реестром — мутации `register` / `unregister` / `prune` и чтения дашбордов — перенаправляется из `~/.config/ck/projects.json` вашей машины в `.sandbox/config/projects.json`, каждая запись проекта (`PLAN.md`, `state.json`, `HISTORY.md`, lock-файлы, архивы ротации) попадает в `.sandbox/projects/`, а все глобальные пространства (файлы, sidecar-заметки, истории и `spaces_order`) ограничены `.sandbox/config/spaces/` и `.sandbox/config/state.json`. Реестр и пространства хоста никогда не открываются, не читаются и не изменяются — тестовый набор проверяет, что они остаются побайтово идентичными (содержимое и mtime) на протяжении полных dev-сессий. `sandbox setup` пишет только внутри `.sandbox/` по построению, а `sandbox clean` удаляет только сам `.sandbox/`.
+**Безопасность прежде всего — нулевое воздействие на хост.** С момента начала песочной сессии каждое взаимодействие с глобальным реестром — мутации `register` / `unregister` / `prune` и чтения дашбордов — перенаправляется из `~/.config/ck/projects.json` вашей машины в `.sandbox/config/projects.json`, каждая запись проекта (`PLAN.md`, `HISTORY.md`, `JOURNAL.md`, lock-файлы, архивы ротации) попадает в `.sandbox/projects/`, а все глобальные пространства (файлы, sidecar-заметки, истории и `spaces_order`) ограничены `.sandbox/config/spaces/` и `.sandbox/config/state.json`. Реестр и пространства хоста никогда не открываются, не читаются и не изменяются — тестовый набор проверяет, что они остаются побайтово идентичными (содержимое и mtime) на протяжении полных dev-сессий. `sandbox setup` пишет только внутри `.sandbox/` по построению, а `sandbox clean` удаляет только сам `.sandbox/`.
 
 Инфраструктура песочницы — самый быстрый способ опробовать `ck` вручную: все команды ниже работают с окружением-макетом, а реальный реестр (`~/.config/ck/`) и ваши проекты остаются нетронутыми. Используйте её перед отправкой изменений, чтобы за секунды воспроизводить макеты дашбордов, сценарии реестра и граничные случаи (отсутствующие проекты, пропуски в ID задач, ротацию истории).
 

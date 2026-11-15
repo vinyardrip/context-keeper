@@ -94,29 +94,29 @@ class TestDocumentationConsistency(unittest.TestCase):
             self.readme.count("`ck info` in a dev session"), 2)
 
     def test_append_only_notes_are_documented_bilingually(self):
-        """v0.10.0: both Process Notes sections describe the new CLI."""
+        """v0.13.0: both Process Notes sections describe inline storage."""
         english = _section(
-            self.readme, "## Process Notes & Unfocused / Paused Context")
+            self.readme, "## Process Notes & Unfocused / Paused Context (`[~]`)")
         russian = _section(
-            self.readme, "## Процессные заметки и Unfocused / Paused Context")
+            self.readme, "## Процессные заметки и контекст `[~]` (paused)")
         for section in (english, russian):
             self.assertIn("ck note <ID> <text>", section)
             self.assertIn("--list", section)
             self.assertIn("--clear", section)
-            self.assertIn("ISO-8601", section)
-            self.assertIn("state.json", section)
+            # v0.13.0: notes live INLINE in PLAN.md; state.json is gone.
+            self.assertIn("PLAN.md", section)
+            self.assertIn("* Note", section)
+            self.assertIn("ck migrate", section)
 
     def test_note_timestamp_rule_is_documented_bilingually(self):
-        """v0.10.1: timestamp format and HISTORY multi-note rule."""
+        """v0.13.0: timestamp format and the HISTORY inline-note rule."""
         english = _section(
-            self.readme, "## Process Notes & Unfocused / Paused Context")
+            self.readme, "## Process Notes & Unfocused / Paused Context (`[~]`)")
         russian = _section(
-            self.readme, "## Процессные заметки и Unfocused / Paused Context")
+            self.readme, "## Процессные заметки и контекст `[~]` (paused)")
         for section in (english, russian):
             self.assertIn("HH:MM UTC", section)
             self.assertIn("YYYY-MM-DD HH:MM UTC", section)
-            self.assertIn("* Note: <text>", section)
-            self.assertIn("active_task.note", section)
         self.assertIn("**Note timestamps.**", english)
         self.assertIn("**Метки времени заметок.**", russian)
 

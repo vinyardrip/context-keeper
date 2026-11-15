@@ -15,7 +15,7 @@ class TestTaskListMutations(unittest.TestCase):
         c = tl.add("third")
         self.assertEqual([a.id, b.id, c.id], [1, 2, 3])
 
-    def test_focus_demotes_others(self):
+    def test_focus_pauses_others(self):
         tl = TaskList()
         tl.add("a")
         tl.add("b")
@@ -23,7 +23,7 @@ class TestTaskListMutations(unittest.TestCase):
         tl.focus(1)
         self.assertEqual(tl.tasks[0].status, TaskStatus.FOCUSED)
         tl.focus(3)
-        self.assertEqual(tl.tasks[0].status, TaskStatus.OPEN)
+        self.assertEqual(tl.tasks[0].status, TaskStatus.PAUSED)
         self.assertEqual(tl.tasks[2].status, TaskStatus.FOCUSED)
 
     def test_focus_unknown_raises(self):
@@ -53,7 +53,8 @@ class TestTaskListMutations(unittest.TestCase):
         t = tl.add("a")
         tl.edit_note(t.id, "first note")
         tl.edit_note(t.id, "second note")
-        self.assertEqual(t.notes, ["first note", "second note"])
+        self.assertEqual(
+            [n["text"] for n in t.notes], ["first note", "second note"])
 
     def test_remove_returns_node(self):
         tl = TaskList()

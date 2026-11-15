@@ -528,10 +528,13 @@ class TestDoneImplicitFocus(_IsolatedHome, unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn("[ok] Marked done: 1", out)
 
-            text = ck.plan_file.read_text(encoding="utf-8")
-            self.assertIn("- [x] alpha task", text)
-            self.assertIn("- [ ] beta task", text)
-            self.assertNotIn("Describe the first task", text)
+            plan = ck.plan_file.read_text(encoding="utf-8")
+            self.assertNotIn("- [x] alpha task", plan)
+            self.assertIn("- [ ] beta task", plan)
+            history = ck.history_file.read_text(encoding="utf-8")
+            self.assertIn("alpha task", history)
+            self.assertIn("- [x] ", history)
+            self.assertNotIn("Describe the first task", plan)
 
     def test_bare_done_via_legacy_dispatch(self):
         """Both parsers (argparse + legacy positional) share the
@@ -546,9 +549,11 @@ class TestDoneImplicitFocus(_IsolatedHome, unittest.TestCase):
             code, out = self._run(["done"], ck.root)
             self.assertEqual(code, 0)
             self.assertIn("[ok] Marked done: 1", out)
-            text = ck.plan_file.read_text(encoding="utf-8")
-            self.assertIn("- [x] alpha task", text)
-            self.assertNotIn("Describe the first task", text)
+            plan = ck.plan_file.read_text(encoding="utf-8")
+            self.assertNotIn("- [x] alpha task", plan)
+            self.assertNotIn("Describe the first task", plan)
+            history = ck.history_file.read_text(encoding="utf-8")
+            self.assertIn("alpha task", history)
 
     def test_bare_done_without_focus_prints_usage_and_fails(self):
         with tempfile.TemporaryDirectory() as td:
@@ -585,8 +590,10 @@ class TestDoneImplicitFocus(_IsolatedHome, unittest.TestCase):
             code, out = self._run(["done", "2"], ck.root)
             self.assertEqual(code, 0)
             self.assertIn("[ok] Marked done: 2", out)
-            self.assertIn("- [x] beta task",
-                          ck.plan_file.read_text(encoding="utf-8"))
+            self.assertNotIn("- [x] beta task",
+                             ck.plan_file.read_text(encoding="utf-8"))
+            self.assertIn("beta task",
+                          ck.history_file.read_text(encoding="utf-8"))
 
     def test_bare_done_ignores_next_candidate_without_focus(self):
         """Without an explicit focus the auto-resolved ``[>] Next``

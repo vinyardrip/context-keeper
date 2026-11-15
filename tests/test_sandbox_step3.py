@@ -177,11 +177,20 @@ class TestAddTaskInterception(_SnapshottedProject):
 
         self.assertEqual(self.snapshot_tree(root), before)
         from cklib.sandbox import resolve_write_path
+        # start focused the alpha task in the sandboxed PLAN.md...
         sandboxed = resolve_write_path(ck.plan_file)
         self.assertIn("- [>] alpha task",
                       sandboxed.read_text(encoding="utf-8"))
-        self.assertIn("- [x] beta task",
-                      sandboxed.read_text(encoding="utf-8"))
+        # ...while v0.13.0 done graduates beta into the sandboxed
+        # HISTORY.md ledger (the plan carries no [x] rows at all).
+        sandboxed_history = resolve_write_path(ck.history_file)
+        self.assertTrue(sandboxed_history.exists())
+        self.assertIn("beta task",
+                      sandboxed_history.read_text(encoding="utf-8"))
+        self.assertNotIn("beta task",
+                         sandboxed.read_text(encoding="utf-8"))
+        # No state.json is created anywhere (v0.13.0).
+        self.assertFalse((root / ".ck" / "state.json").exists())
         # Read-your-writes: BOTH mutations composed in one copy
         # (the seed was replaced, so it is gone).
         self.assertNotIn("Describe the first task",
@@ -210,11 +219,11 @@ class TestRegistryInterception(_SnapshottedProject):
         self.assertIn("renamed-proj",
                       sandboxed.read_text(encoding="utf-8"))
 
-    def test_add_task_sync_writes_sandbox_registry_only(self):
-        """`ck add` syncs the active-task pointer — that registry
-        write must be intercepted too (the synced title is the
-        ACTIVE task's, i.e. task 1 after init, refreshed by the add
-        of task 3)."""
+    def test_add_task_never_writes_registry(self):
+        """v0.13.0: ``ck add`` no longer syncs an active-task pointer
+        into the registry — the only registry write is the explicit
+        ``init(register=True)``. A dev-mode add must therefore leave
+        both the real registry AND its sandbox mirror untouched."""
         root, ck = self.make_project()
         reg_file = ckconfig.GLOBAL_REGISTRY_FILE
         before = self.snapshot_tree(reg_file.parent)
@@ -222,13 +231,11 @@ class TestRegistryInterception(_SnapshottedProject):
         os.environ["CK_SANDBOX"] = "1"
         ck.add_task("another dev task")
 
+        # Real registry untouched...
         self.assertEqual(self.snapshot_tree(reg_file.parent), before)
-        sandboxed = sandbox.resolve_write_path(reg_file)
-        self.assertTrue(sandboxed.exists())
-        # The sandbox copy mirrors the real registry (seeded read)
-        # and carries the synced active-task pointer.
-        self.assertIn("proj", sandboxed.read_text(encoding="utf-8"))
-        self.assertIn("active_task_id", sandboxed.read_text(encoding="utf-8"))
+        # ...and NO sandbox registry copy was created by the add
+        # (no active-task sync happens in v0.13).
+        self.assertFalse(sandbox.resolve_write_path(reg_file).exists())
 
     def test_lock_files_not_created_in_production(self):
         """Dev-session *.lock files land in the sandbox, not the real
@@ -264,39 +271,56 @@ class TestRegistryInterception(_SnapshottedProject):
 class TestStateAndHistoryInterception(_SnapshottedProject):
     """state.json + HISTORY.md writes are redirected."""
 
-    def test_save_state_redirected(self):
+    def test_save_redirected_to_sandbox_journal(self):
+        """v0.13.0: ``ck save`` appends to ``.ck/JOURNAL.md`` — in
+        dev mode that write is intercepted, the Git step is skipped
+        entirely, and ``state.json`` is created nowhere."""
         root, ck = self.make_project()
-        state_file = root / ".ck" / "state.json"
         before = self.snapshot_tree(root)
 
         os.environ["CK_SANDBOX"] = "1"
-        state = ck._read_state()
-        state["current_step"] = "dev step"
-        ck._write_state(state)
+        prompts = iter(["s", "dev checkpoint"])  # skip body; summary
 
+        def fake_input(prompt: str = "") -> str:
+            return next(prompts)
+
+        captured: list[str] = []
+        result = ck.save(input_fn=fake_input, printer=captured.append)
+
+        # The dev-mode guardrail returns before the Git phase.
+        self.assertIsNone(result)
+        joined = "\n".join(captured)
+        self.assertIn("Saved entry to .ck/JOURNAL.md", joined)
+        self.assertIn("Dev mode: Git commit skipped", joined)
+
+        # Real project untouched; state.json exists nowhere.
         self.assertEqual(self.snapshot_tree(root), before)
-        sandboxed = sandbox.resolve_write_path(state_file)
+        self.assertFalse((root / ".ck" / "state.json").exists())
+
+        # The journal entry landed in the sandboxed copy.
+        sandboxed = sandbox.resolve_write_path(ck.journal_file)
         self.assertTrue(sandboxed.exists())
-        self.assertIn("dev step", sandboxed.read_text(encoding="utf-8"))
+        self.assertIn("dev checkpoint",
+                      sandboxed.read_text(encoding="utf-8"))
 
     def test_history_append_seeded_from_real(self):
         root, ck = self.make_project()
         history = root / ".ck" / "HISTORY.md"
-        history.write_text("### 2026-01-01 10:00 | [1] seed\n- first\n",
+        history.write_text("## Completed\n- [x] 2026-01-01 10:00: seed\n",
                            encoding="utf-8")
         before = self.snapshot_tree(root)
 
         os.environ["CK_SANDBOX"] = "1"
-        ck.edit_note(1, "dev note")
+        ck.done("2")  # graduate beta into the ledger
 
         # Real history untouched.
         self.assertEqual(self.snapshot_tree(root), before)
 
-        # Sandbox copy contains BOTH the seed and the new note.
+        # Sandbox copy contains BOTH the seed and the new entry.
         sandboxed = sandbox.resolve_write_path(history)
         text = sandboxed.read_text(encoding="utf-8")
         self.assertIn("seed", text)
-        self.assertIn("dev note", text)
+        self.assertIn("beta task", text)
 
     def test_init_in_dev_mode_writes_sandbox(self):
         """A fresh `init` in dev mode creates .ck/ ONLY in the
@@ -927,7 +951,9 @@ class TestReadAfterWritePromotion(_SnapshottedProject):
 
         # Read commands render the promoted content immediately.
         self.assertIn("promoted task", keeper.tasks())
-        self.assertIn("promoted task", keeper.status())
+        # The compact status block hides tail tasks, but its Backlog
+        # banner counts the promoted root plan (2 active tasks).
+        self.assertIn(">> Backlog: 2 tasks remaining", keeper.status())
 
     def test_promotion_traced_in_dev_log(self):
         """With CK_DEBUG=1 the promotion event is traceable in
@@ -1017,8 +1043,14 @@ class TestReadAfterWritePromotion(_SnapshottedProject):
                 cwd=str(root), env=env,
             )
             self.assertEqual(out.returncode, 0, out.stderr)
-            # Read-your-writes: the freshly added task is visible.
-            self.assertIn("brand-new task", out.stdout)
+            if argv == ["st"]:
+                # v0.13.0 `st` hides tail tasks: the freshly added
+                # one only shows up in the Backlog banner count
+                # (manual task + brand-new task = 2 active).
+                self.assertIn(">> Backlog: 2 tasks remaining", out.stdout)
+            else:
+                # `list` (and its `st -l` alias) name every task.
+                self.assertIn("brand-new task", out.stdout)
             self.assertNotIn("[DEBUG]", out.stdout)
 
         # The root plan itself was promoted: manual content AND the

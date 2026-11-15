@@ -81,12 +81,16 @@ def test_init_then_consecutive_add_replaces_then_appends(tmp_path, monkeypatch):
 
 def test_single_non_default_task_is_appended_not_replaced(tmp_path):
     """A lone task whose title differs from the placeholder is kept."""
+    from cklib.config import VERSION
+
     (tmp_path / ".ck").mkdir(parents=True)
     (tmp_path / ".ck" / "PLAN.md").write_text(
-        "# project\n\n## Current Sprint\n- [ ] My custom task\n\n"
-        "## Completed\n",
+        "# project\n\n## Current Sprint\n- [ ] My custom task\n\n",
         encoding="utf-8",
     )
+    # v0.13.0 write-gate: raw fixtures carry the current marker.
+    (tmp_path / ".ck" / "version").write_text(
+        VERSION + "\n", encoding="utf-8")
 
     ck = ContextKeeper(root=tmp_path)
     new_id = ck.add_task("Second task")

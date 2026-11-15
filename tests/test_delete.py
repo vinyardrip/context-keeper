@@ -5,9 +5,9 @@ Coverage:
 - AST deletion drops the task's source bullet and renumbers the
   remaining IDs 1..N in document order (no gaps, no duplicates).
 - ``ContextKeeper.delete_task`` preserves headers/prose, refocuses the
-  next task when the focused one is removed, and reconciles
-  ``.ck/state.json`` (active + paused note IDs shift, notes bound to
-  the deleted task are archived into HISTORY.md, never silently lost).
+  next task when the focused one is removed, keeps inline notes on
+  their renumbered owners, and archives notes bound to the deleted
+  task into HISTORY.md (never silently lost).
 - CLI behaviour: the ID/title and target space are shown, a ``[y/N]``
   answer confirms/aborts, a non-interactive run refuses without
   ``-f``, ``-f`` / ``--force`` bypasses the prompt, and the ``rm``
@@ -42,6 +42,7 @@ from cklib import registry as ckregistry
 from cklib import spaces
 from cklib.cli import main
 from cklib.core import ContextKeeper
+from cklib.models import TaskStatus
 from cklib.parser import parse_plan, render_plan
 
 
@@ -134,6 +135,9 @@ class _Harness(unittest.TestCase):
         self.ck = ContextKeeper(root=self.root)
         self.ck.ck_path.mkdir(parents=True, exist_ok=True)
         self.ck.plan_file.write_text(self.PLAN, encoding="utf-8")
+        # v0.13.0 write-gate: raw fixtures carry the current marker.
+        self.ck.ck_path.joinpath("version").write_text(
+            ckconfig.VERSION + "\n", encoding="utf-8")
 
         self._old_cwd = os.getcwd()
         os.chdir(self.root)
@@ -156,10 +160,6 @@ class _Harness(unittest.TestCase):
 
     def titles(self) -> list:
         return [t.title for t in self.reloaded().tasks]
-
-    def state(self) -> dict:
-        self.assertTrue(self.ck.state_file.exists())
-        return json.loads(self.ck.state_file.read_text(encoding="utf-8"))
 
     def make_space(self, name: str, tasks: tuple = (
             "alpha", "beta", "gamma")) -> spaces.SpaceManager:
@@ -232,11 +232,15 @@ class TestDeleteTaskCore(_Harness):
         self.assertEqual(self.titles(), ["beta", "gamma"])
         self.assertEqual(self.ids(), [1, 2])
 
-    def test_delete_completed_task_is_allowed(self):
+    def test_delete_after_done_targets_renumbered_plan(self):
+        # v0.13.0: `done` graduates beta into HISTORY.md; the plan
+        # renumbers, so deleting ID 2 removes gamma instead.
         self.ck.done("2")
-        self.ck.delete_task(2)
-        self.assertEqual(self.titles(), ["alpha", "gamma"])
-        self.assertEqual(self.ids(), [1, 2])
+        result = self.ck.delete_task(2)
+        self.assertEqual(result["title"], "gamma")
+        self.assertEqual(self.titles(), ["alpha"])
+        self.assertIn("beta", self.ck.history_file.read_text(
+            encoding="utf-8"))
 
     def test_delete_unknown_id_is_keyerror_and_plan_untouched(self):
         before = self.plan_text()
@@ -259,27 +263,31 @@ class TestDeleteTaskCore(_Harness):
 
     def test_delete_reindexes_so_later_done_hits_right_task(self):
         self.ck.delete_task(2)
-        self.ck.done("1")
-        tl = self.reloaded()
-        self.assertEqual([t.title for t in tl.done], ["alpha"])
-        self.assertEqual([t.title for t in tl.open], ["gamma"])
+        self.ck.done("1")  # alpha (renumbered to 1) -> HISTORY.md
+        history = self.ck.history_file.read_text(encoding="utf-8")
+        self.assertIn("alpha", history)
+        self.assertEqual(self.titles(), ["gamma"])
 
 
 class TestDeleteStateReconciliation(_Harness):
+    """v0.13.0: notes live INLINE; there is no ``state.json``.
 
-    def test_active_note_id_shifts_after_earlier_deletion(self):
+    Deletion must keep noted context consistent: notes on surviving
+    tasks follow their renumbered owner, and notes bound to the
+    deleted task are archived into HISTORY.md, never silently lost.
+    """
+
+    def test_noted_task_note_follows_renumbering(self):
         self.ck.start(3)
         self.ck.set_note("gamma scratchpad")
         self.ck.delete_task(1)
 
-        state = self.state()
-        active = state["active_task"]
-        self.assertEqual(active["id"], 2)
-        self.assertEqual(active["title"], "gamma")
-        self.assertNotIn("note", active)
+        tl = self.reloaded()
+        self.assertEqual([t.title for t in tl.tasks], ["beta", "gamma"])
         self.assertEqual(
-            state["notes"]["2"][-1]["text"], "gamma scratchpad")
-        # And the note still renders on the right (renumbered) task.
+            [n["text"] for n in tl.by_id(2).notes],
+            ["gamma scratchpad"])
+        # The note still renders on the right (renumbered) task.
         self.assertIn("* Note: gamma scratchpad", self.ck.status())
 
     def test_note_of_deleted_task_is_archived_not_dropped(self):
@@ -290,36 +298,37 @@ class TestDeleteStateReconciliation(_Harness):
         self.assertEqual(result["notes_archived"], 1)
         self.assertIn("half-done mapping",
                       self.ck.history_file.read_text(encoding="utf-8"))
-        self.assertNotIn("active_task", self.state())
+        self.assertNotIn("half-done mapping", self.plan_text())
+        self.assertFalse((self.ck.ck_path / "state.json").exists())
 
-    def test_paused_note_id_shifts_after_deletion(self):
+    def test_paused_task_note_survives_deletion_of_earlier_task(self):
         self.ck.start(2)
         self.ck.set_note("paused beta note")
-        self.ck.start(3)  # beta loses focus -> paused registry entry
+        self.ck.focus(3)  # beta parks as [~]
         self.ck.delete_task(1)
 
-        paused = self.state()["paused_tasks"]
-        self.assertEqual(len(paused), 1)
-        self.assertEqual(paused[0]["id"], 1)
-        self.assertEqual(paused[0]["title"], "beta")
-        self.assertEqual(paused[0]["note"], "paused beta note")
+        tl = self.reloaded()
+        paused = [t for t in tl.tasks if t.status == TaskStatus.PAUSED]
+        self.assertEqual([t.title for t in paused], ["beta"])
+        self.assertEqual(paused[0].id, 1)
+        self.assertEqual(
+            [n["text"] for n in paused[0].notes], ["paused beta note"])
         self.assertIn("paused beta note", self.ck.notes())
 
     def test_deleting_paused_task_archives_its_note(self):
         self.ck.start(2)
         self.ck.set_note("paused beta note")
-        self.ck.start(3)
+        self.ck.focus(3)  # beta parks as [~]
         result = self.ck.delete_task(2)
 
         self.assertEqual(result["notes_archived"], 1)
         self.assertIn("paused beta note",
                       self.ck.history_file.read_text(encoding="utf-8"))
-        state = self.state()
-        self.assertEqual(state.get("paused_tasks"), [])
+        self.assertFalse((self.ck.ck_path / "state.json").exists())
 
     def test_no_state_file_is_created_by_a_bare_deletion(self):
         self.ck.delete_task(1)
-        self.assertFalse(self.ck.state_file.exists())
+        self.assertFalse((self.ck.ck_path / "state.json").exists())
 
 
 # ---------------------------------------------------------------------------
@@ -516,15 +525,14 @@ class TestCrossSpaceDeleteCli(_Harness):
         manager.set_note(2, "space note")
         self.ck.start(2)
         self.ck.set_note("project note")
-        before_state = self.ck.state_file.read_text(encoding="utf-8")
         before_plan = self.plan_text()
 
         rc, _, err = _run_main(
             ["delete", "2", "-s", "work", "-f"])
 
         self.assertEqual(rc, 0, err)
-        self.assertEqual(
-            self.ck.state_file.read_text(encoding="utf-8"), before_state)
+        self.assertFalse(
+            (self.ck.ck_path / "state.json").exists())
         self.assertEqual(self.plan_text(), before_plan)
 
 

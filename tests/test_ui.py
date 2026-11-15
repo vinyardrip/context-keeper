@@ -192,26 +192,19 @@ class TestStatusRenderingColors(unittest.TestCase):
         out = self._render(ui.Palette(False))
         self.assertNotIn("\033[", out)
         self.assertIn("[>] Focus:", out)
-        self.assertIn("- [2] focus task", out)
+        self.assertIn("       - [#2] focus task", out)
 
     def test_colored_output_uses_semantic_colors(self):
         out = self._render(ui.Palette(True))
         self.assertIn("\033[", out)
-        # Completed (done) section and its items are green.
-        self.assertIn(f"{ui.GREEN}    << Done:{ui.RESET}", out)
-        self.assertIn(
-            f"{ui.GREEN}       - [1] prev task [x]{ui.RESET}", out)
+        # The History ledger section header is green.
+        self.assertIn(f"{ui.GREEN}    [x] History (last 3):{ui.RESET}", out)
         # Active focus item is bold yellow.
         self.assertIn(
-            f"{ui.BOLD}{ui.YELLOW}[2] focus task{ui.RESET}", out
+            f"{ui.BOLD}{ui.YELLOW}[#2] focus task{ui.RESET}", out
         )
-        # Upcoming item inherits the terminal's NATIVE color
-        # (previously low-contrast bright-black gray).
-        self.assertIn("       - [3] next task [ ]", out)
-        self.assertNotIn(
-            f"\033[90m       - [3] next task [ ]{ui.RESET}", out)
-        # No execution gap here -> the Skipped section is omitted.
-        self.assertNotIn("[!] Skipped", out)
+        # The Paused line renders muted (native color by default).
+        self.assertIn("    [~] Paused: (none)", out)
         # The bottom Backlog banner carries the orange/amber
         # background highlight (bold black-on-amber, inverted).
         self.assertIn(
@@ -221,19 +214,21 @@ class TestStatusRenderingColors(unittest.TestCase):
         # Section header is bold.
         self.assertIn(f"{ui.BOLD} -> WORK CONTEXT:{ui.RESET}", out)
 
-    def test_colored_skipped_line_is_yellow(self):
-        # Opens passed over before an explicit focus are a real gap.
-        plan = "# P\n- [ ] a\n- [ ] b\n- [>] c\n- [ ] d\n"
-        out = self._render(ui.Palette(True), plan=plan)
-        # Skipped tasks render by name, capped, in standard yellow.
-        self.assertIn(
-            f"{ui.YELLOW}       - [1] a [ ]{ui.RESET}",
-            out,
-        )
-        self.assertIn(
-            f"{ui.YELLOW}       - [2] b [ ]{ui.RESET}",
-            out,
-        )
+    def test_gaps_annotated_in_progress_line(self):
+        # A literal numeric gap (hand-edited or synthetic AST) rides
+        # the Progress line as a muted annotation — native color by
+        # default, never a low-contrast gray.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "project"
+            root.mkdir()
+            ck = ContextKeeper(root=root)
+            ck.ck_path.mkdir(parents=True, exist_ok=True)
+            ck.plan_file.write_text("# P\n- [ ] a\n- [ ] b\n")
+            tl = parse_plan(ck.plan_file.read_text(encoding="utf-8"))
+            tl.tasks[1].id = 3  # synthetic gap at ID 2
+            out = _render_local_status(ck, tl, palette=ui.Palette(True))
+        self.assertIn("(gaps: 2)", out)
+        self.assertNotIn("\033[90m(gaps: 2)", out)
 
     def test_colored_output_has_no_low_contrast_tokens(self):
         """Zero DIM (2) and zero standalone black/bright-black (30/90)
@@ -364,11 +359,16 @@ class TestAsciiOnlyOutput(_IsolatedHome):
     )
 
     def _project(self) -> "ContextKeeper":
+        from cklib import config as _ckconfig
+
         root = Path(self._tmp.name) / "project"
         root.mkdir()
         ck = ContextKeeper(root=root)
         ck.ck_path.mkdir(parents=True, exist_ok=True)
         ck.plan_file.write_text(self.PLAN, encoding="utf-8")
+        # v0.13.0 write-gate: raw fixtures carry the current marker.
+        ck.ck_path.joinpath("version").write_text(
+            _ckconfig.VERSION + "\n", encoding="utf-8")
         return ck
 
     def test_plain_status_block_is_pure_ascii(self):
@@ -677,6 +677,7 @@ class TestStatusAppliesColorConfig(unittest.TestCase):
     )
 
     def _project(self, config: dict | None = None) -> ContextKeeper:
+        from cklib import config as ckconfig
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name) / "project"
@@ -684,6 +685,9 @@ class TestStatusAppliesColorConfig(unittest.TestCase):
         ck = ContextKeeper(root=root)
         ck.ck_path.mkdir(parents=True, exist_ok=True)
         ck.plan_file.write_text(self.PLAN, encoding="utf-8")
+        # v0.13.0 write-gate: raw fixtures carry the current marker.
+        ck.ck_path.joinpath("version").write_text(
+            ckconfig.VERSION + "\n", encoding="utf-8")
         if config is not None:
             (root / ".ck.json").write_text(
                 json.dumps(config), encoding="utf-8")
@@ -722,18 +726,18 @@ class TestStatusAppliesColorConfig(unittest.TestCase):
         out = self._colored_status(ck)
         # Standard badges keep their high-visibility colors.
         self.assertIn(
-            f"{ui.GREEN}       - [1] prev task [x]{ui.RESET}", out)
+            f"{ui.GREEN}    [x] History (last 3):{ui.RESET}", out)
         self.assertIn(
-            f"{ui.BOLD}{ui.YELLOW}[2] focus task{ui.RESET}", out)
+            f"{ui.BOLD}{ui.YELLOW}[#2] focus task{ui.RESET}", out)
         self.assertIn(
-            f"{ui.BOLD}{ui.CYAN}       * Note: note text{ui.RESET}", out)
+            f"{ui.BOLD}{ui.CYAN}    * Note: note text{ui.RESET}", out)
 
     def test_text_cascade_colors_hints_and_borders(self):
         ck = self._project({"colors": {"text": "cyan"}})
         out = self._colored_status(ck)
         self.assertIn(f"{ui.CYAN}{'=' * 61}{ui.RESET}", out)
         self.assertIn(
-            f"{ui.CYAN}       - [3] next task [ ]{ui.RESET}", out)
+            f"{ui.CYAN}    [~] Paused: (none){ui.RESET}", out)
 
     def test_invalid_config_degrades_to_native(self):
         ck = self._project({"colors": {"muted": "sparkles"}})

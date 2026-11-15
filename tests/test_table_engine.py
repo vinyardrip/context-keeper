@@ -297,6 +297,8 @@ class TestRealRenderersAgree(unittest.TestCase):
 
     def _state(self, name: str, path: str, done: int, total: int,
                condition: str = "ok"):
+        from cklib.models import TaskStatus
+
         class _Entry:
             pass
 
@@ -305,13 +307,22 @@ class TestRealRenderersAgree(unittest.TestCase):
         entry.path = path
         entry.last_seen = None
 
+        class _T:
+            pass
+
         class _TL:
             pass
 
         tl = _TL()
-        tl.done = list(range(done))
-        tl.total = total
-        tl.completion_pct = round(100.0 * done / total, 1) if total else 0.0
+        tl.tasks = []
+        for _ in range(done):
+            t = _T()
+            t.status = TaskStatus.DONE
+            tl.tasks.append(t)
+        for _ in range(max(0, total - done)):
+            t = _T()
+            t.status = TaskStatus.OPEN
+            tl.tasks.append(t)
         tl.focused = []
         return {"entry": entry, "tl": tl, "condition": condition,
                 "is_cwd": False}

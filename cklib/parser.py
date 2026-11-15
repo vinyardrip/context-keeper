@@ -24,19 +24,28 @@ from __future__ import annotations
 import os
 import re
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Tuple
 
-from .models import Section, Task, TaskList, TaskStatus
+from .models import (
+    HistoryEntry,
+    Section,
+    Task,
+    TaskList,
+    TaskStatus,
+    history_timestamp,
+    note_stamp,
+)
 
 
 # ---------------------------------------------------------------------------
 # Pattern definitions
 # ---------------------------------------------------------------------------
 
-# Canonical CommonMark: "- [ ]", "- [>]", "- [x]"
+# Canonical CommonMark: "- [ ]", "- [>]", "- [~]", "- [x]"
 _CANONICAL_TASK_RE = re.compile(
-    r"""^-\s+\[(?P<marker>[ >x])\]\s+(?P<title>.+?)\s*$
+    r"""^-\s+\[(?P<marker>[ >x~])\]\s+(?P<title>.+?)\s*$
     """,
     re.VERBOSE,
 )
@@ -48,15 +57,38 @@ _LEGACY_OPEN_RE = re.compile(
     re.VERBOSE,
 )
 
-# Fallback: "- [>]" / "- [x]" (FOCUSED / DONE are unambiguous; only
-# OPEN has a non-space form).
+# Fallback: "- [>]" / "- [x]" / "- [~]" (FOCUSED / PAUSED / DONE are
+# unambiguous; only OPEN has a non-space form).
 _LEGACY_FOCUSED_DONE_RE = re.compile(
-    r"""^-\s+\[(?P<marker>>|x|X)\]\s+(?P<title>.+?)\s*$
+    r"""^-\s+\[(?P<marker>>|x|X|~)\]\s+(?P<title>.+?)\s*$
     """,
     re.VERBOSE,
 )
 
+# Stable task reference: the hidden HTML comment at the END of a task
+# line ("<!-- id: a1b2c3d4 -->"). Captured and stripped from the title
+# so the AST keeps the clean text plus a separate ``uuid`` field.
+_TASK_UUID_RE = re.compile(
+    r"<!--\s*id:\s*(?P<uuid>[0-9A-Za-z]+)\s*-->\s*$"
+)
+
+# Inline process note directly beneath a task line:
+#   "* Note (2026-11-04 14:32 UTC): waiting on CI"
+#   "* Note: waiting on CI"          (legacy, no stamp)
+_INLINE_NOTE_RE = re.compile(
+    r"^\s*\*\s*Note(?:\s*\((?P<stamp>[^)]*)\))?:\s*(?P<text>.+?)\s*$"
+)
+
 _HEADER_RE = re.compile(r"^(?P<level>#{1,6})\s+(?P<title>.+?)\s*$")
+
+# HISTORY.md completed-task line:
+#   "- [x] 2026-11-04 16:45: write migration <!-- id: m3n4o5p6 -->"
+_HISTORY_ENTRY_RE = re.compile(
+    r"""^-\s+\[x\]\s+(?P<ts>\d{4}-\d{2}-\d{2}\ \d{2}:\d{2}):\s+
+        (?P<title>.+?)\s*$
+    """,
+    re.VERBOSE,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -94,14 +126,20 @@ def sanitize_task_text(text: str) -> str:
     3. Normalizes whitespace: every run (tabs, newlines, repeated
        spaces) collapses to a single ASCII space; ends are trimmed.
 
-    Idempotent: sanitizing already-clean text is a no-op. Returns
-    ``""`` for input that is empty or consists only of noise.
+    A trailing UUID comment (``<!-- id: ... -->``) is stripped so
+    user-typed text can never forge or duplicate the structural
+    reference ck itself writes. Idempotent: sanitizing already-clean
+    text is a no-op. Returns ``""`` for input that is empty or
+    consists only of noise.
     """
     if not text:
         return ""
     no_ansi = _ANSI_ESCAPE_RE.sub("", text)
     no_control = _CONTROL_CHARS_RE.sub("", no_ansi)
-    return " ".join(no_control.split())
+    collapsed = " ".join(no_control.split())
+    # User text must never carry a structural UUID comment: ck owns
+    # that reference and re-attaches it at render time.
+    return _TASK_UUID_RE.sub("", collapsed).rstrip()
 
 
 # ---------------------------------------------------------------------------
@@ -175,23 +213,37 @@ def _repair_line(line: str):
     stripped = _CONTROL_CHARS_RE.sub("", _ANSI_ESCAPE_RE.sub("", core))
 
     # A noise-bearing line may still be a real task (e.g. wrapped in
-    # color codes) — recover it instead of dropping it.
+    # color codes) — recover it instead of dropping it. The stable
+    # UUID comment is structural data: captured before sanitization
+    # and re-attached to the repaired line.
+    task_uuid = ""
+    uuid_match = _TASK_UUID_RE.search(core)
+    if uuid_match is not None:
+        task_uuid = uuid_match.group("uuid")
+        core = core[:uuid_match.start()].rstrip()
+
+    stripped = _CONTROL_CHARS_RE.sub("", _ANSI_ESCAPE_RE.sub("", core))
+
+    def _emit(marker: str, title: str, legacy_form: bool = False):
+        text = sanitize_task_text(title)
+        if not text:
+            return None
+        line = (f"- [{marker}] {text}" if not legacy_form
+                else f"- [] {text}")
+        if task_uuid:
+            line += f" <!-- id: {task_uuid} -->"
+        return line
+
     task = (
         _CANONICAL_TASK_RE.match(stripped)
         or _LEGACY_FOCUSED_DONE_RE.match(stripped)
     )
     if task:
-        title = sanitize_task_text(task.group("title"))
-        if not title:
-            return None
-        return f"- [{task.group('marker')}] {title}"
+        return _emit(task.group("marker"), task.group("title"))
 
     legacy = _LEGACY_OPEN_RE.match(stripped)
     if legacy:
-        title = sanitize_task_text(legacy.group("title"))
-        if not title:
-            return None
-        return f"- [] {title}"
+        return _emit("", legacy.group("title"), legacy_form=True)
 
     header = _HEADER_RE.match(stripped)
     if header:
@@ -217,6 +269,17 @@ def parse_plan(text: str) -> TaskList:
     markers, does not perform any I/O. The returned ``TaskList`` is
     a faithful representation of what's on disk, including any
     duplicate ``[>]`` markers and any legacy ``[]`` open tasks.
+
+    v0.13.0 extensions:
+
+    - The stable reference comment (``<!-- id: a1b2c3d4 -->``) at the
+      end of a task line is captured into ``task.uuid`` and stripped
+      from the title, so re-rendering round-trips byte-identically.
+    - ``[~]`` tasks parse as :attr:`TaskStatus.PAUSED` (v0.13.0
+      paused state).
+    - ``* Note (...)`` lines directly beneath a task bullet attach to
+      that task as inline note entries — they never become sections
+      or standalone lines.
 
     The ORIGINAL line endings (CRLF vs LF) are recorded on the
     TaskList (``newline``) so ``render_plan`` can emit a byte-ident
@@ -248,22 +311,38 @@ def parse_plan(text: str) -> TaskList:
             ))
             continue
 
+        # Inline note under the most recent task bullet: attached to
+        # it (never a section, never a standalone node). Lines that
+        # appear before ANY task stay verbatim prose (unowned).
+        note_match = _INLINE_NOTE_RE.match(line)
+        if note_match and tasks:
+            stamp = (note_match.group("stamp") or "").strip()
+            note_text = note_match.group("text").strip()
+            if note_text:
+                tasks[-1].notes.append({
+                    "text": note_text,
+                    "created": _stamp_to_iso(stamp),
+                })
+                continue
+
         canonical = _CANONICAL_TASK_RE.match(line)
         if canonical:
             marker = canonical.group("marker")
-            title = canonical.group("title").strip()
+            title, uuid = _split_uuid_comment(canonical.group("title"))
             status = TaskStatus.from_marker(marker)
             tasks.append(_make_task(
-                next_id, status, title, idx, marker, current_section, False
+                next_id, status, title, idx, marker, current_section, False,
+                uuid=uuid,
             ))
             next_id += 1
             continue
 
         legacy = _LEGACY_OPEN_RE.match(line)
         if legacy:
-            title = legacy.group("title").strip()
+            title, uuid = _split_uuid_comment(legacy.group("title"))
             tasks.append(_make_task(
-                next_id, TaskStatus.OPEN, title, idx, "", current_section, True
+                next_id, TaskStatus.OPEN, title, idx, "", current_section,
+                True, uuid=uuid,
             ))
             next_id += 1
             continue
@@ -271,10 +350,11 @@ def parse_plan(text: str) -> TaskList:
         legacy_fd = _LEGACY_FOCUSED_DONE_RE.match(line)
         if legacy_fd:
             marker = legacy_fd.group("marker")
-            title = legacy_fd.group("title").strip()
+            title, uuid = _split_uuid_comment(legacy_fd.group("title"))
             status = TaskStatus.from_marker(marker)
             tasks.append(_make_task(
-                next_id, status, title, idx, marker, current_section, False
+                next_id, status, title, idx, marker, current_section, False,
+                uuid=uuid,
             ))
             next_id += 1
             continue
@@ -284,8 +364,39 @@ def parse_plan(text: str) -> TaskList:
     )
 
 
+def _split_uuid_comment(title: str) -> tuple[str, str]:
+    """Split a trailing ``<!-- id: ... -->`` comment off a task title.
+
+    Returns ``(clean_title, uuid)``; ``uuid`` is "" when the line
+    carries no reference comment (legacy content keeps parsing).
+    """
+    match = _TASK_UUID_RE.search(title)
+    if match is None:
+        return title.strip(), ""
+    clean = title[:match.start()].rstrip()
+    return clean, match.group("uuid")
+
+
+def _stamp_to_iso(stamp: str) -> str:
+    """Convert an inline note stamp to an ISO ``created`` value.
+
+    Accepts ``YYYY-MM-DD HH:MM`` (optionally followed by `` UTC``).
+    Anything else round-trips verbatim so hand-written values are
+    never mangled.
+    """
+    stamp = (stamp or "").strip()
+    if not stamp:
+        return ""
+    probe = stamp[:-4].strip() if stamp.endswith(" UTC") else stamp
+    try:
+        parsed = datetime.strptime(probe, "%Y-%m-%d %H:%M")
+    except ValueError:
+        return stamp
+    return parsed.replace(tzinfo=timezone.utc).isoformat(timespec="seconds")
+
+
 def _make_task(task_id, status, title, line_number, marker_raw,
-               section, legacy) -> Task:
+               section, legacy, *, uuid: str = "") -> Task:
     return Task(
         id=task_id,
         status=status,
@@ -294,6 +405,7 @@ def _make_task(task_id, status, title, line_number, marker_raw,
         marker_raw=marker_raw,
         section=section,
         legacy_syntax=legacy,
+        uuid=uuid,
     )
 
 
@@ -405,11 +517,15 @@ def _emit_with_source(tl: TaskList) -> str:
     nl = getattr(tl, "newline", "\n") or "\n"
 
     # DELETED source lines (user-facing `ck delete`): drop them from
-    # the document. ``pos_map`` translates an ORIGINAL 1-based line
-    # number to its position in the surviving list, so substitution
-    # and insertion hints keep working on the reduced document.
+    # the document. Inline NOTE lines are owned by the task they
+    # follow: the AST carries the authoritative note entries, so the
+    # stale on-disk note lines are dropped too and re-emitted fresh
+    # from the AST (mutation of notes must never duplicate blocks).
+    # ``pos_map`` translates an ORIGINAL 1-based line number to its
+    # position in the surviving list, so substitution and insertion
+    # hints keep working on the reduced document.
     removed = {ln for ln in getattr(tl, "removed_lines", ()) or ()
-               if isinstance(ln, int)}
+               if isinstance(ln, int)} | _owned_note_lines(src_lines)
     out: list[str] = []
     pos_map: dict[int, int] = {}
     for old_pos, raw in enumerate(src_lines, start=1):
@@ -466,6 +582,28 @@ def _emit_with_source(tl: TaskList) -> str:
                 )
             out[target] = t.to_line()
 
+    # Note pass: inline notes belong DIRECTLY under their task line.
+    # Tasks are processed in REVERSE document position so an insertion
+    # can never shift a later substitution target. Every re-emitted
+    # block is recorded (owner original 1-based line, line count) so
+    # the NEW-task insertion hint below can account for the growth.
+    reemitted_notes: list[tuple[int, int]] = []
+    tasks_with_position: list[tuple[int, Task]] = []
+    for t in tl.tasks:
+        if t.insert_line is None and 1 <= t.line_number <= max_src_line:
+            tasks_with_position.append((pos_map[t.line_number] - 1, t))
+        elif t.insert_line is not None or t.line_number > max_src_line:
+            # Past-EOF/insert-hinted tasks are appended below together
+            # with their notes.
+            tasks_with_position.append((None, t))
+    for target, t in sorted(
+            (pair for pair in tasks_with_position if pair[0] is not None),
+            key=lambda pair: pair[0], reverse=True):
+        note_lines = render_task_notes(t)
+        if note_lines:
+            out[target + 1:target + 1] = note_lines
+            reemitted_notes.append((t.line_number, len(note_lines)))
+
     # Second pass: NEW tasks. Tasks carrying an explicit ``insert_line``
     # hint are inserted at that 1-based source position (the end of
     # ``## Current Sprint`` — computed by ``_sprint_insert_line`` and
@@ -474,10 +612,12 @@ def _emit_with_source(tl: TaskList) -> str:
     # replacing content.
     if pending_append:
         insert_at = _insert_position_for(
-            pending_append[0], out, max_src_line, pos_map=pos_map)
+            pending_append[0], out, max_src_line, pos_map=pos_map,
+            reemitted_notes=reemitted_notes)
         for t in pending_append:
-            out.insert(insert_at, t.to_line())
-            insert_at += 1
+            block = [t.to_line(), *render_task_notes(t)]
+            out[insert_at:insert_at] = block
+            insert_at += len(block)
 
     rendered = nl.join(out)
     if not rendered.endswith(nl):
@@ -485,9 +625,55 @@ def _emit_with_source(tl: TaskList) -> str:
     return rendered
 
 
+def render_task_notes(task: Task) -> list[str]:
+    """The inline ``* Note (...)`` lines for one task bullet.
+
+    Format (spec-exact, two-space indent):
+    ``  * Note (2026-11-04 14:32 UTC): waiting on CI``. Entries with
+    no timestamp render the legacy bare form ``  * Note: <text>``.
+    """
+    lines: list[str] = []
+    for entry in task.notes or ():
+        if isinstance(entry, dict):
+            text = entry.get("text")
+            created = entry.get("created", "")
+        else:
+            text, created = entry, ""
+        if not isinstance(text, str) or not text.strip():
+            continue
+        stamp = note_stamp(created) if created else ""
+        suffix = f" ({stamp})" if stamp else ""
+        lines.append(f"  * Note{suffix}: {text.strip()}")
+    return lines
+
+
+def _owned_note_lines(src_lines: list[str]) -> set[int]:
+    """1-based source positions of INLINE NOTE lines owned by a task.
+
+    A ``* Note ...`` line directly beneath a task bullet (or beneath
+    another owned note line) belongs to that task's render block: the
+    renderer drops these positions and re-emits the notes from the
+    AST, so editing notes never duplicates stale blocks. Note lines
+    with NO preceding task (orphan prose) are NOT owned — they stay
+    verbatim.
+    """
+    owned: set[int] = set()
+    after_task = False
+    for pos, raw in enumerate(src_lines, start=1):
+        line = raw.rstrip()
+        if not line:
+            continue
+        if _INLINE_NOTE_RE.match(line) and after_task:
+            owned.add(pos)
+            continue
+        after_task = _is_task_line(line)
+    return owned
+
+
 def _insert_position_for(task: Task, out: list[str],
                          max_src_line: int,
-                         *, pos_map: dict | None = None) -> int:
+                         *, pos_map: dict | None = None,
+                         reemitted_notes=None) -> int:
     """0-based insertion index for the first new (past-EOF) task.
 
     A new task with an ``insert_line`` hint (end of ``## Current
@@ -497,15 +683,27 @@ def _insert_position_for(task: Task, out: list[str],
 
     ``pos_map`` (original line -> surviving line) keeps the hint
     correct on a document shortened by ``ck delete``.
+    ``reemitted_notes`` (owner original 1-based line -> note-line
+    count) keeps the hint correct on a document that grew back: the
+    note pass re-emits INLINE note blocks that ``pos_map`` knows
+    nothing about, and every block whose owner precedes the hint
+    shifts the insertion point down.
     """
     hint = task.insert_line
     if hint is not None and 1 <= hint <= max_src_line + 1:
         if pos_map is None:
-            return hint - 1
-        # Insert before the hint: count the surviving source lines
-        # that precede it (removed lines never occupy a slot).
-        return sum(1 for old in pos_map if old < hint)
-    completed = _find_completed_line(out)
+            insert_at = hint - 1
+        else:
+            # Insert before the hint: count the surviving source lines
+            # that precede it (removed lines never occupy a slot).
+            insert_at = sum(1 for old in pos_map if old < hint)
+        # Re-emitted inline note blocks are real output lines the
+        # source-line count misses; owners before the hint push it.
+        insert_at += sum(
+            count for owner, count in (reemitted_notes or ())
+            if owner < hint)
+        return insert_at
+    completed = _find_completed_header(out)
     if completed is not None:
         return completed
     return len(out)
@@ -520,8 +718,15 @@ def _is_task_line(line: str) -> bool:
     )
 
 
-def _find_completed_line(lines: list[str]) -> int | None:
-    """Return the 0-based index of the ``## Completed`` header if present."""
+def _find_completed_header(lines: list[str]) -> int | None:
+    """0-based index of a ``## Completed`` header, if the doc has one.
+
+    v0.13.0 plans hold no ``## Completed`` section (completed tasks
+    live in HISTORY.md), but the fallback still matters for LEGACY
+    documents and global space files, which keep completed work in
+    place: a past-EOF task must be inserted before that header, not
+    at EOF where it would visually join the completed block.
+    """
     for i, raw in enumerate(lines):
         if _HEADER_RE.match(raw):
             title = _HEADER_RE.match(raw).group("title").strip().lower()
@@ -564,6 +769,160 @@ def _find_section_end(lines: list[str], title: str) -> int | None:
     while end > 0 and not lines[end - 1].strip():
         end -= 1
     return end
+
+
+# ---------------------------------------------------------------------------
+# HISTORY.md: completed-task ledger (v0.13.0)
+# ---------------------------------------------------------------------------
+
+
+HISTORY_SECTION_HEADER = "## Completed"
+
+
+def parse_history(text: str) -> list[HistoryEntry]:
+    """Parse the completed-task entries out of a HISTORY.md document.
+
+    Recognizes BOTH entry shapes so legacy and v0.13 files read the
+    same way:
+
+    - ``- [x] 2026-11-04 16:45: write migration <!-- id: m3n4o5p6 -->``
+      (v0.13 completed-task ledger line);
+    - ``### 2026-11-04 16:45 | [3] write migration`` (pre-0.13
+      journal/note block headers), with their ``* Note`` lines.
+
+    Entries appear in document order — for the ``ck st`` tail view
+    the caller takes the LAST N.
+    """
+    entries: list[HistoryEntry] = []
+    current: HistoryEntry | None = None
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        if not line:
+            continue
+        header = _HEADER_RE.match(line)
+        if header and header.group("title").strip().lower() == "completed":
+            current = None  # section header itself is not an entry
+            continue
+        legacy = re.match(r"^###\s+(.+?)\s*\|\s*(.+?)\s*$", line)
+        if legacy:
+            ts = legacy.group(1).strip()
+            ref = legacy.group(2).strip()
+            ref_match = re.match(r"^\[(\d+)\]\s+(.+?)\s*$", ref)
+            if ref_match:
+                title = ref_match.group(2).strip()
+            else:
+                title = ref
+            current = HistoryEntry(timestamp=ts, title=title)
+            entries.append(current)
+            continue
+        completed = _HISTORY_ENTRY_RE.match(line)
+        if completed:
+            title, uuid = _split_uuid_comment(completed.group("title"))
+            entries.append(HistoryEntry(
+                timestamp=completed.group("ts"),
+                title=title,
+                uuid=uuid,
+            ))
+            current = None  # * Note lines under a [x] row are ignored
+            continue
+        if current is not None:
+            note_match = _INLINE_NOTE_RE.match(line)
+            if note_match:
+                stamp = (note_match.group("stamp") or "").strip()
+                note_text = note_match.group("text").strip()
+                if note_text:
+                    current.notes.append({
+                        "text": note_text,
+                        "created": _stamp_to_iso(stamp),
+                    })
+    return entries
+
+
+def parse_history_file(path: Path | str) -> list[HistoryEntry]:
+    """Read ``path`` and parse its completed-task entries ([] if missing)."""
+    p = Path(path)
+    if not p.exists():
+        return []
+    try:
+        text = p.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    return parse_history(text)
+
+
+def render_history(entries: list[HistoryEntry]) -> str:
+    """Render a complete HISTORY.md document (``## Completed`` ledger)."""
+    lines = [HISTORY_SECTION_HEADER]
+    for entry in entries:
+        lines.append(entry.to_line())
+        lines.extend(render_history_notes(entry))
+    return "\n".join(lines) + "\n"
+
+
+def render_history_notes(entry: HistoryEntry) -> list[str]:
+    """Inline note lines under one completed entry (two-space indent)."""
+    lines: list[str] = []
+    for note in entry.notes or ():
+        text = note.get("text") if isinstance(note, dict) else note
+        created = note.get("created", "") if isinstance(note, dict) else ""
+        if not isinstance(text, str) or not text.strip():
+            continue
+        stamp = note_stamp(created) if created else ""
+        suffix = f" ({stamp})" if stamp else ""
+        lines.append(f"  * Note{suffix}: {text.strip()}")
+    return lines
+
+
+def append_to_history(path: Path | str, timestamp: str, title: str,
+                      uuid: str = "", notes: list | None = None) -> None:
+    """Append one completed task to HISTORY.md (atomic, under lock).
+
+    The ``## Completed`` ledger section is created at the top of the
+    file when absent (legacy journal blocks below it stay intact);
+    the new entry is appended at the END of that section so the
+    ledger stays chronological. ``notes`` are inlined beneath the
+    entry so a completed task's process context graduates into the
+    durable record instead of vanishing with the plan.
+    """
+    from .config import file_lock
+
+    entry = HistoryEntry(timestamp=timestamp, title=title, uuid=uuid)
+    if notes:
+        entry.notes = list(notes)
+    p = Path(path)
+    if p.exists():
+        lines = p.read_text(encoding="utf-8").splitlines()
+    else:
+        lines = []
+    block = [entry.to_line(), *render_history_notes(entry)]
+    existing_header = HISTORY_SECTION_HEADER in (
+        ln.strip() for ln in lines)
+    if existing_header:
+        # Insert before the first header that FOLLOWS the Completed
+        # section (or at EOF) — i.e. at the end of the ledger.
+        insert_at = len(lines)
+        in_completed = False
+        for i, raw in enumerate(lines):
+            header = _HEADER_RE.match(raw)
+            if header:
+                title_l = header.group("title").strip().lower()
+                if not in_completed and title_l == "completed":
+                    in_completed = True
+                    continue
+                if in_completed:
+                    insert_at = i
+                    break
+        lines[insert_at:insert_at] = block
+    else:
+        lines = [HISTORY_SECTION_HEADER, *block, "", *lines]
+        # No trailing gap when the legacy content is empty.
+        while len(lines) > len(block) + 2 and not lines[-1].strip():
+            lines.pop()
+    text = "\n".join(lines)
+    if not text.endswith("\n"):
+        text += "\n"
+    with file_lock(p):
+        _atomic_write_text(p, text)
 
 
 # ---------------------------------------------------------------------------
@@ -649,8 +1008,14 @@ __all__ = [
     "normalize_plan",
     "render_plan",
     "write_plan",
+    "parse_history",
+    "parse_history_file",
+    "render_history",
+    "render_history_notes",
+    "render_task_notes",
+    "append_to_history",
     "sanitize_task_text",
     "repair_plan_text",
-    "_find_completed_line",
+    "_find_completed_header",
     "_find_section_end",
 ]

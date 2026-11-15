@@ -19,10 +19,10 @@ class TestEnsureRootGitignore(unittest.TestCase):
             added = ContextKeeper._ensure_root_gitignore(root)
             self.assertTrue(gi.exists())
             self.assertIn(".ck/*.bak", added)
-            self.assertIn(".ck/state.json", added)
+            self.assertIn(".ck/*.md.gz", added)
             text = gi.read_text(encoding="utf-8")
             self.assertIn(".ck/*.bak", text)
-            self.assertIn(".ck/state.json", text)
+            self.assertIn(".ck/*.md.gz", text)
 
     def test_appends_only_missing_entries(self):
         with tempfile.TemporaryDirectory() as td:
@@ -32,7 +32,7 @@ class TestEnsureRootGitignore(unittest.TestCase):
 
             added = ContextKeeper._ensure_root_gitignore(root)
             self.assertIn(".ck/*.bak", added)
-            self.assertIn(".ck/state.json", added)
+            self.assertIn(".ck/*.md.gz", added)
 
             added_again = ContextKeeper._ensure_root_gitignore(root)
             self.assertEqual(added_again, [])
@@ -121,7 +121,8 @@ class TestEnsureCkGitignore(unittest.TestCase):
             self.assertTrue(gi.exists())
             text = gi.read_text(encoding="utf-8")
             self.assertIn("*.bak", text)
-            self.assertIn("state.json", text)
+            self.assertIn("migrate.log", text)
+            self.assertIn("*.lock", text)
 
     def test_ck_gitignore_idempotent(self):
         with tempfile.TemporaryDirectory() as td:

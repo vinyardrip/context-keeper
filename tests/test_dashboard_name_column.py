@@ -44,13 +44,16 @@ def _state(name: str, path: str, *, condition: str = "ok",
            is_cwd: bool = False) -> dict:
     """A dashboard state dict with one open task."""
 
+    from cklib.models import TaskStatus
+
+    class _T:
+        status = TaskStatus.OPEN
+
     class _TL:
         pass
 
     tl = _TL()
-    tl.done = []
-    tl.total = 1
-    tl.completion_pct = 0.0
+    tl.tasks = [_T()]
     tl.focused = []
     return {"entry": _Entry(name, path), "tl": tl,
             "condition": condition, "is_cwd": is_cwd}

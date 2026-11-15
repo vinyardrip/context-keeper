@@ -22,7 +22,7 @@ from cklib import registry as ckregistry
 from cklib.core import ContextKeeper
 from cklib.models import TaskStatus
 from cklib.parser import (
-    _find_completed_line,
+    _find_completed_header,
     _find_section_end,
     load_repaired_plan,
     parse_plan,
@@ -166,6 +166,9 @@ class TestLoadRepairedPlan(_IsolatedHome, unittest.TestCase):
         ck = ContextKeeper(root=root)
         ck.ck_path.mkdir(parents=True, exist_ok=True)
         ck.plan_file.write_text(text, encoding="utf-8")
+        # v0.13.0 write-gate: raw fixtures carry the current marker.
+        ck.ck_path.joinpath("version").write_text(
+            ckconfig.VERSION + "\n", encoding="utf-8")
         return ck
 
     def test_repair_persists_and_flags(self):
@@ -236,7 +239,11 @@ class TestLoadRepairedPlan(_IsolatedHome, unittest.TestCase):
             text = ck.plan_file.read_text(encoding="utf-8")
             self.assertNotIn("\x1b", text)
             self.assertIn("- [>] b", text)
-            self.assertIn("- [x] a", text)
+            # v0.13.0: done REMOVES the completed task from the plan
+            # and graduates it into HISTORY.md (no in-plan [x] rows).
+            self.assertNotIn("- [ ] a", text)
+            self.assertIn("a",
+                          ck.history_file.read_text(encoding="utf-8"))
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +260,9 @@ class TestInsertionPosition(_IsolatedHome, unittest.TestCase):
         ck = ContextKeeper(root=root)
         ck.ck_path.mkdir(parents=True, exist_ok=True)
         ck.plan_file.write_text(text, encoding="utf-8")
+        # v0.13.0 write-gate: raw fixtures carry the current marker.
+        ck.ck_path.joinpath("version").write_text(
+            ckconfig.VERSION + "\n", encoding="utf-8")
         return ck
 
     def test_add_inserts_under_current_sprint(self):
@@ -271,8 +281,11 @@ class TestInsertionPosition(_IsolatedHome, unittest.TestCase):
             text = ck.plan_file.read_text(encoding="utf-8")
             lines = text.splitlines()
 
-            self.assertIn("- [ ] third", lines)
-            idx_third = lines.index("- [ ] third")
+            self.assertTrue(
+                any(ln.startswith("- [ ] third") for ln in lines))
+            idx_third = next(
+                i for i, ln in enumerate(lines)
+                if ln.startswith("- [ ] third"))
             idx_completed = lines.index("## Completed")
             # third sits between second and the Completed header
             self.assertLess(lines.index("- [ ] second"), idx_third)
@@ -285,8 +298,10 @@ class TestInsertionPosition(_IsolatedHome, unittest.TestCase):
             ))
             ck.add_task("fresh")
             lines = ck.plan_file.read_text(encoding="utf-8").splitlines()
-            self.assertEqual(lines.index("- [ ] fresh"),
-                             lines.index("## Current Sprint") + 1)
+            self.assertEqual(
+                next(i for i, ln in enumerate(lines)
+                     if ln.startswith("- [ ] fresh")),
+                lines.index("## Current Sprint") + 1)
 
     def test_add_inserts_directly_before_completed_when_no_sprint(self):
         with tempfile.TemporaryDirectory() as td:
@@ -295,15 +310,18 @@ class TestInsertionPosition(_IsolatedHome, unittest.TestCase):
             ))
             ck.add_task("urgent")
             lines = ck.plan_file.read_text(encoding="utf-8").splitlines()
-            self.assertEqual(lines.index("- [ ] urgent") + 1,
-                             lines.index("## Completed"))
+            self.assertEqual(
+                next(i for i, ln in enumerate(lines)
+                     if ln.startswith("- [ ] urgent")) + 1,
+                lines.index("## Completed"))
 
     def test_add_appends_at_eof_when_no_headers(self):
         with tempfile.TemporaryDirectory() as td:
             ck = self._ck_with_plan(Path(td), "- [ ] only task\n")
             ck.add_task("another")
             lines = ck.plan_file.read_text(encoding="utf-8").splitlines()
-            self.assertEqual(lines, ["- [ ] only task", "- [ ] another"])
+            self.assertEqual(lines[0], "- [ ] only task")
+            self.assertTrue(lines[1].startswith("- [ ] another"))
 
     def test_add_creates_plan_when_missing(self):
         with tempfile.TemporaryDirectory() as td:
@@ -417,7 +435,7 @@ class TestFindSectionEnd(unittest.TestCase):
 
     def test_completed_line_found(self):
         lines = ["# P", "## Current Sprint", "- [ ] a", "## Completed"]
-        self.assertEqual(_find_completed_line(lines), 3)
+        self.assertEqual(_find_completed_header(lines), 3)
 
 
 if __name__ == "__main__":

@@ -1546,7 +1546,11 @@ class SpaceManager:
             return _render_tasks_listing(
                 tl, notes, first_header=header)
 
-        header = f"[{self.space}] {len(tl.done)}/{tl.total} done"
+        header = (
+            f"[{self.space}] "
+            f"{sum(1 for t in tl.tasks if t.status == TaskStatus.DONE)}"
+            f"/{tl.total} done"
+        )
         if not tl.tasks:
             return (
                 f"{header}\n"
@@ -1647,6 +1651,16 @@ class SpaceManager:
     def done(self, spec: str) -> list[int]:
         """Mark task(s) as DONE — IDs, ranges and lists (``3``, ``2-4``).
 
+        DAILY spaces (``today``) are journals: "done" means the entry
+        is FINISHED, so the task is DELETED permanently — no history
+        ledger exists for the journal (the rollover treats ``[x]``
+        rows the same way). Remaining IDs close the numeric gap
+        (descending deletes) and the note sidecar
+        (``<space>.json``) is remapped to follow the new positions.
+
+        NON-daily spaces keep the in-file ``[x]`` ledger row: their
+        done tasks are the progress record.
+
         Returns the IDs actually transitioned (already-done tasks are
         skipped, mirroring the project ``ck done``). Raises
         ``ValueError`` for an unparseable spec and ``KeyError`` when
@@ -1665,18 +1679,37 @@ class SpaceManager:
             raise KeyError(
                 f"Unknown task ID(s) in '{self.space}' space: {unknown}"
             )
-        transitioned = tl.toggle_done(ids)
-        if transitioned:
-            self._commit(tl)
+
+        if self.space not in DAILY_SPACES:
+            transitioned = tl.toggle_done(ids)
+            if transitioned:
+                self._commit(tl)
+            return transitioned
+
+        # DAILY: permanent delete (the journal has no history).
+        transitioned = [
+            i for i in ids
+            if tl.by_id(i).status != TaskStatus.DONE
+        ]
+        if not transitioned:
+            return []
+        kept_ids = [
+            t.id for t in tl.tasks
+            if t.id not in set(transitioned)
+        ]
+        for tid in sorted(transitioned, reverse=True):
+            tl.delete(tid)
+        self._commit(tl)
+        _remap_today_notes(self, kept_ids, transitioned)
         return transitioned
 
     def focus(self, task_id: int) -> dict:
-        """Focus a task (demoting any other focused task to open).
+        """Focus a task (parking any other focused task as ``[~]``).
 
         ``task_id <= 0`` RESETS focus: the currently focused task (if
-        any) is demoted to open and no new focus is set — mirroring
-        the project ``ck start 0`` semantics. Raises ``KeyError``
-        when the target task does not exist.
+        any) is demoted back to open — NOT paused — mirroring the
+        project ``ck start 0`` semantics. Raises ``KeyError`` when
+        the target task does not exist.
         """
         tl = self.load()
         focused_before = tl.focused[0] if tl.focused else None
@@ -1832,14 +1865,19 @@ class SpaceManager:
                 mtime, tz=timezone.utc).isoformat()
         except OSError:
             pass  # space file not created yet -> no last-active stamp
+        done_count = sum(
+            1 for t in tl.tasks if t.status == TaskStatus.DONE)
+        active_count = sum(1 for t in tl.tasks if t.status.is_active)
+        total = done_count + active_count
+        pct = round(100.0 * done_count / total, 1) if total else 0.0
         return {
             "name": self.space.upper(),
             "path": str(space_path(self.space)),
             "focus_id": focused.id if focused is not None else None,
             "focus_title": focused.title if focused is not None else "",
-            "done": len(tl.done),
-            "total": tl.total,
-            "pct": tl.completion_pct,
+            "done": done_count,
+            "total": total,
+            "pct": pct,
             "last": last_iso,
         }
 
@@ -1858,9 +1896,9 @@ class _SpaceKeeperView:
     - ``get_note()`` — the process note bound to the focused
       task (the sidecar analogue of a project's
       ``.ck/state.json`` ``active_task`` entry);
-    - ``_paused_tasks()`` — open, noted, non-focused tasks:
-      the space analogue of the project's Unfocused / Paused
-      Context ledger (spaces have no focus-loss registry, so
+    - ``_paused_tasks()`` — ``[~]`` tasks plus open, noted,
+      non-focused tasks: the space analogue of the project's
+      paused ledger (spaces have no focus-loss registry, so
       a note on an open task that does not hold focus is the
       closest equivalent of a paused entry);
     - ``color_overrides()`` — spaces carry no ``.ck.json``,
@@ -1895,20 +1933,34 @@ class _SpaceKeeperView:
         return self._mgr.get_notes(task_id)
 
     def _paused_tasks(self) -> list[dict]:
+        """Paused entries for the ``ck st`` renderer's ``[~]`` block.
+
+        Two kinds qualify:
+
+        - ``[~]`` tasks — parked by ``ck <space> focus <NEW_ID>``
+          (``TaskList.focus`` demotes the old focus to PAUSED);
+        - open, NOTED, non-focused tasks — the legacy space
+          analogue (spaces have no focus-loss registry, so a note
+          on an open task that does not hold focus is the closest
+          equivalent of a paused entry).
+        """
         tl = self._mgr.load()
         focus_id = self._mgr.current_focus_id()
         out: list[dict] = []
-        for t in tl.open:
+        for t in tl.tasks:
             if focus_id is not None and t.id == focus_id:
                 continue
+            if t.status == TaskStatus.DONE:
+                continue
             entries = self._mgr.get_notes(t.id)
-            if entries:
-                out.append({
-                    "id": t.id,
-                    "title": t.title,
-                    "note": entries[-1]["text"],
-                    "notes": entries,
-                })
+            if t.status != TaskStatus.PAUSED and not entries:
+                continue  # unnoted open task is backlog
+            out.append({
+                "id": t.id,
+                "title": t.title,
+                "note": entries[-1]["text"] if entries else "",
+                "notes": entries,
+            })
         return out
 
     def color_overrides(self) -> dict:

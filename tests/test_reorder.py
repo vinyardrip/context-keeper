@@ -31,6 +31,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
 
+from cklib import config as ckconfig
 from cklib import ui as ckui
 from cklib.cli import main
 from cklib.core import ContextKeeper
@@ -198,6 +199,9 @@ class _ReorderHarness(unittest.TestCase):
         self.project = self.root / "proj"
         (self.project / ".ck").mkdir(parents=True)
         self.plan = self.project / ".ck" / "PLAN.md"
+        # v0.13.0 write-gate: raw fixtures carry the current marker.
+        (self.project / ".ck" / "version").write_text(
+            ckconfig.VERSION + "\n", encoding="utf-8")
 
         saved = {k: os.environ.get(k) for k in self._ENV_KEYS}
         os.environ["HOME"] = str(self.home)

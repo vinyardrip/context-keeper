@@ -20,7 +20,6 @@ from pathlib import Path
 from typing import Callable, Optional, Tuple
 
 from . import git as gith
-from . import notes as note_store
 from . import registry
 from . import spaces
 from . import ui
@@ -57,16 +56,21 @@ from .config import (
     history_limit,
     sandbox_search_boundary_active,
     max_bak_files,
+    AGENTS_FILENAME,
+    DEFAULT_AGENTS_MD,
+    JOURNAL_FILENAME,
+    LINKS_FILENAME,
     LOCAL_GITIGNORE_ENTRIES,
+    META_FILENAME,
     PLAN_FILENAME,
     PROMPT_FILENAME,
     README_FILENAME,
     SNAPSHOT_INSTALL_DIR,
-    STATE_FILENAME,
     TRACKED_GITIGNORE_PROTECTIONS,
     UPDATE_CHECK_INTERVAL_HOURS,
     USER_INSTALL_PATH,
     VERSION,
+    VERSION_FILENAME,
     file_lock,
     find_project_root,
     get_editor,
@@ -74,8 +78,9 @@ from .config import (
     read_color_config,
     warn_if_sensitive_root,
 )
-from .models import (CompletedTaskError, Notes, Task, TaskList,
-                     TaskStatus)
+from .models import (CompletedTaskError, HistoryEntry, Notes, Task,
+                     TaskList, TaskStatus, history_timestamp,
+                     new_task_uuid)
 from .history import (
     archive_name,
     concat_archives,
@@ -86,10 +91,12 @@ from .history import (
 )
 from .parser import (
     _atomic_write_text,
-    _find_completed_line,
+    _find_completed_header,
     _find_section_end,
+    append_to_history,
     load_repaired_plan,
     normalize_plan,
+    parse_history_file,
     parse_plan_file,
     render_plan,
     sanitize_task_text,
@@ -164,6 +171,22 @@ class FocusResult:
     demoted_id: Optional[int] = None
     demoted_title: str = ""
     had_note: bool = False
+
+
+class FocusExistsError(RuntimeError):
+    """``ck start`` refusal: another task already holds ``[>]``.
+
+    v0.13.0 keeps ONE explicit focus per plan. ``ck start <ID>`` never
+    silently steals an existing focus — it aborts with this error and
+    the CLI redirects the user to ``ck focus <NEW_ID>`` (which parks
+    the old task as ``[~]`` instead of dropping it). Carries the
+    currently focused task's ID/title for the redirect hint.
+    """
+
+    def __init__(self, task_id: int, title: str = "") -> None:
+        self.task_id = task_id
+        self.title = title
+        super().__init__(f"Task #{task_id} is already focused")
 
 
 @dataclass
@@ -670,9 +693,13 @@ class ContextKeeper:
         if self.root is None:
             self._start = None
             self.ck_path = None
-            self.state_file = None
             self.plan_file = None
             self.history_file = None
+            self.journal_file = None
+            self.meta_file = None
+            self.version_file = None
+            self.links_file = None
+            self.agents_file = None
             self.prompt_file = None
             self.readme_file = None
             self._color_overrides: Optional[dict] = {}
@@ -683,9 +710,13 @@ class ContextKeeper:
         """Point this keeper at ``root``; every project path follows."""
         self.root: Optional[Path] = root
         self.ck_path: Path = root / CK_DIR_NAME
-        self.state_file: Path = self.ck_path / STATE_FILENAME
         self.plan_file: Path = self.ck_path / PLAN_FILENAME
         self.history_file: Path = self.ck_path / HISTORY_FILENAME
+        self.journal_file: Path = self.ck_path / JOURNAL_FILENAME
+        self.meta_file: Path = self.ck_path / META_FILENAME
+        self.version_file: Path = self.ck_path / VERSION_FILENAME
+        self.links_file: Path = self.ck_path / LINKS_FILENAME
+        self.agents_file: Path = self.ck_path / AGENTS_FILENAME
         self.prompt_file: Path = self.ck_path / PROMPT_FILENAME
         self.readme_file: Path = self.ck_path / README_FILENAME
         # Lazily-loaded palette overrides from .ck.json (see
@@ -712,27 +743,31 @@ class ContextKeeper:
         else:
             self.ck_path.mkdir(parents=True, exist_ok=True)
 
-    def _open_history_append(self):
-        """Return (fh, real_path_untouched) for HISTORY.md appends.
+    def _open_append(self, path: Path):
+        """Return an append-mode handle for ``path`` (HISTORY/JOURNAL).
 
         Production path: opens the real file in append mode.
         DEV MODE: appends go to the SANDBOXED copy — seeded from the
         original on first append so the dev session starts from the
-        real history instead of a blank slate (entries are never
+        real content instead of a blank slate (entries are never
         lost, and the real file is never modified).
         """
         if not is_dev_mode():
-            return self.history_file.open("a", encoding="utf-8")
-        sandboxed = resolve_write_path(self.history_file)
+            return path.open("a", encoding="utf-8")
+        sandboxed = resolve_write_path(path)
         if not sandboxed.exists():
-            if self.history_file.exists():
+            if path.exists():
                 sandboxed.write_text(
-                    self.history_file.read_text(encoding="utf-8"),
+                    path.read_text(encoding="utf-8"),
                     encoding="utf-8",
                 )
             else:
                 sandboxed.write_text("", encoding="utf-8")
         return sandboxed.open("a", encoding="utf-8")
+
+    def _open_history_append(self):
+        """Backward-compatible alias for HISTORY.md appends."""
+        return self._open_append(self.history_file)
 
     def _write_if_missing(self, path: Path, content: str, label: str,
                           *, echo: bool = True, printer=print) -> bool:
@@ -763,15 +798,21 @@ class ContextKeeper:
             )
         return tools
 
-    def _rotate_history(self) -> None:
-        """Archive HISTORY.md when it exceeds the entry limit.
+    def _rotate_history(self, target: Optional[Path] = None) -> None:
+        """Archive a rotating log file when it exceeds the entry limit.
 
-        The rotation is performed under ``file_lock`` on the history
+        v0.13.0: the rotation is volume-driven and works for BOTH
+        ledgers — ``HISTORY.md`` (completed tasks) and
+        ``JOURNAL.md`` (``ck save`` checkpoints). ``target`` selects
+        the file (default: HISTORY.md); the archive keeps the source
+        file's base name.
+
+        The rotation is performed under ``file_lock`` on the target
         file and is *gapless*: the new (trimmed) content is written to
         a temp file FIRST, then the old file is renamed to the
         timestamped archive, then the temp file is moved into place.
         A crash at any point leaves either the old or the new file
-        present — never a missing HISTORY.md.
+        present — never a missing log.
 
         Entry counting and tail extraction match only column-0
         ``### <date>`` headings, so ``###`` text inside note bodies
@@ -787,12 +828,14 @@ class ContextKeeper:
         archives beyond ``MAX_BAK_FILES`` are deleted after each
         rotation.
         """
+        if target is None:
+            target = self.history_file
         now = datetime.now()
-        with file_lock(self.history_file):
+        with file_lock(target):
             # DEV MODE: rotation is a WRITE flow — operate entirely on
             # the sandboxed copies (archive + replacement) while
-            # reading the ORIGINAL history for the preserved tail.
-            content = self.history_file.read_text(encoding="utf-8")
+            # reading the ORIGINAL file for the preserved tail.
+            content = target.read_text(encoding="utf-8")
             last_entry = _last_history_entry(content)
             target_dir = (
                 resolve_write_path(self.ck_path) if is_dev_mode()
@@ -800,14 +843,14 @@ class ContextKeeper:
             )
             if is_dev_mode():
                 # COPY-ON-FIRST-WRITE: the rotation consumes the
-                # history file itself (rename), so the sandboxed
+                # target file itself (rename), so the sandboxed
                 # mirror must exist before the rename. Without this,
                 # the first dev-mode rotation would archive an empty
                 # tree and drop the real context on the floor.
-                dev_history = resolve_write_path(self.history_file)
-                if not dev_history.exists():
-                    dev_history.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(self.history_file, dev_history)
+                dev_target = resolve_write_path(target)
+                if not dev_target.exists():
+                    dev_target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(target, dev_target)
             compressed = compress_archives_enabled()
             # The archive is first renamed under the legacy .md.bak
             # name (honest extension for plain bytes); compression
@@ -830,7 +873,7 @@ class ContextKeeper:
             )
             new_text = header + last_entry
             # Write the replacement content to a temp file first so
-            # there is never a window where HISTORY.md is absent.
+            # there is never a window where the log file is absent.
             # fsync before the renames so a crash cannot leave an
             # empty renamed file.
             fd, tmp_name = tempfile.mkstemp(
@@ -838,7 +881,7 @@ class ContextKeeper:
             )
             try:
                 try:
-                    mode = os.stat(self.history_file).st_mode & 0o777
+                    mode = os.stat(target).st_mode & 0o777
                 except OSError:
                     mode = 0o644
                 with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
@@ -846,10 +889,10 @@ class ContextKeeper:
                     fh.flush()
                     os.fsync(fh.fileno())
                 os.chmod(tmp_name, mode)
-                # In dev mode the REAL history file is never renamed:
+                # In dev mode the REAL log file is never renamed:
                 # the sandbox copy takes the rotation instead.
-                rotated = resolve_write_path(self.history_file) \
-                    if is_dev_mode() else self.history_file
+                rotated = resolve_write_path(target) \
+                    if is_dev_mode() else target
                 if rotated.exists():
                     rotated.rename(plain)
                 if compressed:
@@ -886,49 +929,132 @@ class ContextKeeper:
             message += f" ({len(pruned)} oldest archive(s) purged.)"
         print(message)
 
-    def _read_state(self) -> dict:
-        path = self.state_file
-        # DEV MODE read-your-writes: once a sandboxed state.json copy
-        # exists (written by a previous dev-mode mutation such as
-        # ``ck note``), reads prefer it so chained commands compose;
-        # with no sandbox copy yet, reads come from the real file.
-        # The mirror probe uses create=False — a read must never
-        # materialize the .sandbox/ skeleton.
-        if is_dev_mode():
-            sandboxed = resolve_write_path(self.state_file, create=False)
-            if sandboxed.exists():
-                path = sandboxed
-        if path is None or not path.exists():
-            return {}
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return {}
-        if not isinstance(data, dict):
-            return {}
-        # LEGACY MIGRATION: old files stored one string per task. The
-        # conversion is in-memory only — a read never rewrites the
-        # file; the next write persists the array shape.
-        return note_store.migrate_notes(
-            data, note_store.file_mtime_iso(path))
+    # ------------------------------------------------------------------ #
+    # Schema version / migration gate (v0.13.0)
+    # ------------------------------------------------------------------ #
 
-    def _write_state(self, state: dict) -> None:
-        """Atomic-replace write of ``state.json`` under ``file_lock``.
+    def project_schema_version(self) -> Optional[str]:
+        """The project's schema version, or None for a legacy project.
 
-        Concurrent ``ck`` invocations in the same project serialise on
-        ``.ck/state.json.lock``; the tmp+rename writer guarantees
-        readers never observe a torn file. DEV MODE: both the mkdir
-        and the atomic write are redirected into the sandbox (the
-        atomic writer intercepts itself; the lock too).
+        Resolution order: the ``version`` file (single line, written
+        by v0.13 ``ck init`` / ``ck migrate``) wins, then
+        ``meta.json``'s ``schema_version`` key. No file at all means
+        the project predates the split layout and needs ``ck
+        migrate``.
         """
-        if is_dev_mode():
-            resolve_write_path(self.ck_path).mkdir(parents=True, exist_ok=True)
-        else:
-            self.ck_path.mkdir(parents=True, exist_ok=True)
-        state = note_store.migrate_notes(state, note_store.now_iso())
-        text = json.dumps(state, indent=2, ensure_ascii=False)
-        with file_lock(self.state_file):
-            _atomic_write_text(self.state_file, text)
+        if self.ck_path is None:
+            return None
+        try:
+            if self.version_file.is_file():
+                text = self.version_file.read_text(
+                    encoding="utf-8").strip()
+                if text:
+                    return text
+            if self.meta_file.is_file():
+                data = json.loads(
+                    self.meta_file.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    value = data.get("schema_version")
+                    if isinstance(value, str) and value.strip():
+                        return value.strip()
+        except (OSError, ValueError, json.JSONDecodeError):
+            return None
+        return None
+
+    def is_migrated(self) -> bool:
+        """True when the project schema matches this ck version."""
+        found = self.project_schema_version()
+        return found is not None and found == VERSION
+
+    def schema_mismatch(self) -> bool:
+        """True when a schema version exists but differs from VERSION.
+
+        A project with NO version markers at all is LEGACY (None) —
+        also a mismatch for write commands, but the wording of the
+        error differs (see :meth:`_require_migrated`).
+        """
+        found = self.project_schema_version()
+        return found is None or found != VERSION
+
+    def _require_migrated(self) -> None:
+        """Write-command gate: refuse mutations on a foreign schema.
+
+        v0.13.0 re-shaped the memory files (PLAN.md active-only,
+        HISTORY.md ledger, UUIDs). Running a write command against a
+        v0.12 project would silently corrupt its layout, so writes
+        abort with an explicit hint. Read commands keep working —
+        they render the legacy layout read-only instead.
+        """
+        if self.ck_path is None or not self.ck_path.is_dir():
+            return  # nothing initialized; the plan guard reports that
+        found = self.project_schema_version()
+        if found == VERSION:
+            return
+        if found is None:
+            raise ValueError(
+                "This project uses the pre-0.13 schema (no version "
+                "marker). Run `ck migrate` to upgrade it, then retry."
+            )
+        raise ValueError(
+            f"Project schema v{found} does not match ck v{VERSION}. "
+            "Run `ck migrate` to upgrade it, then retry."
+        )
+
+    def _warn_if_unmigrated(self) -> Optional[str]:
+        """The read-only warning for `ck st` in a non-migrated project.
+
+        Returns the warning text (or None when the schema matches /
+        there is no project here). Read commands never mutate.
+        """
+        if self.ck_path is None or not self.ck_path.is_dir():
+            return None
+        if self.is_migrated():
+            return None
+        found = self.project_schema_version()
+        if found is None:
+            return (
+                "Legacy project layout detected (pre-0.13). "
+                "Run `ck migrate` to split PLAN/HISTORY."
+            )
+        return (
+            f"Project schema v{found} != ck v{VERSION}. "
+            "Run `ck migrate`."
+        )
+
+    def migrate(self, *, dry_run: bool = True) -> "MigrationResult":
+        """Migrate this legacy project to the v0.13.0 layout.
+
+        Delegates to :class:`cklib.migrations.MigrateV012ToV013`.
+        ``dry_run=True`` (the default) only PREVIEWS the actions;
+        ``dry_run=False`` applies them (after writing a backup).
+        """
+        from .migrations import MigrateV012ToV013
+
+        if self.root is None:
+            raise ValueError(
+                "No .ck/ project found here. "
+                "cd into the project (or run `ck init`) first."
+            )
+        if not self.ck_path.is_dir():
+            raise ValueError(
+                "No .ck/ project found here. "
+                "cd into the project (or run `ck init`) first."
+            )
+        return MigrateV012ToV013().run(self.root, dry_run=dry_run)
+
+    def history_entries(self) -> list:
+        """Completed-task entries parsed from ``.ck/HISTORY.md``.
+
+        v0.13.0 view data: completed tasks live in the HISTORY.md
+        ledger (``- [x] <ts>: <title> <!-- id: uuid -->``), no longer
+        as ``[x]`` rows in PLAN.md. A missing/unparseable ledger
+        yields ``[]`` — the status renderer falls back to counting
+        in-file ``[x]`` rows (legacy plans, spaces).
+        """
+        try:
+            return parse_history_file(self.history_file)
+        except (OSError, ValueError, UnicodeDecodeError):
+            return []
 
     # ------------------------------------------------------------------ #
     # Gitignore helpers
@@ -1177,12 +1303,17 @@ class ContextKeeper:
         and whitespace runs are stripped) so terminal output pasted
         into the CLI can never corrupt PLAN.md. The task is inserted
         at the end of ``## Current Sprint`` when that section exists,
-        otherwise directly before ``## Completed``.
+        otherwise at the document end.
+
+        Every added task carries a fresh stable UUID rendered as the
+        hidden ``<!-- id: ... -->`` comment (v0.13.0), so the
+        reference survives every later re-index.
         """
         title = sanitize_task_text(task_text)
         if not title:
             raise ValueError("Task text is empty")
 
+        self._require_migrated()
         self._ensure_ck_dir()
 
         if not self.plan_file.exists():
@@ -1203,8 +1334,11 @@ class ContextKeeper:
         if _is_pristine_default_plan(tl):
             seed = tl.tasks[0]
             seed.title = title
+            # v0.13.0: the init seed itself is a placeholder without a
+            # UUID; the moment it becomes a REAL task it is stamped so
+            # every user-created task carries a stable reference.
+            seed.uuid = new_task_uuid()
             self._commit_plan(tl)
-            self._sync_active_task(tl)
             return seed.id
         section = _section_for_new_task(tl)
         insert_line = _sprint_insert_line(tl)
@@ -1214,115 +1348,157 @@ class ContextKeeper:
         )
 
         # ``render_plan`` will place any task whose ``line_number``
-        # exceeds the original source length just before the
-        # ``## Completed`` header (or at EOF if none). We don't need
-        # to manipulate line numbers manually.
+        # exceeds the original source length at the sprint end (or at
+        # EOF if none). We don't need to manipulate line numbers
+        # manually.
         self._commit_plan(tl)
-        # Adding the first task to an empty plan changes the active
-        # task — keep the registry pointer consistent.
-        self._sync_active_task(tl)
         return new_task.id
 
     def start(self, task_id: int) -> FocusResult:
-        """Mark the given task as focused; demote any other focused task.
+        """Start a task (``[ ]``/``[~]`` → ``[>]``); reset with ``0``.
 
-        ``task_id <= 0`` RESETS focus: the currently focused task (if
-        any) is demoted to open and no new focus is set.
-
-        When a previously focused task loses focus (moved to a NEW
-        focus, or reset) the demotion is reported in
-        :class:`FocusResult` (``demoted_*`` fields) so the CLI can
-        surface the "Unfocused / Paused Context" handling, and the
-        task is recorded in the ``paused_tasks`` registry (see
-        :meth:`_register_paused`): a noted demotion moves its process
-        note into the registry entry so the note stays bound to the
-        paused task through further focus switches; a noteless one is
-        recorded too so it never disappears into the generic skipped
-        list. Re-focusing restores the note as the active process
-        note; completing archives it to HISTORY.md.
+        v0.13.0 semantics: ``ck start`` SETS the (single) focus when
+        none is set and RESUMES a paused task the same way. It
+        REFUSES to silently steal an existing focus — when another
+        task already holds ``[>]`` the command aborts with
+        :class:`FocusExistsError` so the CLI can redirect the user to
+        ``ck focus <ID>`` (which pauses the old task instead of
+        dropping it). ``task_id <= 0`` RESETS focus: the current
+        ``[>]`` becomes ``[ ]`` (open — never paused by a reset).
 
         Aborts with a clear error when no project plan is bound (no
         initialized project) instead of fabricating an empty plan.
         """
         self._require_bound_plan()
+        self._require_migrated()
         tl = self._load_plan()
-        demoted: Optional[Task] = None
         target: Optional[Task] = None
         if task_id <= 0:
-            # Focus RESET: demote the current focus (if any); no new
-            # focus is set. ``TaskList.focus`` would raise on id 0.
+            # Focus RESET: the focused task returns to OPEN (not
+            # paused — a reset discards the focus, it does not park
+            # the task). ``TaskList.focus`` would raise on id 0.
             focused = tl.focused[0] if tl.focused else None
             if focused is not None:
                 focused.status = TaskStatus.OPEN
-                demoted = focused
-        else:
-            # Capture the previously focused task BEFORE ``focus()`
-            # demotes it — afterwards it is no longer in ``focused``.
-            focused_before = tl.focused[0] if tl.focused else None
-            target = tl.focus(task_id)  # raises KeyError when unknown
-            if focused_before is not None \
-                    and focused_before.id != task_id:
-                demoted = focused_before
-        had_note = False
-        if demoted is not None:
-            note = self._note_for_task(demoted.id)
-            had_note = bool(note)
-            self._register_paused(demoted.id, demoted.title, note)
-        if target is not None:
-            # Re-focus side effect: a previously paused task regains
-            # its registry note as the active process note (LIFO).
-            self._restore_paused_note(target.id)
+                self._commit_plan(tl)
+                return FocusResult(
+                    task_id=0, title="", path=self.plan_file,
+                    demoted_id=focused.id,
+                    demoted_title=focused.title,
+                    had_note=bool(tl.by_id(focused.id).notes),
+                )
+            return FocusResult(task_id=0, title="", path=self.plan_file)
+        focused_before = tl.focused[0] if tl.focused else None
+        if focused_before is not None and focused_before.id != task_id:
+            raise FocusExistsError(
+                focused_before.id, focused_before.title)
+        target = tl.by_id(task_id)
+        if target is None:
+            raise KeyError(f"No task with id {task_id}")
+        # ``TaskList.focus`` demotes every OTHER focused task to
+        # PAUSED; with the guard above that is never the case here —
+        # the target simply becomes (or stays) the single focus.
+        tl.focus(task_id)
         self._commit_plan(tl)
-        self._sync_active_task(tl)
         return FocusResult(
-            task_id=target.id if target is not None else 0,
-            title=target.title if target is not None else "",
+            task_id=target.id,
+            title=target.title,
+            path=self.plan_file,
+            demoted_id=None,
+            demoted_title="",
+            had_note=False,
+        )
+
+    def focus(self, task_id: int) -> FocusResult:
+        """Switch focus: the old ``[>]`` becomes ``[~]`` (paused).
+
+        ``task_id <= 0`` RESETS focus (``[>]`` → ``[ ]``, not paused).
+        Otherwise the currently focused task — if any — is parked as
+        ``[~]`` with its inline notes intact, and the target task
+        becomes the new ``[>]`` focus. Pausing preserves the work
+        context: the task stays visible in the plan and the
+        "Unfocused / Paused Context" block until it is resumed
+        (``ck start``/``ck focus``) or completed.
+        """
+        self._require_bound_plan()
+        self._require_migrated()
+        tl = self._load_plan()
+        if task_id <= 0:
+            focused = tl.focused[0] if tl.focused else None
+            if focused is not None:
+                focused.status = TaskStatus.OPEN
+                self._commit_plan(tl)
+                return FocusResult(
+                    task_id=0, title="", path=self.plan_file,
+                    demoted_id=focused.id,
+                    demoted_title=focused.title,
+                    had_note=bool(focused.notes),
+                )
+            return FocusResult(task_id=0, title="", path=self.plan_file)
+        target = tl.by_id(task_id)
+        if target is None:
+            raise KeyError(f"No task with id {task_id}")
+        focused_before = tl.focused[0] if tl.focused else None
+        demoted: Optional[Task] = None
+        if focused_before is not None and focused_before.id != task_id:
+            demoted = focused_before
+        # ``TaskList.focus`` pauses every other focused task.
+        tl.focus(task_id)
+        self._commit_plan(tl)
+        return FocusResult(
+            task_id=target.id,
+            title=target.title,
             path=self.plan_file,
             demoted_id=demoted.id if demoted is not None else None,
             demoted_title=demoted.title if demoted is not None else "",
-            had_note=had_note,
+            had_note=bool(demoted.notes) if demoted is not None else False,
         )
 
     def done(self, spec: str) -> list[int]:
-        """Mark one or more tasks as DONE.
+        """Complete tasks: remove from PLAN.md, append to HISTORY.md.
 
         ``spec`` accepts single IDs (``3``), ranges (``2-4``), and
-        comma-separated lists (``1,3,5``).
+        comma-separated lists (``1,3,5``). Each completed task
+        graduates into ``.ck/HISTORY.md`` as a dated ``[x]`` ledger
+        line carrying its stable UUID; inline notes travel beneath
+        the entry so the process context is preserved. The task is
+        then removed from PLAN.md and the remaining IDs re-index.
 
-        Completing the task that carries the active-task process
-        note (see :meth:`set_note`) automatically archives the note
-        into ``HISTORY.md`` (dated entry) and clears it from the
-        active-task state along with the completed task context.
+        DAILY spaces are the documented exception (see
+        :meth:`cklib.spaces.SpaceManager.done`): a completed daily
+        task is deleted permanently without a history record.
         """
+        self._require_migrated()
         ids = _parse_id_spec(spec)
         if not ids:
             raise ValueError(f"No valid task IDs in spec: {spec!r}")
 
         tl = self._load_plan()
-        transitioned = tl.toggle_done(ids)
-        if transitioned:
-            completed = set(transitioned)
-            # Archive every process note BEFORE clearing the task
-            # context: notes are user data and graduate into
-            # HISTORY.md instead of vanishing with the completed task.
-            for tid in transitioned:
-                archived = tl.by_id(tid)
-                if archived is None:
-                    continue
-                entries = self.get_note_entries(tid)
-                if entries:
-                    self._archive_note_to_history(archived, entries)
-            # Paused-task registry: drop ALL completed tasks from the
-            # registry — a done task is finished, never paused.
-            self._purge_paused_tasks(completed)
-            self._commit_plan(tl)
-            # Completing the focused task changes which task is
-            # active; the registry pointer must follow (task IDs are
-            # positional and can shift, so re-derive from the AST).
-            self._sync_active_task(tl)
-            self._purge_note_if_completed(completed)
-            self._purge_notes_if_completed(completed)
-        return transitioned
+        completed: list[Task] = []
+        for tid in ids:
+            task = tl.by_id(tid)
+            if task is None:
+                raise KeyError(f"No task with id {tid}")
+            if task.status == TaskStatus.DONE:
+                continue  # already in the ledger; skip silently
+            completed.append(task)
+        if not completed:
+            return []
+
+        ts = history_timestamp()
+        self._ensure_ck_dir()
+        for task in completed:
+            append_to_history(
+                self.history_file, ts, task.title, uuid=task.uuid,
+                notes=list(task.notes or ()),
+            )
+        # Remove from the plan (descending: positional IDs shift on
+        # every delete, so the captured tasks must be removed from
+        # the highest ID first).
+        for task in sorted(completed, key=lambda t: t.id, reverse=True):
+            tl.delete(task.id)
+        self._commit_plan(tl)
+        return [task.id for task in completed]
 
     # ------------------------------------------------------------------ #
     # COMMAND: delete / rm (remove a task from PLAN.md)
@@ -1361,14 +1537,15 @@ class ContextKeeper:
         document order, because task IDs are positional: without the
         renumbering a later ``ck done 3`` would point at a different
         line than the user sees. Process notes bound to the deleted
-        task (the active note and any paused-task note) are archived
-        into ``HISTORY.md`` instead of being silently dropped, and the
-        IDs in ``.ck/state.json`` are shifted to follow the same
-        positional re-indexing.
+        task are archived into ``HISTORY.md`` instead of being
+        silently dropped with the line (v0.13.0: notes are inline
+        ``* Note`` lines owned by the task bullet).
 
-        Returns ``{"id", "title", "remaining", "notes_archived"}``:
-        the DELETED task's ID/title, the new task count, and how many
-        notes graduated into history.
+        Returns ``{"id", "title", "remaining", "notes_archived",
+        "listing"}``: the DELETED task's ID/title, the new task
+        count, how many notes graduated into history, and the
+        REFRESHED task listing (post re-index) so the CLI can show
+        the new IDs immediately.
         """
         self._require_bound_plan()
         tl = self._load_plan()
@@ -1378,7 +1555,8 @@ class ContextKeeper:
 
         # Notes are user data: archive the ones bound to this task
         # BEFORE the plan (and its task list) stops resolving them.
-        notes = self._notes_bound_to_task(task_id)
+        # v0.13.0: notes travel inline on the task node itself.
+        notes = [dict(entry) for entry in (target.notes or ())]
         if notes:
             self._archive_note_to_history(target, notes)
 
@@ -1386,102 +1564,14 @@ class ContextKeeper:
         # renumbers the remaining nodes 1..N in document order.
         tl.delete(task_id)
         self._commit_plan(tl)
-        self._remap_state_after_delete(task_id)
-        self._sync_active_task(tl)
+        listing = _render_tasks_listing(self._load_plan())
         return {
             "id": task_id,
             "title": target.title,
             "remaining": tl.total,
             "notes_archived": len(notes),
+            "listing": listing,
         }
-
-    def _notes_bound_to_task(self, task_id: int) -> list[dict]:
-        """Every process-note entry attached to ``task_id``, in order.
-
-        Read-only; used by :meth:`delete_task` to archive the notes
-        before the task disappears.
-        """
-        return self.get_note_entries(task_id)
-
-    def _remap_state_after_delete(self, deleted_id: int) -> None:
-        """Shift ``state.json`` IDs to follow a positional deletion.
-
-        IDs are positional, so every note stored for a task AFTER the
-        deleted one now belongs to the task one slot earlier:
-
-        - ``active_task.id`` > deleted  -> decrement (title unchanged,
-          it is the same task at its new position);
-        - ``active_task.id`` == deleted -> the note was archived by
-          :meth:`delete_task`, so the stale entry is dropped;
-        - ``paused_tasks`` entries follow the same rules (the
-          matching entry is removed, later IDs shift down).
-
-        Writes only when something actually changed (a read-only
-        project never gains a state file), all under the standard
-        ``state.json`` lock via :meth:`_write_state`.
-        """
-        state = self._read_state()
-        if not state:
-            return
-        changed = False
-
-        active = state.get("active_task")
-        if isinstance(active, dict):
-            aid = active.get("id")
-            if isinstance(aid, int) and not isinstance(aid, bool):
-                if aid == deleted_id:
-                    state.pop("active_task", None)
-                    changed = True
-                elif aid > deleted_id:
-                    active["id"] = aid - 1
-                    changed = True
-
-        paused = state.get("paused_tasks")
-        if isinstance(paused, list):
-            kept: list = []
-            for entry in paused:
-                if not isinstance(entry, dict):
-                    kept.append(entry)
-                    continue
-                eid = entry.get("id")
-                if isinstance(eid, int) and not isinstance(eid, bool):
-                    if eid == deleted_id:
-                        changed = True
-                        continue
-                    if eid > deleted_id:
-                        entry["id"] = eid - 1
-                        changed = True
-                kept.append(entry)
-            if changed:
-                state["paused_tasks"] = kept
-
-        notes = state.get("notes")
-        if isinstance(notes, dict):
-            shifted: dict = {}
-            notes_changed = False
-            for key, value in notes.items():
-                try:
-                    nid = int(key)
-                except (TypeError, ValueError):
-                    shifted[key] = value
-                    continue
-                if nid == deleted_id:
-                    notes_changed = True
-                    continue
-                if nid > deleted_id:
-                    shifted[str(nid - 1)] = value
-                    notes_changed = True
-                else:
-                    shifted[key] = value
-            if notes_changed:
-                if shifted:
-                    state["notes"] = shifted
-                else:
-                    state.pop("notes", None)
-                changed = True
-
-        if changed:
-            self._write_state(state)
 
     # ------------------------------------------------------------------ #
     # COMMAND: move / swap / reorder (active tasks only)
@@ -1549,7 +1639,6 @@ class ContextKeeper:
                     "Use a number, 'top', or 'bottom'.") from None
             position = tl.move_task(task_id, wanted)
         self._commit_plan(tl)
-        self._sync_active_task(tl)
         return f"Moved task #{task_id} -> position {position}"
 
     def swap_tasks(self, id_a: int, id_b: int) -> str:
@@ -1558,7 +1647,6 @@ class ContextKeeper:
         self._reorder_guard(tl, [id_a, id_b])
         tl.swap_tasks(id_a, id_b)
         self._commit_plan(tl)
-        self._sync_active_task(tl)
         return f"Swapped task #{id_a} <-> task #{id_b}"
 
     def reorder_tasks(self, ordered_ids: list[int]) -> str:
@@ -1578,7 +1666,6 @@ class ContextKeeper:
         self._reorder_guard(tl, ordered_ids)
         tl.reorder_tasks(ordered_ids)
         self._commit_plan(tl)
-        self._sync_active_task(tl)
         return self._reorder_summary(ordered_ids)
 
     def _reorder_summary(self, requested: list[int]) -> str:
@@ -1603,23 +1690,6 @@ class ContextKeeper:
         lines = [f"Reordered active tasks: {applied}", "     New order:"]
         lines += [f"       {t.id}. {t.title}" for t in active]
         return "\n".join(lines)
-
-    def _sync_active_task(self, tl: TaskList) -> None:
-        """Reconcile the registry's active-task pointer with the AST.
-
-        Task IDs are positional: they shift when tasks are removed,
-        completed, or the file is edited externally. A stale
-        ``active_task_id`` in the registry would then point at the
-        WRONG task. Re-derive the active task from the AST (focused
-        first, else first open) and update the registry whenever it
-        differs from what is stored.
-        """
-        active = tl.active()
-        registry.update_active_task(
-            self.root,
-            task_id=active.id if active is not None else None,
-            task_title=active.title if active is not None else "",
-        )
 
     def edit_note(self, task_id: int, note: str) -> None:
         """Append a note to HISTORY.md for ``task_id``.
@@ -1658,20 +1728,19 @@ class ContextKeeper:
         targets that task directly. Every call APPENDS a new
         timestamped entry — an existing note is never overwritten.
 
-        The canonical ledger lives in ``.ck/state.json`` under
-        ``notes`` as ``{task_id: [{"text", "created"}, ...]}``. The
-        legacy ``active_task.note`` scalar is never written (it is
-        migrated into the ledger and removed on load); the
-        ``paused_tasks[].note`` string stays in sync for backward
-        compatibility. Returns the stored note metadata dict.
+        The canonical ledger lives INLINE in ``PLAN.md`` (v0.13.0):
+        each note is a ``* Note (...)`` line directly beneath the
+        task bullet, carried as ``{"text", "created"}`` entries on
+        the task node. Returns the stored note metadata dict.
 
         Aborts with a clear error when no project plan is bound (no
-        initialized project) — no orphaned state entries are created.
+        initialized project) — no orphaned entries are created.
         """
         note = sanitize_task_text(text)
         if not note:
             raise ValueError("Note text is empty")
         self._require_bound_plan()
+        self._require_migrated()
         tl = self._load_plan()
         if task_id is None:
             target = tl.active()
@@ -1685,113 +1754,57 @@ class ContextKeeper:
             if target is None:
                 raise KeyError(f"No task with id {task_id}")
 
-        state = self._read_state()
-        notes = state.get("notes")
-        if not isinstance(notes, dict):
-            notes = {}
-        entries = notes.get(str(target.id))
-        if not isinstance(entries, list):
-            entries = []
-        entry = note_store.append_entry(entries, note)
-        notes[str(target.id)] = entries
-        state["notes"] = notes
-
-        active = tl.active()
-        if active is not None and active.id == target.id:
-            state["active_task"] = {
-                "id": target.id,
-                "title": target.title,
-                "updated_at": datetime.now().isoformat(timespec="seconds"),
-            }
-        paused = state.get("paused_tasks")
-        if isinstance(paused, list):
-            for item in paused:
-                if isinstance(item, dict) and item.get("id") == target.id:
-                    item["note"] = note
-        self._write_state(state)
-
+        tl.edit_note(target.id, note)
+        self._commit_plan(tl)
+        entries = [dict(entry) for entry in (target.notes or ())]
         return {
             "id": target.id,
             "title": target.title,
             "note": note,
-            "created": entry["created"],
+            "created": entries[-1]["created"] if entries else "",
             "notes": entries,
         }
 
     def get_note(self) -> Optional[dict]:
-        """Return the stored active-task note dict, or None.
+        """Return the active task's newest note dict, or None.
 
-        The note text is derived from the canonical ``notes`` ledger
-        for the task recorded in ``active_task``. The legacy
-        ``active_task.note`` scalar is migrated by the state loader,
-        so callers never read it directly.
+        The active task is the focused ``[>]`` task, else the first
+        open one — mirroring :meth:`TaskList.active`. The note text
+        comes from the task's INLINE note entries in PLAN.md (the
+        legacy ``state.json`` ledger no longer exists).
         """
-        state = self._read_state()
-        data = state.get("active_task")
-        if not isinstance(data, dict):
+        try:
+            tl = self._load_plan()
+        except (OSError, ValueError):
             return None
-        tid = data.get("id")
-        if not isinstance(tid, int) or isinstance(tid, bool):
+        active = tl.active()
+        if active is None:
             return None
-        entries = state.get("notes")
-        value = entries.get(str(tid)) if isinstance(entries, dict) else None
-        if not isinstance(value, list) or not value:
+        entries = [dict(entry) for entry in (active.notes or ())]
+        if not entries:
             return None
-        last = value[-1]
-        if not isinstance(last, dict):
-            return None
-        note = last.get("text")
-        if not isinstance(note, str) or not note:
-            return None
-        result = dict(data)
-        result["note"] = note
-        result["notes"] = value
-        return result
+        return {
+            "id": active.id,
+            "title": active.title,
+            "note": entries[-1]["text"],
+            "notes": entries,
+        }
 
     def get_note_entries(self, task_id: int) -> list[dict]:
         """All timestamped note entries bound to ``task_id``, in order.
 
-        Read-only: legacy values are normalized in memory only, so a
-        listing never rewrites ``state.json``.
+        Read-only: the entries are the task's INLINE ``* Note``
+        lines in PLAN.md (v0.13.0). An unknown or unparseable plan
+        yields ``[]``.
         """
-        state = self._read_state()
-        raw = state.get("notes")
-        entries: list[dict] = []
-        if isinstance(raw, dict):
-            value = raw.get(str(task_id))
-            if isinstance(value, list):
-                for item in value:
-                    if not isinstance(item, dict):
-                        continue
-                    text = item.get("text")
-                    created = item.get("created")
-                    if isinstance(text, str) and text \
-                            and isinstance(created, str) and created:
-                        entries.append({"text": text, "created": created})
-        if entries:
-            return entries
-        # Defensive fallback for hand-edited/partial state where the
-        # canonical ledger is absent but the legacy slot still exists.
-        active = state.get("active_task")
-        if isinstance(active, dict) and active.get("id") == task_id:
-            text = active.get("note")
-            if isinstance(text, str) and text:
-                return [{
-                    "text": text,
-                    "created": note_store.file_mtime_iso(self.state_file),
-                }]
-        paused = state.get("paused_tasks")
-        if isinstance(paused, list):
-            for item in paused:
-                if isinstance(item, dict) and item.get("id") == task_id:
-                    text = item.get("note")
-                    if isinstance(text, str) and text:
-                        return [{
-                            "text": text,
-                            "created": note_store.file_mtime_iso(
-                                self.state_file),
-                        }]
-        return []
+        try:
+            tl = self._load_plan()
+        except (OSError, ValueError):
+            return []
+        task = tl.by_id(task_id)
+        if task is None:
+            return []
+        return [dict(entry) for entry in (task.notes or ())]
 
     def clear_notes(self, task_id: int) -> dict:
         """Remove every process note bound to ``task_id``."""
@@ -1800,28 +1813,9 @@ class ContextKeeper:
         target = tl.by_id(task_id)
         if target is None:
             raise KeyError(f"No task with id {task_id}")
-        state = self._read_state()
-        removed = 0
-        changed = False
-        notes = state.get("notes")
-        if isinstance(notes, dict):
-            entries = notes.pop(str(task_id), None)
-            if isinstance(entries, list):
-                removed = len(entries)
-                changed = True
-        active = state.get("active_task")
-        if isinstance(active, dict) and active.get("id") == task_id:
-            state.pop("active_task", None)
-            changed = True
-        paused = state.get("paused_tasks")
-        if isinstance(paused, list):
-            for item in paused:
-                if isinstance(item, dict) and item.get("id") == task_id \
-                        and item.get("note"):
-                    item["note"] = ""
-                    changed = True
-        if changed:
-            self._write_state(state)
+        removed = len(target.notes or ())
+        target.notes = []
+        self._commit_plan(tl)
         return {"id": task_id, "title": target.title, "cleared": removed}
 
     def note_listing(self, task_id: int) -> str:
@@ -1841,121 +1835,45 @@ class ContextKeeper:
         return "\n".join(lines)
 
     # ------------------------------------------------------------------ #
-    # Paused-task registry (Unfocused / Paused Context)
+    # Paused tasks (``[~]`` rows in PLAN.md, v0.13.0)
     # ------------------------------------------------------------------ #
 
     def _paused_tasks(self) -> list[dict]:
-        """Return the stored ``paused_tasks`` registry (valid entries
-        only), most recently paused first.
+        """The plan's paused tasks (``[~]``), in document order.
 
-        Each entry is ``{"id": int, "title": str, "note": str}``
-        (``note`` may be empty). Entries whose task no longer exists
-        in the plan are filtered out on read — externally removed or
-        completed tasks never surface as paused.
+        v0.13.0: pausing is a FIRST-CLASS task state written into
+        PLAN.md (``- [~] title``) by ``ck focus`` — there is no
+        separate ``state.json`` registry any more. Each entry is
+        ``{"id": int, "title": str, "note": str, "notes": entries}``
+        where ``note`` is the newest inline entry's text (possibly
+        empty) and ``notes`` carries every inline entry in order.
+
+        Open tasks that carry process notes are included too: they
+        are the v0.12 "Unfocused / Paused Context" ledger — noted
+        context must stay visible in ``ck st`` even though the task
+        itself is ordinary backlog.
         """
-        tl = self._load_plan()
-        state = self._read_state()
-        raw = state.get("paused_tasks")
-        if not isinstance(raw, list):
+        try:
+            tl = self._load_plan()
+        except (OSError, ValueError):
             return []
-        ledger = state.get("notes")
+        focus = tl.focused[0] if tl.focused else None
         out: list[dict] = []
-        seen: set[int] = set()
-        for item in raw:
-            if not isinstance(item, dict):
+        for task in tl.tasks:
+            if task.status == TaskStatus.DONE:
                 continue
-            tid = item.get("id")
-            title = item.get("title")
-            note = item.get("note")
-            if not isinstance(tid, int) or isinstance(tid, bool) \
-                    or tid in seen:
+            if focus is not None and task.id == focus.id:
                 continue
-            if not isinstance(title, str) or not isinstance(note, str):
-                continue
-            if tl.by_id(tid) is None:
-                continue
-            seen.add(tid)
-            entries: list[dict] = []
-            if isinstance(ledger, dict):
-                value = ledger.get(str(tid))
-                if isinstance(value, list):
-                    for entry in value:
-                        if isinstance(entry, dict) \
-                                and isinstance(entry.get("text"), str) \
-                                and entry.get("text") \
-                                and isinstance(entry.get("created"), str) \
-                                and entry.get("created"):
-                            entries.append({
-                                "text": entry["text"],
-                                "created": entry["created"],
-                            })
+            entries = [dict(entry) for entry in (task.notes or ())]
+            if task.status != TaskStatus.PAUSED and not entries:
+                continue  # unnoted open task is plain backlog
             out.append({
-                "id": tid,
-                "title": title,
-                "note": note,
+                "id": task.id,
+                "title": task.title,
+                "note": entries[-1]["text"] if entries else "",
                 "notes": entries,
             })
         return out
-
-    def _register_paused(self, task_id: int, title: str,
-                         note: str) -> None:
-        """Record a focus-loss demotion in the ``paused_tasks``
-        registry.
-
-        When the demoted task carried the active process note, the
-        note MOVES into the registry entry: it stays bound to the
-        paused task through further focus switches instead of being
-        orphaned under (or wiped by) the next ``set_note``. The most
-        recently paused task is kept first (LIFO restore order).
-        Read-only projects never gain a state file.
-        """
-        state = self._read_state()
-        paused = state.get("paused_tasks")
-        entries: list[dict] = [e for e in paused if isinstance(e, dict)] \
-            if isinstance(paused, list) else []
-        # Drop any stale entry for this task, then prepend.
-        entries = [e for e in entries if e.get("id") != task_id]
-        entries.insert(0, {
-            "id": task_id,
-            "title": title,
-            "note": note,
-        })
-        # Move the active note into the registry (never lose data).
-        if note:
-            active = state.get("active_task")
-            if isinstance(active, dict) and active.get("id") == task_id:
-                state.pop("active_task", None)
-        state["paused_tasks"] = entries
-        self._write_state(state)
-
-    def _restore_paused_note(self, task_id: int) -> None:
-        """Re-focus side effect: restore a paused task's registry
-        note as the active process note (LIFO — the most recently
-        paused task wins) and remove the registry entry."""
-        state = self._read_state()
-        paused = state.get("paused_tasks")
-        if not isinstance(paused, list):
-            return
-        kept: list[dict] = []
-        restored: Optional[dict] = None
-        for entry in paused:
-            if (isinstance(entry, dict) and entry.get("id") == task_id
-                    and restored is None):
-                restored = entry
-                continue
-            kept.append(entry)
-        if restored is None:
-            return
-        ledger = state.get("notes")
-        entries = ledger.get(str(task_id)) if isinstance(ledger, dict) else None
-        if isinstance(entries, list) and entries:
-            state["active_task"] = {
-                "id": task_id,
-                "title": restored.get("title", ""),
-                "updated_at": datetime.now().isoformat(timespec="seconds"),
-            }
-        state["paused_tasks"] = kept
-        self._write_state(state)
 
     def pending_focus_loss(self) -> Optional[dict]:
         """Peek at what an immediate focus switch would demote.
@@ -2018,16 +1936,6 @@ class ContextKeeper:
         entries = self.get_note_entries(task_id)
         return entries[-1]["text"] if entries else ""
 
-    def _drop_note(self) -> None:
-        """Remove the stored active-task note when present. Writes
-        state only when something is actually removed (read-only
-        projects never gain a state file)."""
-        state = self._read_state()
-        if "active_task" not in state:
-            return
-        state.pop("active_task", None)
-        self._write_state(state)
-
     def _archive_note_to_history(self, task: Task, notes) -> None:
         """Append the task's process notes to ``HISTORY.md``.
 
@@ -2077,49 +1985,6 @@ class ContextKeeper:
             with self._open_history_append() as fh:
                 fh.write(entry.render())
 
-    def _purge_note_if_completed(self, completed_ids: set) -> None:
-        """Drop the active-task process note when its task was just
-        completed. Writes state only when something is actually
-        removed (read-only projects never gain a state file)."""
-        state = self._read_state()
-        active = state.get("active_task")
-        if not isinstance(active, dict):
-            return
-        tid = active.get("id")
-        if isinstance(tid, int) and tid in completed_ids:
-            state.pop("active_task", None)
-            self._write_state(state)
-
-    def _purge_notes_if_completed(self, completed_ids: set) -> None:
-        """Drop canonical note-ledger entries for completed tasks."""
-        if not completed_ids:
-            return
-        state = self._read_state()
-        notes = state.get("notes")
-        if not isinstance(notes, dict):
-            return
-        changed = False
-        for tid in completed_ids:
-            if notes.pop(str(tid), None) is not None:
-                changed = True
-        if changed:
-            self._write_state(state)
-
-    def _purge_paused_tasks(self, completed_ids: set) -> None:
-        """Remove completed tasks from the paused_tasks registry.
-        Writes state only when an entry is actually removed."""
-        state = self._read_state()
-        paused = state.get("paused_tasks")
-        if not isinstance(paused, list) or not completed_ids:
-            return
-        kept = [
-            e for e in paused
-            if not (isinstance(e, dict) and e.get("id") in completed_ids)
-        ]
-        if len(kept) != len(paused):
-            state["paused_tasks"] = kept
-            self._write_state(state)
-
     # ------------------------------------------------------------------ #
     # COMMAND: init
     # ------------------------------------------------------------------ #
@@ -2160,16 +2025,43 @@ class ContextKeeper:
             warn_if_sensitive_root(self.root)
         self._ensure_ck_dir()
 
-        state = self._read_state()
-        state.update({
-            "version": VERSION,
-            "project_name": self.root.name,
-            "created_at": state.get("created_at") or datetime.now().isoformat(),
-            "last_update": datetime.now().isoformat(),
-            "current_step": state.get("current_step") or "Init",
-            "tools": self._check_tools(),
-        })
-        self._write_state(state)
+        # LEGACY GUARD: a project that still carries ``state.json``
+        # predates the v0.13.0 split layout. Re-stamping it with a
+        # ``version`` file here would silently mark it migrated while
+        # its notes/paused registry never moved into PLAN.md — so
+        # ``ck init`` leaves the legacy marker alone and points at
+        # the explicit migration command instead.
+        legacy_state = (self.ck_path / "state.json").exists()
+        if legacy_state:
+            print(ui.notice(
+                ui.WARN,
+                "Legacy project layout detected (.ck/state.json). "
+                "Run `ck migrate` to upgrade to v0.13.0."))
+        else:
+            meta: dict = {}
+            if self.meta_file.exists():
+                try:
+                    loaded = json.loads(
+                        self.meta_file.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        meta = loaded
+                except (OSError, ValueError):
+                    meta = {}
+            fresh_meta = not self.meta_file.exists()
+            meta.setdefault(
+                "created_at", datetime.now().isoformat(timespec="seconds"))
+            meta["project_name"] = self.root.name
+            meta["created_with_ck"] = VERSION
+            meta["tools"] = self._check_tools()
+            _atomic_write_text(
+                self.meta_file, json.dumps(meta, indent=2) + "\n")
+            print(f"[{'+' if fresh_meta else 'u'}] "
+                  f"{'Created' if fresh_meta else 'Updated'}: {META_FILENAME}")
+            self._write_if_missing(
+                self.version_file, f"{VERSION}\n", VERSION_FILENAME)
+            self._write_if_missing(self.links_file, "{}\n", LINKS_FILENAME)
+            self._write_if_missing(
+                self.agents_file, DEFAULT_AGENTS_MD, AGENTS_FILENAME)
 
         added = self._ensure_root_gitignore(self.root)
         if added:
@@ -2340,11 +2232,14 @@ class ContextKeeper:
             return (None, "", None)
         return (ctx.root, ctx.source, None)
 
-    def status(self) -> str:
+    def status(self, *, history_shown: Optional[int] = None) -> str:
         """Return the single-project status block as a string.
 
         Resolution (first match wins): local → ancestors up to the
         Git repo root → nested-project discovery → global registry.
+
+        ``history_shown`` caps the ``[x] History`` section (default
+        3; ``ck st --history N`` overrides it).
 
         OUTSIDE every project the discovery tier decides, never the
         registry's "most recently active" entry: exactly ONE project
@@ -2364,7 +2259,8 @@ class ContextKeeper:
             return ui.render_no_project()
         keeper = self._keeper_for(root)
         tl = parse_plan_file(keeper._plan_display_path())
-        return _render_local_status(keeper, tl, source=source)
+        return _render_local_status(
+            keeper, tl, source=source, history_shown=history_shown or 3)
 
     def tasks(self) -> str:
         """Return the resolved project's task list for STDOUT.
@@ -2758,22 +2654,34 @@ class ContextKeeper:
 
     def save(self, *, input_fn=input, stdin_read=sys.stdin.read,
              printer=print) -> Optional[str]:
-        """Two-step save: optional local-history note, then optional Git commit.
+        """Two-step save: optional local-journal note, then optional Git commit.
 
-        Step 1 appends a dated entry to ``.ck/HISTORY.md`` — Context
-        Keeper's own plain-text context log. This is LOCAL history
-        and involves no Git whatsoever. Step 2 optionally creates a
-        LOCAL Git commit of the ck artifacts. Prompts and
-        confirmations explicitly label which step is which so a user
-        can never mistake a local history entry for a Git commit (or
-        vice versa).
+        Step 1 appends a dated entry to ``.ck/JOURNAL.md`` — Context
+        Keeper's own plain-text checkpoint log (v0.13.0: the save log
+        is JOURNAL.md; HISTORY.md is the completed-tasks ledger fed
+        by ``ck done``). This is LOCAL history and involves no Git
+        whatsoever. Step 2 optionally creates a LOCAL Git commit of
+        the ck artifacts. Prompts and confirmations explicitly label
+        which step is which so a user can never mistake a local
+        journal entry for a Git commit (or vice versa).
 
         If Git is unavailable and the user declines initialization,
         the commit phase is bypassed gracefully — no subprocess
         errors, no prompts past that point.
         """
-        if self.state_file is None or not self.state_file.exists():
+        if self.ck_path is None or not self.ck_path.exists():
             printer("ERROR: Run `ck init` first.")
+            return None
+        found = self.project_schema_version()
+        if found is None:
+            printer(
+                "ERROR: Run `ck migrate` first "
+                "(legacy project layout detected).")
+            return None
+        if found != VERSION:
+            printer(
+                f"ERROR: Project schema is {found}; this ck is {VERSION}. "
+                "Run `ck migrate`.")
             return None
 
         tl = self._load_plan()
@@ -2783,7 +2691,7 @@ class ContextKeeper:
             return None
 
         task_id, task_title = active.id, active.title
-        history_rel = f"{CK_DIR_NAME}/{HISTORY_FILENAME}"
+        journal_rel = f"{CK_DIR_NAME}/{JOURNAL_FILENAME}"
         printer(f"-> Active task: [{task_id}] {task_title}")
         printer(ui.notice(
             ui.INFO,
@@ -2792,16 +2700,16 @@ class ContextKeeper:
 
         note_recorded = False
         try:
-            # ---- Step 1: LOCAL HISTORY (HISTORY.md, no Git) ------ #
+            # ---- Step 1: LOCAL JOURNAL (JOURNAL.md, no Git) ------- #
             printer("")
             printer(
-                f"Step 1: local history - append entry to "
-                f"{history_rel} (not a Git commit)"
+                f"Step 1: local journal - append entry to "
+                f"{journal_rel} (not a Git commit)"
             )
             body = self._prompt_note(input_fn, printer)
 
             comment = input_fn(
-                "Short summary (saved with the history entry; "
+                "Short summary (saved with the journal entry; "
                 "reused as default commit subject): "
             ).strip() or "update"
 
@@ -2820,44 +2728,39 @@ class ContextKeeper:
             # "### " inside note bodies/code fences is not an entry.
             # DEV MODE: the append lands in the sandboxed copy; the
             # rotation count is then read from that same copy.
-            with file_lock(self.history_file):
-                with self._open_history_append() as fh:
+            with file_lock(self.journal_file):
+                with self._open_append(self.journal_file) as fh:
                     fh.write(note.render())
                 if is_dev_mode():
-                    history_text = resolve_write_path(
-                        self.history_file).read_text(encoding="utf-8")
+                    journal_text = resolve_write_path(
+                        self.journal_file).read_text(encoding="utf-8")
                 else:
-                    history_text = self.history_file.read_text(
+                    journal_text = self.journal_file.read_text(
                         encoding="utf-8")
                 needs_rotation = (
-                    _count_history_entries(history_text) > history_limit()
+                    _count_history_entries(journal_text) > history_limit()
                 )
             note_recorded = True
             printer(notice(
-                OK, f"Saved entry to {history_rel} "
-                    "(local context history - not a Git commit)."))
-
-            state = self._read_state()
-            state["last_update"] = datetime.now().isoformat()
-            state["current_step"] = task_title
-            self._write_state(state)
+                OK, f"Saved entry to {journal_rel} "
+                    "(local context journal - not a Git commit)."))
 
             if needs_rotation:
-                self._rotate_history()
+                self._rotate_history(target=self.journal_file)
 
-            # ---- Step 2: LOCAL GIT COMMIT (separate from history) - #
+            # ---- Step 2: LOCAL GIT COMMIT (separate from journal) -- #
             printer("")
             printer(
                 "Step 2: Git commit - optional, "
-                "separate from local history"
+                "separate from local journal"
             )
             if is_dev_mode():
                 # Guardrail: a dev-mode session must never create a
                 # real Git commit (or init a repo) in the project.
-                # The sandboxed history entry above is already saved.
+                # The sandboxed journal entry above is already saved.
                 printer(notice(
                     INFO, "Dev mode: Git commit skipped "
-                         f"(sandbox). Entry saved in {history_rel}."))
+                         f"(sandbox). Entry saved in {journal_rel}."))
                 return None
             if not gith.is_git_repo(self.root):
                 ans = input_fn(
@@ -2867,13 +2770,13 @@ class ContextKeeper:
                 if ans != "y":
                     printer(notice(
                         INFO, "No commit created. Your entry is "
-                             f"saved in {history_rel} "
-                             "(local history only)."))
+                             f"saved in {journal_rel} "
+                             "(local journal only)."))
                     return None
                 if not gith.init_repo(self.root):
                     printer(
                         f"ERROR: Git init failed; commit skipped "
-                        f"(entry stays saved in {history_rel})."
+                        f"(entry stays saved in {journal_rel})."
                     )
                     return None
 
@@ -2888,8 +2791,8 @@ class ContextKeeper:
             ).strip().lower() != "y":
                 printer(notice(
                     INFO, "No commit created. Your entry is "
-                         f"saved in {history_rel} "
-                         "(local history only)."))
+                         f"saved in {journal_rel} "
+                         "(local journal only)."))
                 return None
         except EOFError:
             # Non-interactive stdin ran out mid-flow. Abort cleanly:
@@ -2898,13 +2801,13 @@ class ContextKeeper:
             if note_recorded:
                 printer(
                     f"ERROR: Input closed - entry saved to "
-                    f"{history_rel}, no Git commit created."
+                    f"{journal_rel}, no Git commit created."
                 )
             else:
                 printer("ERROR: Input closed - save aborted (nothing written).")
             return None
 
-        # Stage ONLY the Context Keeper artifacts (PLAN.md, HISTORY.md,
+        # Stage ONLY the Context Keeper artifacts (PLAN.md, JOURNAL.md,
         # prompt.md, README.md, .ck/.gitignore). Never ``git add .`` —
         # that would sweep unrelated untracked files (potentially
         # secrets) into the commit — and never stage the whole .ck/
@@ -2913,7 +2816,7 @@ class ContextKeeper:
         # when the Git work tree root is a parent of the project.
         ck_artifacts = [
             f"{CK_DIR_NAME}/{PLAN_FILENAME}",
-            f"{CK_DIR_NAME}/{HISTORY_FILENAME}",
+            f"{CK_DIR_NAME}/{JOURNAL_FILENAME}",
             f"{CK_DIR_NAME}/{PROMPT_FILENAME}",
             f"{CK_DIR_NAME}/{README_FILENAME}",
             f"{CK_DIR_NAME}/{GITIGNORE_FILENAME}",
@@ -2925,7 +2828,7 @@ class ContextKeeper:
             return msg
         printer(ui.notice(
             ui.WARN,
-            f"Commit failed (entry remains saved in {history_rel}).")
+            f"Commit failed (entry remains saved in {journal_rel}).")
         )
         return None
 
@@ -3847,7 +3750,7 @@ def _sprint_insert_line(tl: TaskList) -> Optional[int]:
     sprint_end = _find_section_end(src_lines, "Current Sprint")
     if sprint_end is not None:
         return sprint_end + 1  # 0-based → 1-based
-    completed = _find_completed_line(src_lines)
+    completed = _find_completed_header(src_lines)
     if completed is not None:
         return completed + 1  # insert at (before) the Completed header
     return None
@@ -3857,38 +3760,34 @@ def _sprint_insert_line(tl: TaskList) -> Optional[int]:
 # Presentation helpers
 # ---------------------------------------------------------------------- #
 
-def _status_triad(tl: TaskList, note_data: Optional[dict] = None
-                  ) -> tuple:
+def _status_triad(tl: TaskList, history: Optional[list] = None,
+                  note_data: Optional[dict] = None) -> tuple:
     """Resolve the compact PREV / FOCUS / NEXT triad used by the
     VERBOSE dashboard blocks (``ck dashboard -v``).
 
     Returns ``(prev, focus, next, note_id, note_text)``:
 
-    - PREV: nearest completed ``[x]`` task prior to the FOCUS task
-      (last done overall when no focus is set).
+    - PREV: the NEWEST completed entry — ``history`` (HISTORY.md
+      entries, projects) when provided, else the last in-file ``[x]``
+      task (spaces / legacy plans).
     - FOCUS: the explicitly focused ``[>]`` task — NO fallback to
       the first open task (the hint line directs the user to set a
       focus instead).
     - NEXT: first open ``[ ]`` task after the FOCUS task (first
       open overall when no focus is set).
-    - ``note_id`` / ``note_text``: the stored active-task process
-      note, attributed only while its task still exists in the plan.
-      A noted OPEN task that is NOT the focus is a paused/unfocused
-      task — ``note_id`` points at it so the verbose block renders a
-      dedicated "Unfocused / Paused Context" entry instead of
-      pinning the note under Focus/Next.
+    - ``note_id`` / ``note_text``: the focused task's process note
+      (from ``note_data``), attributed only while the noted task
+      still exists in the plan.
     """
     focus = tl.focused[0] if tl.focused else None
 
     prev = None
-    if focus is not None:
-        for t in tl.tasks:
-            if t.id == focus.id:
-                break
-            if t.status == TaskStatus.DONE:
-                prev = t
-    elif tl.done:
-        prev = tl.done[-1]
+    if history:
+        prev = history[-1]
+    else:
+        in_file_done = [t for t in tl.tasks if t.status == TaskStatus.DONE]
+        if in_file_done:
+            prev = in_file_done[-1]
 
     nxt = None
     start = 0
@@ -3915,132 +3814,6 @@ def _status_triad(tl: TaskList, note_data: Optional[dict] = None
 
     return prev, focus, nxt, note_id, note_text
 
-
-# Maximum number of tasks listed BY NAME per WORK CONTEXT section
-# (``<< Done`` and ``[!] Skipped``); anything beyond folds into the
-# header's "(N tasks)" count plus a "... (+N more ...)" overflow line
-# so a long tail of gaps can never flood the block. The displayed
-# tasks are the ones CLOSEST to the active focus.
-_CONTEXT_SHOWN_LIMIT = 2
-
-
-@dataclass
-class _StatusContext:
-    """Resolved 4-element WORK CONTEXT view state for ``ck st``.
-
-    - ``done``: every completed task before the progress point,
-      ordered so the ones closest to the focus come last — the
-      renderer shows the last 2 (display limit) and folds the rest
-      into a count header + overflow line.
-    - ``skipped``: open tasks genuinely left behind — ONLY computed
-      when an explicit focus sits after the last completed task and
-      open tasks fall strictly BETWEEN that completion and the
-      focus (literal gaps in execution order). A no-focus view
-      never reports skipped tasks: the auto-resolved Next candidate
-      is the first open task, so nothing can precede it, and the
-      sequential tail is backlog — never "skipped".
-    - ``current`` / ``is_focus``: the explicitly focused task, or
-      the first open task auto-resolved as the Next candidate
-      (display only — the plan state is never mutated).
-    - ``upcoming``: the first open task after ``current``.
-    - ``backlog``: the TOTAL remaining uncompleted work — every
-      non-done task (``len(tl.tasks) - len(tl.done)``). It is the
-      bottom banner count and is deliberately NOT reduced by tasks
-      shown in Focus/Next, Upcoming, Skipped, or the Unfocused /
-      Paused Context block — those sections name tasks, the banner
-      reports the overall remaining workload.
-    """
-
-    done: list
-    skipped: list
-    current: Optional[Task]
-    is_focus: bool
-    upcoming: Optional[Task]
-    backlog: list
-
-
-def _status_context(tl: TaskList) -> _StatusContext:
-    """Resolve the WORK CONTEXT view state (``ck st``).
-
-    The progress point is the explicit focus when set; otherwise the
-    FIRST open task is auto-resolved as the Next candidate (without
-    mutating the plan). Done context is every completion before the
-    point (focus case) or overall (candidate case) — the renderer
-    applies the 2-task display limit.
-
-    Skipped tasks only exist when a task is explicitly focused and
-    open tasks were passed over between the last completion and that
-    focus. Without a focus the Next candidate is the first open task,
-    so nothing can be skipped — the sequential tail is backlog.
-
-    The backlog is the TOTAL remaining uncompleted work —
-    ``len(tl.tasks) - len(tl.done)`` — never reduced by the tasks
-    shown in Focus/Next, Upcoming, Skipped, or the Unfocused /
-    Paused Context block; only its count is shown (bottom banner).
-    """
-    focus = tl.focused[0] if tl.focused else None
-    opens = tl.open
-
-    if focus is not None:
-        current, is_focus = focus, True
-    elif opens:
-        current, is_focus = opens[0], False
-    else:
-        current, is_focus = None, False
-
-    pos = {t.id: i for i, t in enumerate(tl.tasks)}
-
-    if is_focus and current is not None:
-        done = [
-            t for i, t in enumerate(tl.tasks)
-            if t.status == TaskStatus.DONE and i < pos[current.id]
-        ]
-    else:
-        done = list(tl.done)
-
-    upcoming = None
-    if current is not None:
-        for t in tl.tasks[pos[current.id] + 1:]:
-            if t.status == TaskStatus.OPEN:
-                upcoming = t
-                break
-
-    skipped: list = []
-    if is_focus and current is not None:
-        cur_pos = pos[current.id]
-        excluded = {current.id}
-        if upcoming is not None:
-            excluded.add(upcoming.id)
-        # Anchor on the last completion BEFORE the focus: only opens
-        # sitting strictly between it and the focus were genuinely
-        # passed over. With no earlier completion the anchor is the
-        # start of the list (-1), so every open before the focus
-        # counts as a gap in execution order.
-        anchor = -1
-        for i, t in enumerate(tl.tasks):
-            if t.status == TaskStatus.DONE and i < cur_pos:
-                anchor = i
-        skipped = [
-            t for i, t in enumerate(tl.tasks)
-            if t.status == TaskStatus.OPEN
-            and t.id not in excluded
-            and anchor < i < cur_pos
-        ]
-
-    # Backlog = TOTAL remaining work (Total − Done). Tasks shown in
-    # Focus/Next, Upcoming, Skipped, or Unfocused / Paused Context
-    # are NOT subtracted: those sections name individual tasks while
-    # the bottom banner counts the overall uncompleted workload.
-    backlog = [t for t in tl.tasks if t.status != TaskStatus.DONE]
-
-    return _StatusContext(
-        done=done,
-        skipped=skipped,
-        current=current,
-        is_focus=is_focus,
-        upcoming=upcoming,
-        backlog=backlog,
-    )
 
 
 def _coerce_note_entries(value) -> list[dict]:
@@ -4109,102 +3882,53 @@ def _note_display_lines(entries, indent: str, palette) -> list[str]:
 
 def _render_local_status(ck: ContextKeeper, tl: TaskList,
                          *, palette: Optional["ui.Palette"] = None,
-                         source: str = "local") -> str:
-    """Render the compact single-project status block.
+                         source: str = "local",
+                         history_shown: int = 3) -> str:
+    """Render the compact single-project status block (v0.13.0 view).
 
-    Structure (spec-exact in plain-text mode, PURE ASCII — no emoji
-    or box-drawing glyphs, so no terminal font fallback is ever
-    needed). The WORK CONTEXT section is an ordered vertical list
-    (Done / conditional Skipped / Focus|Next / Upcoming / optional
-    Unfocused / Paused Context / Backlog bottom banner):
-    every active section renders a header line with its task items
-    indented on new lines below it, one ``- [ID] Title [st]`` per
-    line::
+    PLAN.md holds ACTIVE work only (``[ ]`` / ``[>]`` / ``[~]``);
+    completions live in ``HISTORY.md``. The view therefore has four
+    sections — Focus / Next / Paused / last N history — plus the
+    progress header and the Backlog banner:
 
         =============================================================
          > <project_name> [v<version>]
- [%] Progress: <done>/<total> tasks done (<pct>%)
- [!] No active focus set. Run 'ck start <ID>'...  (no focus, pending exists;
-                                                    read-only hint — PLAN.md
-                                                    is never auto-focused)
- -> CURRENT FOCUS: [#<id>] <title>   (explicit focus only)
-    * Note: <process note>            (only when set)
+     [%] Progress: <done>/<total> tasks done (<pct>%)   (done from
+                              HISTORY.md; <total> = done + active)
+     -> CURRENT FOCUS: [#<id>] <title>   (explicit focus only)
+        * Note: <process note>            (only when set)
+     [!] No active focus set. Run 'ck start <ID>'...  (no focus)
 
          -> WORK CONTEXT:
-            << Done (N tasks):               last 2, closest to focus
-               - [<id>] <title> [x]
-               - [<id>] <title> [x]
-               ... (+<N> more done)
-            [!] Skipped (N tasks):   ONLY with a real execution gap
-               - [<id>] <title> [ ]   (open between last Done and Focus);
-               - [<id>] <title> [ ]   section is OMITTED when empty
-               ... (+<N> more skipped)
-            [>] Focus:                          (focus set via ck start)
-               - [<id>] <title>
-            [>] Next:                        (auto-candidate, no focus;
-               - [<id>] <title> [ ]              never mutates)
-            >> Upcoming:                          (follows Focus/Next)
+            [>] Focus:                       (explicit focus)
+               - [#<id>] <title>
+            [>] Next:                     (auto-candidate, no focus)
                - [<id>] <title> [ ]
-            Unfocused / Paused Context:  (noted open task that lost focus)
+            [~] Paused:                     (parked by `ck focus`)
                - [<id>] <title>
                  * Note: <note text>
-            >> Backlog: <N> task(s) remaining  (BOTTOM BANNER: total
-                               remaining uncompleted tasks — Total −
-                               Done; amber background highlight —
-                               never reduced by the sections above)
-        =============================================================
+            [x] History (last 3):        (from .ck/HISTORY.md)
+               - [x] 2026-11-04 16:45: <title>
+               ... (+N more in .ck/HISTORY.md)
+            >> Backlog: <N> task(s) remaining  (BOTTOM BANNER: active
+                              work; amber background highlight)
+        ==============================================================
 
-    DISPLAY LIMITS: ``<< Done`` and ``[!] Skipped`` show at most
-    ``_CONTEXT_SHOWN_LIMIT`` (2) tasks each — the ones closest to the
-    active focus. When a section holds more than 2 tasks its header
-    gains a ``(N tasks)`` count and the item list ends with an
-    overflow line: ``... (+N more done)`` / ``... (+N more skipped)``.
-    ``[>] Focus`` / ``[>] Next`` / ``>> Upcoming`` carry a single item
-    and never overflow. Empty sections keep the inline hint form
-    (``<< Done: (none completed)``) on the header line.
+    ``history_shown`` caps the History section (default 3; the CLI
+    passes ``ck st --history N``). ``source`` mirrors
+    :class:`ProjectContext`: a ``"global"`` fallback appends an
+    accent ``<- <path>`` hint to the header.
 
-    SKIPPED: appears ONLY when a task is explicitly focused and open
-    tasks were passed over between the last completed task and that
-    focus (a literal gap in execution order). Sequential upcoming
-    tasks are NEVER labelled Skipped — they belong to the backlog.
-    With no focus at all the section is absent, since the Next
-    candidate is by definition the first open task.
+    The keeper is DUCK-TYPED so global spaces render through the same
+    function (``_SpaceKeeperView``): ``history_entries()`` supplies
+    completed entries when present; without it (or when it yields
+    nothing) in-file ``[x]`` rows feed the progress ratio and the
+    History section instead — the legacy/space layout keeps working.
 
-    BACKLOG: the bottom banner line (``>> Backlog: +N tasks
-    remaining``) reporting the TOTAL remaining uncompleted tasks —
-    ``Total − Done``. It is deliberately NOT reduced by the tasks
-    shown in Focus/Next, Upcoming, Skipped, or the Unfocused /
-    Paused Context block: those sections name individual tasks,
-    while the banner counts the overall remaining workload. It is
-    the VERY LAST line of the WORK CONTEXT section, rendered with
-    an orange/amber background highlight (inverted, bold
-    black-on-amber — see :meth:`cklib.ui.Palette.banner`) so it
-    visually pops as a bottom banner in terminal displays.
-
-    UNFOCUSED / PAUSED CONTEXT: a still-open task that lost focus
-    (via ``ck start <NEW_ID>`` or a focus reset) while carrying the
-    process note is rendered in a dedicated block — its note travels
-    with it. The single active note is NOT duplicated under
-    Focus/Next when the noted task is paused.
-
-    ``source`` mirrors :class:`ProjectContext` resolution: a
-    ``"global"`` fallback appends an accent ``<- <path>`` hint to the
-    header so the user sees WHICH registered project was loaded from
-    an unrelated directory.
-
-    COLOR / CONTRAST: when the output stream supports ANSI (TTY, or
-    FORCE_COLOR/CLICOLOR_FORCE; never under NO_COLOR), the palette
-    from :mod:`cklib.ui` highlights the hierarchy — bold cyan
-    project name, bold section header, green done line, yellow
-    skipped line, bold yellow focus/next line, bold cyan note.
-    Secondary text (hints, progress labels, ratios at 0%), structural
-    borders and accent metadata INHERIT the terminal's native text
-    color by default — no DIM, no hardcoded dark gray — and remain
-    restyleable via the ``colors`` mapping in the project's
-    ``.ck.json`` (see :meth:`ContextKeeper.color_overrides`). The
-    plain-text fallback is byte-identical to the colorless rendering
-    (a disabled palette is the identity transform). ``palette``
-    overrides auto-detection (tests pin a deterministic palette).
+    COLOR / CONTRAST: the palette highlights the hierarchy (bold cyan
+    project name, bold yellow focus, green history, amber banner);
+    a disabled palette is the identity transform, so the plain-text
+    fallback is byte-identical. ``palette`` overrides auto-detection.
     """
     if palette is not None:
         p = palette
@@ -4221,9 +3945,33 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
         header += f" {p.accent(f'<- {ck.root}')}"
     lines.append(header)
 
-    done_count = len(tl.done)
-    total = tl.total
-    pct = tl.completion_pct
+    # Completed entries: HISTORY.md ledger for projects; spaces (and
+    # any duck-typed view without a history getter) fall back to the
+    # in-file ``[x]`` rows.
+    entries: list = []
+    getter = getattr(ck, "history_entries", None)
+    if callable(getter):
+        try:
+            entries = list(getter())
+        except Exception:
+            entries = []
+    in_file_done = [t for t in tl.tasks if t.status == TaskStatus.DONE]
+    if not callable(getter) and in_file_done:
+        # Spaces / legacy plans have no HISTORY.md getter: the
+        # in-file ``[x]`` rows ARE the ledger, so the synthesized
+        # entries REPLACE the raw count (never double-counted).
+        entries = [
+            HistoryEntry(timestamp="", title=f"{t.id}. {t.title}")
+            for t in in_file_done
+        ]
+        done_count = len(in_file_done)
+    else:
+        # A HISTORY.md ledger plus (legacy/hand-written) in-file
+        # ``[x]`` rows both count toward completion.
+        done_count = len(entries) + len(in_file_done)
+    active_count = sum(1 for t in tl.tasks if t.status.is_active)
+    total = done_count + active_count
+    pct = round(100.0 * done_count / total, 1) if total else 0.0
     pct_str = f"({pct}%)"
     progress = (
         f" {p.muted('[%] Progress:')} {p.bold(f'{done_count}/{total}')} "
@@ -4234,25 +3982,22 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
         progress += f" {p.muted(f'(gaps: {_collapse_ids(gap_ids)})')}"
     lines.append(progress)
 
-    # 0) Top-level focus visibility: the active task is duplicated at
-    #    the very top (immediately below header/progress) so the user
-    #    never has to scan the list blocks for it. Explicit focus
-    #    only — the auto-resolved Next candidate is NOT advertised
-    #    as a focus (the [>] Next section keeps that nuance).
-    top_focus = tl.focused[0] if tl.focused else None
-    if top_focus is not None:
-        top_entries = ck.get_note_entries(top_focus.id)
+    # Explicit focus: duplicated at the very top so the user never
+    # has to scan the list blocks for it.
+    focus = tl.focused[0] if tl.focused else None
+    if focus is not None:
         lines.append("")
         lines.append(
             " -> CURRENT FOCUS: "
-            + p.bold_yellow(f"[#{top_focus.id}] {top_focus.title}"))
-        lines.extend(_note_display_lines(top_entries, "    ", p))
+            + p.bold_yellow(f"[#{focus.id}] {focus.title}"))
+        lines.extend(_note_display_lines(
+            ck.get_note_entries(focus.id), "    ", p))
 
     # 0b) No active focus: guide the user to ``ck start`` instead of
     #     silently auto-focusing. The read path NEVER mutates PLAN.md;
     #     the first pending task is only recommended as the start ID
     #     and surfaced under ``[>] Next:`` below.
-    if top_focus is None:
+    if focus is None:
         first_pending = tl.open[0] if tl.open else None
         if first_pending is not None:
             start_cmd = ck.start_command()
@@ -4265,147 +4010,76 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
     lines.append("")
     lines.append(p.bold(" -> WORK CONTEXT:"))
 
-    ctx = _status_context(tl)
-
-    # 1) << Done: the completions immediately before the progress
-    #    point — last 2 shown, the rest folded into count + overflow.
-    if ctx.done:
-        shown = ctx.done[-_CONTEXT_SHOWN_LIMIT:]
-        hidden = len(ctx.done) - len(shown)
-        if hidden > 0:
-            lines.append(
-                p.green(f"    << Done ({len(ctx.done)} tasks):"))
-        else:
-            lines.append(p.green("    << Done:"))
-        for t in shown:
-            lines.append(p.green(f"       - [{t.id}] {t.title} [x]"))
-        if hidden > 0:
-            lines.append(p.green(f"       ... (+{hidden} more done)"))
-    else:
-        lines.append(p.muted("    << Done: (none completed)"))
-
-    # Active note + paused-task ledger: the ``paused_tasks``
-    # registry is the single source of truth for the "Unfocused /
-    # Paused Context" block — EVERY open task that previously held
-    # focus appears there (with its bound notes, if any), so unnoted
-    # or previously paused tasks can never vanish into the generic
-    # skipped list. Notes attached directly to another open task via
-    # ``ck note <ID>`` are surfaced there too.
-    paused_display: list = []  # (id, title, entries) triples
-    paused_ids: set = set()
-    for entry in ck._paused_tasks():
-        p_task = tl.by_id(entry["id"])
-        if p_task is None or p_task.status != TaskStatus.OPEN:
-            continue
-        if ctx.current is not None and p_task.id == ctx.current.id:
-            continue
-        if p_task.id in paused_ids:
-            continue
-        paused_ids.add(p_task.id)
-        entries = entry.get("notes") or _coerce_note_entries(
-            entry.get("note", ""))
-        paused_display.append((p_task.id, p_task.title, entries))
-    for noted_task in tl.open:
-        if noted_task.id in paused_ids:
-            continue
-        if ctx.current is not None and noted_task.id == ctx.current.id:
-            continue
-        entries = ck.get_note_entries(noted_task.id)
-        if entries:
-            paused_ids.add(noted_task.id)
-            paused_display.append(
-                (noted_task.id, noted_task.title, entries))
-    # The notes bound to the DISPLAYED Focus/Next task render inline
-    # under it — whether they sit in the active slot or in the paused
-    # registry (e.g. right after a re-focus or a focus reset).
-    inline_entries: list = []
-    if ctx.current is not None:
-        inline_entries = ck.get_note_entries(ctx.current.id)
-
-    # 2) [!] Skipped: opens genuinely passed over between the last
-    #    completion and the explicit focus, BY NAME (capped, closest
-    #    to the focus first). The section is OMITTED entirely when
-    #    there is no real execution gap — sequential upcoming tasks
-    #    are backlog, never skipped. Tasks rendered in the
-    #    Unfocused / Paused Context block are excluded here so a
-    #    paused task never doubles up in the generic skipped list.
-    skipped_visible = [
-        t for t in ctx.skipped if t.id not in paused_ids
-    ]
-    if skipped_visible:
-        shown = skipped_visible[:_CONTEXT_SHOWN_LIMIT]
-        hidden = len(skipped_visible) - len(shown)
-        if hidden > 0:
-            lines.append(
-                p.yellow(
-                    f"    [!] Skipped ({len(skipped_visible)} tasks):"))
-        else:
-            lines.append(p.yellow("    [!] Skipped:"))
-        for t in shown:
-            lines.append(p.yellow(f"       - [{t.id}] {t.title} [ ]"))
-        if hidden > 0:
-            lines.append(
-                p.yellow(f"       ... (+{hidden} more skipped)"))
-
-    # 3) [>] Focus (explicit) or Next (auto-resolved candidate —
+    # 1) [>] Focus (explicit) or Next (auto-resolved candidate —
     #    display only, the plan is never mutated).
-    if ctx.is_focus and ctx.current is not None:
+    if focus is not None:
         lines.append("    [>] Focus:")
         lines.append(
-            f"       - "
-            f"{p.bold_yellow(f'[{ctx.current.id}] {ctx.current.title}')}"
-        )
-        lines.extend(_note_display_lines(
-            inline_entries, "       ", p))
-    elif ctx.current is not None:
-        t = ctx.current
+            "       - "
+            + p.bold_yellow(f"[#{focus.id}] {focus.title}"))
+    elif tl.open:
+        t = tl.open[0]
         lines.append("    [>] Next:")
         lines.append(
             f"       - {p.bold_yellow(f'[{t.id}] {t.title}')} [ ]"
         )
-        lines.extend(_note_display_lines(
-            inline_entries, "       ", p))
     else:
         lines.append(p.muted("    [>] Next: (no open tasks)"))
 
-    # 4) >> Upcoming: the next pending task after Focus/Next.
-    if ctx.upcoming is not None:
-        lines.append(p.muted("    >> Upcoming:"))
-        lines.append(
-            p.muted(
-                f"       - [{ctx.upcoming.id}] "
-                f"{ctx.upcoming.title} [ ]"
-            )
-        )
-    else:
-        lines.append(p.muted("    >> Upcoming: (none)"))
-
-    # 5) Unfocused / Paused Context: every still-open task that
-    #    previously held focus (the paused_tasks ledger), each with
-    #    its bound note when one was attached — unnoted pauses stay
-    #    visible too instead of sinking into the skipped list.
+    # 2) [~] Paused: every task parked by ``ck focus`` (``[~]``), with
+    #    its inline notes. Spaces have no ``[~]`` writer; their view
+    #    surfaces noted open tasks here instead (the closest analogue).
+    paused_display: list = []  # (id, title, entries) triples
+    paused_ids: set = set()
+    for entry in ck._paused_tasks():
+        p_task = tl.by_id(entry["id"])
+        if p_task is None or p_task.status == TaskStatus.DONE:
+            continue
+        if focus is not None and p_task.id == focus.id:
+            continue
+        if p_task.id in paused_ids:
+            continue
+        p_entries = _coerce_note_entries(entry.get("notes")) \
+            or _coerce_note_entries(entry.get("note", ""))
+        if p_task.status != TaskStatus.PAUSED and not p_entries:
+            # Space adapter: an unnoted open task is backlog.
+            continue
+        paused_ids.add(p_task.id)
+        paused_display.append((p_task.id, p_task.title, p_entries))
     if paused_display:
-        lines.append(p.bold_yellow("    Unfocused / Paused Context:"))
+        lines.append(p.bold_yellow("    [~] Paused:"))
         for pid, ptitle, pentries in paused_display:
             lines.append(f"       - [{pid}] {ptitle}")
-            lines.extend(_note_display_lines(
-                pentries, "         ", p))
+            lines.extend(_note_display_lines(pentries, "         ", p))
+    else:
+        lines.append(p.muted("    [~] Paused: (none)"))
 
-    # 6) >> Backlog: BOTTOM BANNER of the WORK CONTEXT block — the
-    #    total remaining uncompleted tasks (Total − Done). Tasks
-    #    shown in Focus/Next, Upcoming, Skipped, or Unfocused /
-    #    Paused Context are NOT subtracted — 0 stays 0 when nothing
-    #    is left. Rendered with an orange/amber background highlight
-    #    (bold black-on-amber) so it visually pops as the block's
-    #    last line.
-    remaining = len(ctx.backlog)
-    noun = "task" if remaining == 1 else "tasks"
+    # 3) [x] History: the last N completed entries from the ledger.
+    if history_shown is None or history_shown < 0:
+        history_shown = 3
+    shown_entries = entries[-history_shown:] if history_shown else []
+    lines.append(p.green(f"    [x] History (last {history_shown}):"))
+    if shown_entries:
+        for entry in shown_entries:
+            stamp = f"{entry.timestamp}: " if entry.timestamp else ""
+            lines.append(p.green(f"       - [x] {stamp}{entry.title}"))
+        hidden = len(entries) - len(shown_entries)
+        if hidden > 0:
+            lines.append(p.green(
+                f"       ... (+{hidden} more in .ck/{HISTORY_FILENAME})"))
+    else:
+        lines.append(p.muted("       (none completed)"))
+
+    # 4) >> Backlog: BOTTOM BANNER of the WORK CONTEXT block — the
+    #    total active (uncompleted) tasks. Rendered with an
+    #    orange/amber background highlight (bold black-on-amber) so
+    #    it visually pops as the block's last line.
+    noun = "task" if active_count == 1 else "tasks"
     lines.append(
-        p.banner(f"    >> Backlog: {remaining} {noun} remaining"))
+        p.banner(f"    >> Backlog: {active_count} {noun} remaining"))
 
     lines.append(p.border(bar))
     return "\n".join(lines)
-
 
 def _render_tasks_listing(tl: TaskList,
                           notes: Optional[dict[int, str]] = None,
@@ -4493,7 +4167,8 @@ def _render_notes_listing(ck: ContextKeeper, tl: TaskList) -> str:
     seen: set = set()
     for entry in ck._paused_tasks():
         p_task = tl.by_id(entry["id"])
-        if p_task is None or p_task.status != TaskStatus.OPEN:
+        if p_task is None or p_task.status not in (
+                TaskStatus.OPEN, TaskStatus.PAUSED):
             continue
         if focus is not None and p_task.id == focus.id:
             continue
@@ -4756,6 +4431,10 @@ def _render_dashboard(ck: Optional[ContextKeeper], *, list_projects,
             "is_cwd": bool(cwd and entry.path == cwd),
             "tl": tl_local,
             "condition": "ok",
+            "history_count": (
+                _safe_history_count(path / CK_DIR_NAME / HISTORY_FILENAME)
+                if on_disk else 0
+            ),
         }
         if not on_disk:
             state["condition"] = "missing"
@@ -4780,108 +4459,75 @@ def _render_dashboard(ck: Optional[ContextKeeper], *, list_projects,
     return ops_block + "\n\n" + rendered
 
 
+def _safe_history_entries(history_path: Path) -> list:
+    """Completed entries parsed from ``.ck/HISTORY.md`` (``[]`` on error).
+
+    Dashboard helper: the completions now live in the ledger file,
+    next to (not inside) PLAN.md. A missing/unparseable file yields
+    ``[]`` — a single corrupt project never crashes the table.
+    """
+    try:
+        return list(parse_history_file(history_path))
+    except (OSError, ValueError, UnicodeDecodeError):
+        return []
+
+
+def _safe_history_count(history_path: Path) -> int:
+    """Number of completed entries in ``.ck/HISTORY.md`` (0 on error)."""
+    return len(_safe_history_entries(history_path))
+
+
 def read_paused_tasks(project_root: Path) -> list[dict]:
-    """Read the ``paused_tasks`` registry for a project directory.
+    """Read the plan's paused tasks (``[~]``) for a project directory.
 
     Standalone reader for cross-project rendering (``ck dashboard
-    -v``): loads ``<project>/.ck/state.json`` directly and returns
-    the valid ``paused_tasks`` entries (``{"id": int, "title":
-    str, "note": str}``) in stored order, tolerating absent or
-    corrupt state. Mirrors :meth:`ContextKeeper._paused_tasks`
-    structural validation minus the plan-membership check (the
-    caller resolves tasks against its own parsed plan).
+    -v``): parses ``<project>/.ck/PLAN.md`` directly and returns the
+    ``[~]`` tasks as ``{"id": int, "title": str, "notes": entries}``
+    in document order, tolerating an absent or corrupt plan.
+    Mirrors :meth:`ContextKeeper._paused_tasks` minus the stateful
+    registry (v0.13.0 keeps pausing INSIDE the plan file).
     """
-    state_file = Path(project_root) / CK_DIR_NAME / STATE_FILENAME
+    plan_file = Path(project_root) / CK_DIR_NAME / PLAN_FILENAME
     try:
-        data = json.loads(state_file.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        tl = parse_plan_file(plan_file)
+    except (OSError, ValueError, UnicodeDecodeError):
         return []
-    if not isinstance(data, dict):
-        return []
-    data = note_store.migrate_notes(
-        data, note_store.file_mtime_iso(state_file))
-    raw = data.get("paused_tasks")
-    if not isinstance(raw, list):
-        return []
-    ledger = data.get("notes")
-    out: list[dict] = []
-    seen: set = set()
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        tid = item.get("id")
-        title = item.get("title")
-        note = item.get("note")
-        if not isinstance(tid, int) or isinstance(tid, bool) \
-                or tid in seen:
-            continue
-        if not isinstance(title, str) or not isinstance(note, str):
-            continue
-        seen.add(tid)
-        entries: list[dict] = []
-        if isinstance(ledger, dict):
-            value = ledger.get(str(tid))
-            if isinstance(value, list):
-                entries = [
-                    {"text": entry["text"], "created": entry["created"]}
-                    for entry in value
-                    if isinstance(entry, dict)
-                    and isinstance(entry.get("text"), str)
-                    and entry.get("text")
-                    and isinstance(entry.get("created"), str)
-                    and entry.get("created")
-                ]
-        out.append({
-            "id": tid, "title": title, "note": note, "notes": entries,
-        })
-    return out
+    return [
+        {
+            "id": task.id,
+            "title": task.title,
+            "notes": [dict(entry) for entry in (task.notes or ())],
+        }
+        for task in tl.paused
+    ]
 
 
 def read_active_task_note(project_root: Path) -> Optional[dict]:
-    """Read the stored active-task note dict for a project directory.
+    """Read the focused task's note dict for a project directory.
 
     Standalone reader for cross-project rendering (``ck dashboard
-    -v``): loads ``<project>/.ck/state.json`` directly and returns
-    the structurally valid ``active_task`` entry (int ``id``) with
-    its newest note text derived from the canonical ledger, or None
-    when absent, corrupt, hand-edited, or noteless. Mirrors
+    -v``): parses ``<project>/.ck/PLAN.md`` directly and returns the
+    focused ``[>]`` task with its newest INLINE note text, or None
+    when absent, corrupt, unfocused, or noteless. Mirrors
     :meth:`ContextKeeper.get_note` validation.
     """
-    state_file = Path(project_root) / CK_DIR_NAME / STATE_FILENAME
+    plan_file = Path(project_root) / CK_DIR_NAME / PLAN_FILENAME
     try:
-        data = json.loads(state_file.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        tl = parse_plan_file(plan_file)
+    except (OSError, ValueError, UnicodeDecodeError):
         return None
-    if not isinstance(data, dict):
+    focus = tl.focused[0] if tl.focused else None
+    if focus is None:
         return None
-    data = note_store.migrate_notes(
-        data, note_store.file_mtime_iso(state_file))
-    active = data.get("active_task")
-    if not isinstance(active, dict):
-        return None
-    tid = active.get("id")
-    if not isinstance(tid, int) or isinstance(tid, bool):
-        return None
-    entries: list[dict] = []
-    ledger = data.get("notes")
-    if isinstance(ledger, dict):
-        value = ledger.get(str(tid))
-        if isinstance(value, list):
-            entries = [
-                {"text": entry["text"], "created": entry["created"]}
-                for entry in value
-                if isinstance(entry, dict)
-                and isinstance(entry.get("text"), str)
-                and entry.get("text")
-                and isinstance(entry.get("created"), str)
-                and entry.get("created")
-            ]
+    entries = [dict(entry) for entry in (focus.notes or ())]
     if not entries:
         return None
-    result = dict(active)
-    result["note"] = entries[-1]["text"]
-    result["notes"] = entries
-    return result
+    return {
+        "id": focus.id,
+        "title": focus.title,
+        "note": entries[-1]["text"],
+        "notes": entries,
+    }
 
 
 # ---------------------------------------------------------------------- #
@@ -5261,8 +4907,13 @@ def _render_dashboard_table(states: list,
                 focus_text = t.title
             else:
                 focus_head, focus_text = "(no focus)", ""
-            progress = _progress_cell(len(tl_local.done), tl_local.total,
-                                      tl_local.completion_pct)
+            done_count = s.get("history_count", 0) + sum(
+                1 for t in tl_local.tasks if t.status == TaskStatus.DONE)
+            active_count = sum(
+                1 for t in tl_local.tasks if t.status.is_active)
+            total = done_count + active_count
+            pct = round(100.0 * done_count / total, 1) if total else 0.0
+            progress = _progress_cell(done_count, total, pct)
 
         rows.append(_grid_row(
             name, entry.path, focus_head, focus_text, progress, last,
@@ -5608,21 +5259,26 @@ def _render_spaces_verbose(space_order: list,
 
 def _render_verbose_triad(tl: TaskList, note_data: Optional[dict],
                           paused_entries: list,
+                          history: Optional[list] = None,
                           palette: Optional[ui.Palette] = None
                           ) -> list[str]:
     """Progress + PREV / FOCUS / NEXT lines for ONE verbose card.
 
     Shared by the registered-project cards and the global-space cards
     so the two views can never drift apart: both resolve the same
-    :func:`_status_triad` from the same parsed plan and paint the same
-    ledger:
+    :func:`_status_triad` from the same parsed plan and paint the
+    same ledger:
 
-    - ``note_data`` — ``{"id", "note"}`` for the plan's active note
-      (a project's ``.ck/state.json`` ``active_task`` / a space's
-      JSON sidecar), or None;
-    - ``paused_entries`` — ``{"id", "title", "note"}`` records of
-      the unfocused/paused ledger, already resolved for this plan by
-      the caller;
+    - ``note_data`` — ``{"id", "note"}`` for the plan's focused-task
+      note (a project's PLAN.md inline notes / a space's JSON
+      sidecar), or None;
+    - ``paused_entries`` — ``{"id", "title", "notes"}`` records of
+      the paused ledger (``[~]`` tasks for projects; noted open
+      tasks for spaces), already resolved for this plan by the
+      caller;
+    - ``history`` — completed entries (HISTORY.md for projects;
+      in-file ``[x]`` synthesis for spaces) feeding the progress
+      ratio and the PREV line;
     - ``palette`` — the resolved palette; a disabled one is the
       identity transform, so the plain-text fallback is unchanged.
 
@@ -5631,49 +5287,51 @@ def _render_verbose_triad(tl: TaskList, note_data: Optional[dict],
     """
     p = palette if palette is not None else ui.get_palette()
     out: list[str] = []
-    done_count = len(tl.done)
-    pct_str = f"({tl.completion_pct}%)"
+    entries = list(history or [])
+    in_file_done = [t for t in tl.tasks if t.status == TaskStatus.DONE]
+    done_count = len(entries) + len(in_file_done)
+    active_count = sum(1 for t in tl.tasks if t.status.is_active)
+    total = done_count + active_count
+    pct = round(100.0 * done_count / total, 1) if total else 0.0
+    pct_str = f"({pct}%)"
     out.append(
         "    " + p.bold("[%] Progress: ")
-        + p.bold(f"{done_count}/{tl.total}") + " tasks done "
+        + p.bold(f"{done_count}/{total}") + " tasks done "
         + (p.green(pct_str) if done_count else p.muted(pct_str))
     )
-    if tl.total > 0 and done_count == tl.total:
+    if total > 0 and active_count == 0:
         out.append(p.green("    -> Context: (all tasks completed)"))
         return out
 
     out.append(p.bold("    -> Context:"))
-    prev, focus, nxt, note_id, note_text = _status_triad(tl, note_data)
+    prev, focus, nxt, note_id, note_text = _status_triad(
+        tl, history=entries, note_data=note_data)
     note_entries = _coerce_note_entries(
         note_data.get("notes") if isinstance(note_data, dict) else None
     ) or _coerce_note_entries(note_text)
-    # Paused ledger: every open task that lost focus (or, for
-    # spaces, every open task carrying a note), with its bound notes.
-    # The Focus/Next anchor is excluded — its notes render inline
-    # instead (a noteless pause stays visible).
+    # Paused ledger: every ``[~]`` task (or, for spaces, every open
+    # task carrying a note), with its bound notes. The Focus/Next
+    # anchor is excluded — its notes render inline instead (a
+    # noteless pause stays visible).
     anchor = focus if focus is not None else nxt
     paused_map: dict = {}
     for p_entry in paused_entries:
         p_task = tl.by_id(p_entry["id"])
-        if p_task is None or p_task.status != TaskStatus.OPEN:
+        if p_task is None:
+            continue
+        if p_task.status not in (TaskStatus.PAUSED, TaskStatus.OPEN):
+            continue
+        if p_task.status == TaskStatus.OPEN and not (
+                p_entry.get("notes") or _coerce_note_entries(
+                    p_entry.get("note", ""))):
+            # Spaces: an unnoted open task is backlog, not paused.
             continue
         if anchor is not None and p_task.id == anchor.id:
             continue
-        entries = _coerce_note_entries(p_entry.get("notes")) \
+        p_entries = _coerce_note_entries(p_entry.get("notes")) \
             or _coerce_note_entries(p_entry.get("note", ""))
-        paused_map[p_task.id] = (p_task.title, entries)
-    # Legacy bridge: an active_task note pointing at a non-anchored
-    # open task (state written by an older version) renders as a
-    # paused entry too.
-    if (note_id is not None and note_text
-            and (anchor is None or note_id != anchor.id)):
-        noted = tl.by_id(note_id)
-        if (noted is not None
-                and noted.status == TaskStatus.OPEN
-                and noted.id not in paused_map):
-            paused_map[noted.id] = (noted.title, note_entries)
-    # The notes bound to the anchor render inline under it — from
-    # the active slot or the paused ledger.
+        paused_map[p_task.id] = (p_task.title, p_entries)
+    # The notes bound to the anchor render inline under it.
     inline_entries: list = []
     if anchor is not None:
         if note_id == anchor.id and note_entries:
@@ -5687,10 +5345,14 @@ def _render_verbose_triad(tl: TaskList, note_data: Optional[dict],
                     or _coerce_note_entries(p_entry.get("note", ""))
                 if inline_entries:
                     break
-    # --- PREV: the last completion before the focus (muted, past) ---
+    # --- PREV: the newest completion (muted, past) ---
     out.append("       " + p.muted("<< PREV"))
     if prev is not None:
-        out.append(p.green(f"          [{prev.id}] {prev.title} [x]"))
+        if isinstance(prev, HistoryEntry):
+            stamp = f"{prev.timestamp}: " if prev.timestamp else ""
+            out.append(p.green(f"          [x] {stamp}{prev.title}"))
+        else:
+            out.append(p.green(f"          [{prev.id}] {prev.title} [x]"))
     else:
         out.append(p.muted("          (none completed)"))
     # --- FOCUS: the anchor of the whole card (bold yellow, loudest) ---
@@ -5707,7 +5369,7 @@ def _render_verbose_triad(tl: TaskList, note_data: Optional[dict],
         out.append(f"          [{nxt.id}] {nxt.title} [ ]")
     else:
         out.append(p.muted("          (no open tasks)"))
-    # --- Paused ledger: notes parked on non-anchor open tasks ---
+    # --- Paused ledger: notes parked on ``[~]``/non-anchor tasks ---
     if paused_map:
         out.append("       " + notice(WARN, "Unfocused / Paused "
                                          "Context:", p))
@@ -5741,7 +5403,8 @@ def _card_rule(palette: Optional[ui.Palette] = None) -> str:
 def _render_card_body(title: str, path: str, tl: Optional[TaskList],
                       note_data: Optional[dict], paused_entries: list,
                       palette: Optional[ui.Palette] = None, *,
-                      marker: str = "", condition: str = "ok") -> list[str]:
+                      marker: str = "", condition: str = "ok",
+                      history: Optional[list] = None) -> list[str]:
     """One verbose dashboard card's BODY lines (no framing rules).
 
     Layout (pure ASCII, the project's invariant)::
@@ -5783,14 +5446,15 @@ def _render_card_body(title: str, path: str, tl: Optional[TaskList],
             f"    [!] {condition if condition != 'ok' else 'corrupt'}"))
     else:
         lines.extend(_render_verbose_triad(
-            tl, note_data, paused_entries, palette))
+            tl, note_data, paused_entries, history=history, palette=p))
     return lines
 
 
 def _render_card(title: str, path: str, tl: Optional[TaskList],
                  note_data: Optional[dict], paused_entries: list,
                  palette: Optional[ui.Palette] = None, *,
-                 marker: str = "", condition: str = "ok") -> str:
+                 marker: str = "", condition: str = "ok",
+                 history: Optional[list] = None) -> str:
     """One verbose dashboard card: rule + styled body + rule.
 
     See :func:`_render_card_body` for the body layout. Consecutive
@@ -5802,7 +5466,8 @@ def _render_card(title: str, path: str, tl: Optional[TaskList],
     return "\n".join(
         [rule]
         + _render_card_body(title, path, tl, note_data, paused_entries,
-                            p, marker=marker, condition=condition)
+                            p, marker=marker, condition=condition,
+                            history=history)
         + [rule]
     )
 
@@ -5866,7 +5531,9 @@ def _render_dashboard_verbose(states: list,
             read_active_task_note(entry.path),
             read_paused_tasks(entry.path), p,
             marker=" [*]" if s["is_cwd"] else "",
-            condition=s["condition"]))
+            condition=s["condition"],
+            history=_safe_history_entries(
+                Path(entry.path) / CK_DIR_NAME / HISTORY_FILENAME)))
     return _render_card_section(
         f"MY PROJECTS ({len(states)})", bodies, p)
 

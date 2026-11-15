@@ -250,6 +250,10 @@ class _WrapperBase(unittest.TestCase):
             "# t\n## Current Sprint\n- [ ] wrapper task\n",
             encoding="utf-8",
         )
+        # v0.13.0 write-gate: raw fixtures carry the current marker,
+        # or write commands (ck-dev add) refuse with "Run ck migrate".
+        (root / ".ck" / "version").write_text(
+            ckconfig.VERSION + "\n", encoding="utf-8")
         return root
 
 

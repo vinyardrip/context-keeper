@@ -117,11 +117,15 @@ class _IsolatedHome(unittest.TestCase):
     def make_project(self, name: str, *, plan: str = PLAN_WITH_FOCUS,
                      note: str = "", parent: Path | None = None) -> Path:
         """A real on-disk project: .ck/PLAN.md (+ optional state note)."""
+        from cklib import config as ckconfig
         root = (parent or Path(self._tmp.name)) / name
         root.mkdir(parents=True, exist_ok=True)
         ck = ContextKeeper(root=root)
         ck.ck_path.mkdir(parents=True, exist_ok=True)
         ck.plan_file.write_text(plan, encoding="utf-8")
+        # v0.13.0 write-gate: raw fixtures carry the current marker.
+        ck.ck_path.joinpath("version").write_text(
+            ckconfig.VERSION + "\n", encoding="utf-8")
         if note:
             ck.set_note(note)
         return root
@@ -252,9 +256,8 @@ class TestUpwardTraversal(_IsolatedHome):
         # The ROOT project is rendered (not an empty 0/0 dashboard).
         self.assertIn("> repo", out)
         self.assertIn("[>] Focus:", out)
-        self.assertIn("- [1] focused task", out)
-        self.assertIn(">> Upcoming:", out)
-        self.assertIn("- [2] open task [ ]", out)
+        self.assertIn("- [#1] focused task", out)
+        self.assertIn(">> Backlog: 2 tasks remaining", out)
         # The stored note is visible under the resolved context.
         self.assertIn("* Note: root project note", out)
         self.assertNotIn("No active project found", out)
@@ -331,7 +334,7 @@ class TestGlobalFallback(_IsolatedHome):
         self.assertEqual(code, 0)
         self.assertIn("> registered", out)
         self.assertIn("[>] Focus:", out)
-        self.assertIn("- [1] focused task", out)
+        self.assertIn("- [#1] focused task", out)
         # The note stored in the registered project's state renders
         # through the global resolution path.
         self.assertIn("* Note: global note", out)
@@ -658,7 +661,7 @@ class TestNoProjectGuards(_IsolatedHome):
         with self.assertRaises(ValueError):
             ck.start(1)
         # Nothing written anywhere.
-        self.assertFalse(ck.state_file.exists())
+        self.assertFalse(ck.ck_path.exists())
 
     def test_note_dev_mode_creates_no_orphan_sandbox_state(self):
         bare = Path(self._tmp.name) / "bare"

@@ -149,7 +149,7 @@ class TestSaveGracefulDecline(IsolatedHomeMixin, unittest.TestCase):
             msg, stage = commit_calls[0]
             self.assertEqual(stage, [
                 ".ck/PLAN.md",
-                ".ck/HISTORY.md",
+                ".ck/JOURNAL.md",
                 ".ck/prompt.md",
                 ".ck/README.md",
                 ".ck/.gitignore",
@@ -179,7 +179,7 @@ class TestSaveUxWording(IsolatedHomeMixin, unittest.TestCase):
         return result, captured
 
     def test_note_append_prints_explicit_confirmation(self):
-        """Whenever an entry lands in HISTORY.md, STDOUT says so with
+        """Whenever an entry lands in JOURNAL.md, STDOUT says so with
         the relative path and the not-a-Git-commit qualifier."""
         with tempfile.TemporaryDirectory() as td:
             ck = self._make_ck(Path(td))
@@ -191,7 +191,7 @@ class TestSaveUxWording(IsolatedHomeMixin, unittest.TestCase):
             self.assertIsNone(result)
             self.assertTrue(
                 any(
-                    "Saved entry to .ck/HISTORY.md" in line
+                    "Saved entry to .ck/JOURNAL.md" in line
                     and "not a Git commit" in line
                     for line in captured
                 ),
@@ -199,10 +199,10 @@ class TestSaveUxWording(IsolatedHomeMixin, unittest.TestCase):
             )
             # The entry is actually on disk
             self.assertIn("did the thing",
-                          ck.history_file.read_text(encoding="utf-8"))
+                          ck.journal_file.read_text(encoding="utf-8"))
 
     def test_confirmation_appears_in_commit_path_too(self):
-        """The explicit HISTORY.md confirmation prints before the Git
+        """The explicit JOURNAL.md confirmation prints before the Git
         phase even when the user goes on to commit."""
         with tempfile.TemporaryDirectory() as td:
             ck = self._make_ck(Path(td))
@@ -225,13 +225,13 @@ class TestSaveUxWording(IsolatedHomeMixin, unittest.TestCase):
 
             self.assertIsNotNone(result)
             self.assertTrue(any(
-                "Saved entry to .ck/HISTORY.md" in line for line in captured
+                "Saved entry to .ck/JOURNAL.md" in line for line in captured
             ))
             # Git success message mentions local-only, no push
             self.assertTrue(any("no push" in line for line in captured))
 
     def test_step_headers_distinguish_history_and_git(self):
-        """The flow announces Step 1 (local history) and Step 2 (Git
+        """The flow announces Step 1 (local journal) and Step 2 (Git
         commit) as clearly separate phases."""
         with tempfile.TemporaryDirectory() as td:
             ck = self._make_ck(Path(td))
@@ -240,7 +240,7 @@ class TestSaveUxWording(IsolatedHomeMixin, unittest.TestCase):
             ])
             self.assertIsNone(result)
             self.assertTrue(any(
-                "Step 1: local history" in line and ".ck/HISTORY.md" in line
+                "Step 1: local journal" in line and ".ck/JOURNAL.md" in line
                 for line in captured
             ))
             self.assertTrue(any(
@@ -249,7 +249,7 @@ class TestSaveUxWording(IsolatedHomeMixin, unittest.TestCase):
 
     def test_decline_commit_message_clarifies_history_is_saved(self):
         """Declining the Git commit must reassure the user the local
-        history entry is already saved."""
+        journal entry is already saved."""
         with tempfile.TemporaryDirectory() as td:
             ck = self._make_ck(Path(td))
 
@@ -269,11 +269,11 @@ class TestSaveUxWording(IsolatedHomeMixin, unittest.TestCase):
             self.assertIsNone(result)
             decline_msg = "\n".join(captured)
             self.assertIn("No commit created", decline_msg)
-            self.assertIn(".ck/HISTORY.md", decline_msg)
-            self.assertIn("local history only", decline_msg)
+            self.assertIn(".ck/JOURNAL.md", decline_msg)
+            self.assertIn("local journal only", decline_msg)
 
     def test_no_repo_decline_clarifies_history_is_saved(self):
-        """Declining Git init must reassure the user the local history
+        """Declining Git init must reassure the user the local journal
         entry is already saved."""
         with tempfile.TemporaryDirectory() as td:
             ck = self._make_ck(Path(td))
@@ -293,12 +293,12 @@ class TestSaveUxWording(IsolatedHomeMixin, unittest.TestCase):
             self.assertIsNone(result)
             decline_msg = "\n".join(captured)
             self.assertIn("No commit created", decline_msg)
-            self.assertIn(".ck/HISTORY.md", decline_msg)
-            self.assertIn("local history only", decline_msg)
+            self.assertIn(".ck/JOURNAL.md", decline_msg)
+            self.assertIn("local journal only", decline_msg)
 
     def test_eof_after_note_reports_history_saved(self):
         """EOF mid-flow (after the entry is durable, before the Git
-        phase completes) still reports the HISTORY.md entry."""
+        phase completes) still reports the JOURNAL.md entry."""
         with tempfile.TemporaryDirectory() as td:
             ck = self._make_ck(Path(td))
 
@@ -323,8 +323,8 @@ class TestSaveUxWording(IsolatedHomeMixin, unittest.TestCase):
 
             self.assertIsNone(result)
             combined = "\n".join(captured)
-            self.assertIn("Saved entry to .ck/HISTORY.md", combined)
-            self.assertIn("entry saved to .ck/HISTORY.md", combined)
+            self.assertIn("Saved entry to .ck/JOURNAL.md", combined)
+            self.assertIn("entry saved to .ck/JOURNAL.md", combined)
             self.assertIn("no Git commit created", combined)
 
     def test_prompt_wording_distinguishes_git_commit(self):
@@ -380,8 +380,12 @@ class TestSaveUxWording(IsolatedHomeMixin, unittest.TestCase):
 
             ck.done("1")
 
+            # v0.13.0: done REMOVES the task from the plan and
+            # graduates it into HISTORY.md.
             tl = parse_plan_file(ck.plan_file)
-            self.assertEqual(tl.by_id(1).status, TaskStatus.DONE)
+            self.assertIsNone(tl.by_id(1))
+            self.assertIn("alpha",
+                          ck.history_file.read_text(encoding="utf-8"))
 
 
 class TestAddTaskIsAstBased(IsolatedHomeMixin, unittest.TestCase):
@@ -424,10 +428,15 @@ class TestStartAndDone(IsolatedHomeMixin, unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
             ck = _make_ck(tmp)
-            ck.done("1")
-            ck.done("2-3")
+            # v0.13.0: done removes completed tasks from the plan
+            # (single spec — IDs re-index between calls).
+            ck.done("1-3")
             tl = parse_plan_file(ck.plan_file)
-            self.assertTrue(all(t.status == TaskStatus.DONE for t in tl.tasks))
+            self.assertEqual(tl.tasks, [])
+            history = ck.history_file.read_text(encoding="utf-8")
+            self.assertIn("alpha", history)
+            self.assertIn("beta", history)
+            self.assertIn("gamma", history)
 
     def test_done_with_unknown_id_raises(self):
         with tempfile.TemporaryDirectory() as td:

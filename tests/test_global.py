@@ -424,12 +424,14 @@ class TestDashboardVerbose(_IsolatedRegistry, unittest.TestCase):
             target = _project_dir(Path(td), "alpha")
             ck = ContextKeeper(root=target)
             # Fresh plan: the first add REPLACES the init seed (id 1);
-            # add prev -> done, focus -> focused, next -> open.
+            # add prev -> done, focus -> focused, next -> open. Focus
+            # is set BEFORE done: v0.13.0 done re-indexes the
+            # remaining IDs, so the order matters.
             ck.add_task("prev task")
             ck.add_task("focus task")
             ck.add_task("next task")
-            ck.done("1")
             ck.start(2)
+            ck.done("1")
             ck.register(path=target, name="alpha")
 
             out = self._render(ck)
@@ -445,10 +447,12 @@ class TestDashboardVerbose(_IsolatedRegistry, unittest.TestCase):
             # Vertical triad order: PREV < FOCUS < NEXT.
             self.assertLess(out.index("<< PREV"), out.index("[>] FOCUS"))
             self.assertLess(out.index("[>] FOCUS"), out.index(">> NEXT"))
-            self.assertLess(out.index("[1] prev task [x]"),
-                            out.index("[2] focus task"))
-            self.assertLess(out.index("[2] focus task"),
-                            out.index("[3] next task [ ]"))
+            # v0.13.0: PREV renders the HISTORY.md ledger entry, the
+            # focused item drops the [>] marker, NEXT keeps [ ].
+            self.assertLess(out.index("prev task"),
+                            out.index("[1] focus task"))
+            self.assertLess(out.index("[1] focus task"),
+                            out.index("[2] next task [ ]"))
             # Each card is framed by horizontal rules.
             self.assertIn(CARD_RULE, out)
             self.assertTrue(out.rstrip().endswith(CARD_RULE))

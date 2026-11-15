@@ -330,7 +330,7 @@ class TestTodayRollover(_TodayHome):
         self.assertEqual(code, 0, out)
         self.assertIn(
             f"Rolled over {yesterday} \u2192 {date.today().isoformat()}: "
-            "removed 1 completed, carried over 2.", out)
+            "removed 0 completed, carried over 2.", out)
         self.assertEqual(self.state()["today_date"],
                          date.today().isoformat())
         parsed = spaces.SpaceManager("today").load()

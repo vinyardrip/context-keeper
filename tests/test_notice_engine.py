@@ -156,7 +156,7 @@ class TestProjectNameColorIsMagenta(unittest.TestCase):
             self.name, self.path, self.last_seen = name, path, None
 
     class _TL:
-        done, total, completion_pct, focused = [], 1, 0.0, []
+        tasks, focused = [], []
 
     def _state(self, entry):
         return {"entry": entry, "tl": self._TL(), "condition": "ok",

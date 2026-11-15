@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-VERSION = "0.12.1"
+VERSION = "0.13.0"
 CK_DIR_NAME = ".ck"
 # Traversal-boundary markers. Kept in sync with
 # ``cklib.sandbox.SANDBOX_DIR_NAME`` (".sandbox") and Git's ".git".
@@ -70,6 +70,11 @@ def compress_archives_enabled() -> bool:
 
 PLAN_FILENAME = "PLAN.md"
 HISTORY_FILENAME = "HISTORY.md"
+JOURNAL_FILENAME = "JOURNAL.md"
+META_FILENAME = "meta.json"
+VERSION_FILENAME = "version"
+LINKS_FILENAME = "links.json"
+AGENTS_FILENAME = "AGENTS.md"
 PROMPT_FILENAME = "prompt.md"
 STATE_FILENAME = "state.json"
 GITIGNORE_FILENAME = ".gitignore"
@@ -128,8 +133,7 @@ DEFAULT_TASK_TITLES: tuple[str, ...] = (
 )
 
 # Update notifier throttle window.
-UPDATE_CHECK_INTERVAL_HOURS = 24
-# GitHub releases API endpoint used by the STANDALONE startup
+UPDATE_CHECK_INTERVAL_HOURS = 24# GitHub releases API endpoint used by the STANDALONE startup
 # version check: install.sh deployments carry no ``.git`` metadata
 # to probe, so the latest release tag is the remote version source.
 RELEASE_API_URL = (
@@ -162,7 +166,6 @@ REMOTE_URL = "https://raw.githubusercontent.com/vinyardrip/context-keeper/main/c
 LOCAL_GITIGNORE_ENTRIES: tuple[str, ...] = (
     ".ck/*.bak",
     ".ck/*.md.gz",
-    ".ck/state.json",
 )
 
 TRACKED_GITIGNORE_PROTECTIONS: tuple[str, ...] = (
@@ -182,14 +185,12 @@ DEFAULT_PLAN = f"""# {{project_name}}
 
 ## Current Sprint
 - [] {DEFAULT_FIRST_TASK_TITLE} {PLACEHOLDER_MARKER}
-
-## Completed
 """
 
 DEFAULT_PROMPT = """# Context Keeper: AI System Instructions
 
 You are a Senior Engineer assistant for the **Context Keeper (ck)** CLI utility.
-Your goal is to generate or update the `PLAN.md` file based on the user's technical requirements.
+Your goal is to generate or update the `.ck/PLAN.md` file based on the user's technical requirements.
 
 ## [!] STRICT FORMATTING RULES (DO NOT DEVIATE):
 
@@ -201,13 +202,42 @@ Your goal is to generate or update the `PLAN.md` file based on the user's techni
 2. **Focused Task Syntax**: Use strictly `- [>]` to mark the currently active focus.
    - Only one task may be focused at a time.
 
-3. **Completed Task Syntax**: Use strictly `- [x]`.
+3. **Paused Task Syntax**: Use strictly `- [~]` for a task whose focus was
+   switched away (it stays visible in PLAN.md until resumed or done).
 
-4. **Flat Structure**: Do NOT use nested lists, tabs, or indentation. Every task must be a top-level list item.
+4. **Completed Task Syntax**: Use strictly `- [x]` — but ONLY inside
+   `.ck/HISTORY.md`. PLAN.md never holds completed tasks.
 
-5. **Task Selection Logic**: The `ck` utility identifies the focused task (`[>]`) or the first open task (`[]`) as the "Current Active Task".
+5. **Stable UUIDs**: Every task line ends with a hidden reference comment:
+   `- [] Task description <!-- id: a1b2c3d4 -->`. NEVER delete or edit
+   `<!-- id: ... -->` comments — they are the stable task references.
 
-6. **Character Limit**: Keep task descriptions concise (under 80 characters).
+6. **Inline Notes**: A note directly under its task:
+   `* Note (2026-11-04 14:32 UTC): waiting on CI`. Keep the format.
+
+7. **Flat Structure**: Do NOT use nested lists, tabs, or indentation. Every task must be a top-level list item.
+
+8. **Task Selection Logic**: The `ck` utility identifies the focused task (`[>]`) as the "Current Active Task".
+
+9. **Use the CLI, not manual edits**: Prefer `ck add` / `ck done` / `ck focus`
+   over hand-editing `.ck/PLAN.md`.
+"""
+
+DEFAULT_AGENTS_MD = """# AI Agent Instructions (Context Keeper)
+
+This project uses Context Keeper (ck) as its memory layer.
+
+- Active tasks live in `.ck/PLAN.md` (`[ ]` open, `[>]` focused,
+  `[~]` paused). Read it to see the current work.
+- Past context lives in `.ck/HISTORY.md` (`[x]` completed entries
+  with timestamps). Read it before asking what was already done.
+- NEVER delete the `<!-- id: ... -->` comment at the end of a task
+  line — it is the task's stable reference (survives renumbering).
+- Do not edit `.ck/PLAN.md` by hand when a command exists:
+  use `ck add <text>`, `ck done <ID>`, `ck focus <ID>`,
+  `ck note <ID> <text>`.
+- Completed work is recorded automatically; do not write `[x]`
+  lines into `.ck/PLAN.md`.
 """
 
 DEFAULT_CK_GITIGNORE = """# Context Keeper - Auto-generated
@@ -217,8 +247,8 @@ DEFAULT_CK_GITIGNORE = """# Context Keeper - Auto-generated
 *.bak
 *.md.gz
 
-# Dynamic state (regenerated automatically)
-state.json
+# Dynamic migration log
+migrate.log
 
 # Transient cross-process lock files
 *.lock

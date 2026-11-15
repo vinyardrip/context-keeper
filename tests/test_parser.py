@@ -162,10 +162,11 @@ class TestBlankLinesAndHeaders(unittest.TestCase):
 class TestAnalytics(unittest.TestCase):
     def test_completion_pct_and_counts(self):
         tl = parse_plan(SAMPLE_CANONICAL)
-        self.assertEqual(tl.completion_pct, 50.0)
-        self.assertEqual(len(tl.done), 2)
-        self.assertEqual(len(tl.open), 1)
-        self.assertEqual(len(tl.focused), 1)
+        done = [t for t in tl.tasks if t.status == TaskStatus.DONE]
+        active = [t for t in tl.tasks if t.status.is_active]
+        self.assertEqual(tl.completion_pct(len(done)), 50.0)
+        self.assertEqual(len(done), 2)
+        self.assertEqual(len(active), 2)
 
     def test_no_gaps_for_sequential_pending_tasks(self):
         """Status is ignored: a pending task after a done one is NOT a

@@ -56,6 +56,9 @@ class _ColorHarness(unittest.TestCase):
         (self.project / ".ck" / "PLAN.md").write_text(
             "# p\n\n## Current Sprint\n- [ ] alpha\n- [ ] beta\n",
             encoding="utf-8")
+        # v0.13.0 write-gate: raw fixtures carry the current marker.
+        (self.project / ".ck" / "version").write_text(
+            "0.13.0\n", encoding="utf-8")
 
         saved = {k: os.environ.get(k) for k in
                  ("NO_COLOR", "FORCE_COLOR", "CLICOLOR_FORCE",
@@ -170,11 +173,14 @@ class TestBadgesAreColoredThroughAPipe(_ColorHarness):
         self.assertIn(STYLED["[i]"], out, out)
 
     def test_reorder_badge_is_bold_red_on_refusal(self):
-        code, out = self.run_cli(["done", "1"])
-        self.assertEqual(code, 0, out)
-        code, out = self.run_cli(["move", "1", "1"])
+        # v0.13.0: `done` moves the task to HISTORY.md, so a completed
+        # row only appears in the plan when a user hand-edits it.
+        (self.project / ".ck" / "PLAN.md").write_text(
+            "# p\n\n## Current Sprint\n- [ ] alpha\n- [x] beta\n",
+            encoding="utf-8")
+        code, out = self.run_cli(["move", "2", "1"])
         self.assertEqual(code, 1, out)
-        self.assertIn(STYLED["[err]"] + " Cannot move completed task #1.",
+        self.assertIn(STYLED["[err]"] + " Cannot move completed task #2.",
                       out, out)
 
     def test_no_badge_is_ever_plaintext_in_a_pipe(self):
