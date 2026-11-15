@@ -83,6 +83,9 @@ COMPLETION_COMMANDS: Tuple[Tuple[str, str], ...] = (
     ("local", "workstation space"),
     ("remote", "infrastructure space"),
     ("today", "daily journal space"),
+    ("week", "weekly journal space"),
+    ("month", "monthly journal space"),
+    ("year", "yearly journal space"),
     ("register", "register a project"),
     ("unregister", "unregister a project"),
     ("prune", "drop registry entries whose folders are gone"),
@@ -398,6 +401,11 @@ _ck_completion() {
                 COMPREPLY=( $(compgen -W "init migrate add list st status done focus start note notes edit dashboard" -- "$cur") )
             fi
             ;;
+        week|month|year)
+            if [ "$COMP_CWORD" -eq 2 ]; then
+                COMPREPLY=( $(compgen -W "init add list st status done focus start note notes edit dashboard" -- "$cur") )
+            fi
+            ;;
         completion)
             if [ "$COMP_CWORD" -eq 2 ]; then
                 COMPREPLY=( $(compgen -W "bash zsh" -- "$cur") )
@@ -585,7 +593,8 @@ __CK_COMMAND_ENTRIES__
 _ck_space_actions() {
     # `ck local <TAB>` / `ck remote <TAB>` / `ck <custom-space> <TAB>`:
     # every space shares one action vocabulary. `ck today <TAB>` adds
-    # the daily-journal lifecycle verbs.
+    # the daily-journal lifecycle verbs; the period journals (week /
+    # month / year) add `init` only (they have no legacy migration).
     local -a actions
     actions=(
 __CK_SPACE_ACTION_ENTRIES__
@@ -594,6 +603,10 @@ __CK_SPACE_ACTION_ENTRIES__
         actions+=(
             'init:initialize the daily journal'
             'migrate:rename a legacy today space'
+        )
+    elif [[ ${1:-} == week || ${1:-} == month || ${1:-} == year ]]; then
+        actions+=(
+            'init:initialize the period journal'
         )
     fi
     _ck_entries actions 'space action' "${actions[@]}"
@@ -735,6 +748,11 @@ _ck() {
         today)
             if (( CURRENT == 3 )); then
                 _ck_space_actions today
+            fi
+            ;;
+        week|month|year)
+            if (( CURRENT == 3 )); then
+                _ck_space_actions "$words[1]"
             fi
             ;;
         completion)

@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-VERSION = "0.13.3"
+VERSION = "0.13.4"
 CK_DIR_NAME = ".ck"
 # Traversal-boundary markers. Kept in sync with
 # ``cklib.sandbox.SANDBOX_DIR_NAME`` (".sandbox") and Git's ".git".
@@ -113,6 +113,14 @@ SPACE_NAMES: tuple[str, ...] = ("local", "remote")
 SPACE_LOCAL = "local"
 SPACE_REMOTE = "remote"
 SPACE_TODAY = "today"
+# Extended DAILY_SPACES family (v0.13.4): period journals beside the
+# daily ``today`` — ISO week, calendar month, calendar year. Like
+# ``today`` they are RESERVED, explicitly initialized
+# (``ck week init`` / ``ck month init`` / ``ck year init``) and carry
+# NO history (completed rows are deleted at the period rollover).
+SPACE_WEEK = "week"
+SPACE_MONTH = "month"
+SPACE_YEAR = "year"
 
 # STRUCTURAL PLACEHOLDER MARKER. The ``ck init`` seed task carries
 # this literal HTML comment appended to its raw Markdown line. The very

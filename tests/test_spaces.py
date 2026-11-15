@@ -2524,11 +2524,13 @@ class TestSpaceManagement(_IsolatedHome):
         for name in sorted(spaces.RESERVED_SPACE_NAMES):
             with self.subTest(name=name):
                 code, out = self._run(["space", "create", name])
-                if name == "today":
-                    # v0.12.0: reserved DAILY journal, not a plain verb.
+                if name in spaces.DAILY_SPACES:
+                    # v0.12.0: `today` is a reserved DAILY journal, not
+                    # a plain verb; v0.13.4: `week` / `month` / `year`
+                    # join the family with the same init hint.
                     self.assertEqual(code, 1, out)
-                    self.assertIn("'today' is reserved", out)
-                    self.assertIn("ck today init", out)
+                    self.assertIn(f"'{name}' is reserved", out)
+                    self.assertIn(f"ck {name} init", out)
                 else:
                     self.assertEqual(code, 2, out)
                     self.assertIn("Reserved names", out)

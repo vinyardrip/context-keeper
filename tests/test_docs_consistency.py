@@ -144,9 +144,18 @@ class TestDocumentationConsistency(unittest.TestCase):
             "При перенаправлении вывод всегда без ANSI.", self.readme)
 
     def test_daily_journal_documented_bilingually(self):
-        """v0.12.0/v0.12.1: init/migrate/rollover and the flat output."""
-        english = _section(self.readme, "### Daily Journal (`today`)")
-        russian = _section(self.readme, "### Ежедневный журнал (`today`)")
+        """v0.12.0/v0.12.1: init/migrate/rollover and the flat output.
+
+        v0.13.4: the section covers the whole DAILY_SPACES family —
+        the ``week`` / ``month`` / ``year`` period journals included.
+        """
+        english = _section(
+            self.readme,
+            "### Daily & Period Journals (`today`, `week`, `month`, `year`)")
+        russian = _section(
+            self.readme,
+            "### Ежедневный журнал и периодические журналы "
+            "(`today`, `week`, `month`, `year`)")
         for section in (english, russian):
             self.assertIn("ck today init", section)
             self.assertIn("ck today migrate", section)
@@ -163,6 +172,11 @@ class TestDocumentationConsistency(unittest.TestCase):
         self.assertIn("байт-в-байт", russian)
         self.assertIn("| ck today init |", self.readme)
         self.assertIn("| ck today migrate", self.readme)
+        for section in (english, russian):
+            self.assertIn("ck week init", section)
+            self.assertIn("DAILY_SPACES", section)
+            self.assertIn("2026-W53", section)
+        self.assertIn("| ck week / month / year", self.readme)
 
     def test_bilingual_roadmap_checklists_have_parity(self):
         pairs = (

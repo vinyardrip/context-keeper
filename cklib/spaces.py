@@ -344,10 +344,17 @@ def cleanup_stale_space_locks() -> list[Path]:
 # always resolves to the current project.
 PROJECT_SPACE = "project"
 
-# Daily journal spaces (v0.12.0). The architecture is deliberately a
-# hardcoded set: adding ``weekend`` / ``month`` will be a separate
-# MINOR with its own semantics, not a premature JSON extension point.
-DAILY_SPACES = {"today"}
+# Daily/period journal spaces (v0.12.0, extended v0.14.0). The
+# architecture is deliberately a hardcoded set, not a JSON extension
+# point: ``today`` rolls over every local day, ``week`` on ISO-week
+# change, ``month`` on calendar-month change, ``year`` on New Year.
+# All four share one lifecycle: reserved names, explicit ``init``,
+# lazy rollover, NO history (completed rows are deleted, not
+# archived).
+DAILY_SPACES = {
+    config.SPACE_TODAY, config.SPACE_WEEK,
+    config.SPACE_MONTH, config.SPACE_YEAR,
+}
 
 # Names that must NEVER become a space, even though they are
 # structurally safe filenames:
@@ -355,8 +362,9 @@ DAILY_SPACES = {"today"}
 # - ``local`` / ``remote`` — the built-in defaults are permanent
 #   contexts (always listed by the dashboard); a same-named file would
 #   shadow the default;
-# - ``today`` — reserved for the DAILY journal; only ``ck today init``
-#   and the legacy migration flow may create it;
+# - ``today`` / ``week`` / ``month`` / ``year`` — reserved for the
+#   DAILY/period journals; only ``ck <name> init`` (and the legacy
+#   ``today`` migration flow) may create them;
 # - ``project`` — the sentinel the management list uses for the
 #   active project row;
 # - ``list`` / ``create`` / ``rename`` / ``delete`` — the
@@ -364,13 +372,20 @@ DAILY_SPACES = {"today"}
 #   top-level command. A space named after one of them makes
 #   ``ck <name> <verb>`` ambiguous for the reader.
 RESERVED_SPACE_NAMES = frozenset({
-    "local", "remote", "today", PROJECT_SPACE, "list", "create", "rename",
+    "local", "remote", config.SPACE_TODAY, config.SPACE_WEEK,
+    config.SPACE_MONTH, config.SPACE_YEAR,
+    PROJECT_SPACE, "list", "create", "rename",
     "delete", "move", "swap", "reorder",
 })
 # The PERMANENT contexts (the virtual project row + the seeded spaces +
-# the daily journal). The larger :data:`RESERVED_SPACE_NAMES` set above
-# additionally blocks the management verbs from becoming files.
-RESERVED_SPACES = frozenset({"project", "local", "remote", "today"})
+# the daily/period journals). The larger :data:`RESERVED_SPACE_NAMES`
+# set above additionally blocks the management verbs from becoming
+# files.
+RESERVED_SPACES = frozenset({
+    "project", "local", "remote",
+    config.SPACE_TODAY, config.SPACE_WEEK,
+    config.SPACE_MONTH, config.SPACE_YEAR,
+})
 
 
 def validate_new_space_name(name: str) -> str:
@@ -639,18 +654,30 @@ def read_daily_date(space: str) -> Optional[str]:
 
 def set_today_date(value: str) -> None:
     """Persist ``today_date`` (preserving every other state key)."""
+    set_daily_date(config.SPACE_TODAY, value)
+
+
+def set_daily_date(space: str, value: str) -> None:
+    """Persist a daily space's current period under its state key."""
+    key = daily_date_key(space)
+
     def _apply(state: dict) -> None:
-        state[TODAY_DATE_KEY] = value
+        state[key] = value
     _update_global_state(_apply)
 
 
 def clear_today_date() -> None:
     """Remove ``today_date`` from the global state (no-op when absent)."""
-    if read_today_date() is None:
+    clear_daily_date(config.SPACE_TODAY)
+
+
+def clear_daily_date(space: str) -> None:
+    """Remove a daily space's period key (no-op when absent)."""
+    if read_daily_date(space) is None:
         return
 
     def _apply(state: dict) -> None:
-        state.pop(TODAY_DATE_KEY, None)
+        state.pop(daily_date_key(space), None)
     _update_global_state(_apply)
 
 
@@ -662,102 +689,151 @@ def today_status() -> str:
     ``spaces/today.md`` exists without that metadata. ``none`` means
     neither exists — ``ck today init`` is the next step.
     """
-    if read_today_date() is not None:
+    return daily_status(config.SPACE_TODAY)
+
+
+def daily_status(space: str) -> str:
+    """Classify any daily space: ``active`` / ``legacy`` / ``none``.
+
+    ``legacy`` is a ``today``-only state (the pre-v0.12.0 plain file);
+    the v0.14.0 period journals were born reserved, so they can only
+    be ``active`` or ``none``.
+    """
+    if read_daily_date(space) is not None:
         return "active"
-    if _space_exists_anywhere(config.SPACE_TODAY):
+    if space == config.SPACE_TODAY and _space_exists_anywhere(space):
         return "legacy"
     return "none"
 
 
-def daily_section_header(date_str: str) -> str:
-    """``## Current Sprint (YYYY-MM-DD, <weekday>)`` for the daily view.
+def current_period(space: str, now: Optional[datetime] = None) -> str:
+    """The period stamp a daily space's journal is currently valid for.
 
-    The weekday is locale-aware (``strftime('%A')``); when the platform
-    cannot format it, the ISO weekday number is used as a stable
+    ``today`` → ``YYYY-MM-DD`` (local date), ``week`` → ISO week
+    ``YYYY-Www`` (the ISO week YEAR, not the calendar year — the week
+    spanning New Year keeps one identity), ``month`` → ``YYYY-MM``,
+    ``year`` → ``YYYY``. Unknown spaces degrade to the ``today``
+    format; ``now`` is injectable for tests.
+    """
+    moment = now or datetime.now()
+    if space == config.SPACE_WEEK:
+        iso_year, iso_week, _ = moment.isocalendar()
+        return f"{iso_year}-W{iso_week:02d}"
+    if space == config.SPACE_MONTH:
+        return moment.strftime("%Y-%m")
+    if space == config.SPACE_YEAR:
+        return moment.strftime("%Y")
+    return moment.date().isoformat()
+
+
+def daily_section_header(space: str, date_str: str) -> str:
+    """The dated ``## Current Sprint (...)`` header for a daily view.
+
+    Period-aware (v0.14.0): ``today`` keeps the locale-aware weekday
+    (``(YYYY-MM-DD, <weekday>)``), ``month`` adds the locale month
+    name (``(YYYY-MM, <month>)``), ``week`` and ``year`` render the
+    bare period stamp (``(2026-W46)`` / ``(2026)``). When the platform
+    cannot format a locale name, the ISO number is the stable
     fallback. Both rendered daily views (``list`` and ``st``) carry
     this suffix — the underlying Markdown keeps plain
     ``## Current Sprint``.
     """
-    weekday = ""
+    if space == config.SPACE_WEEK and re.match(r"^\d{4}-W\d{2}$", date_str):
+        return f"## Current Sprint ({date_str})"
+    if space == config.SPACE_YEAR and re.match(r"^\d{4}$", date_str):
+        return f"## Current Sprint ({date_str})"
+    fmt = "%Y-%m-%d" if space == config.SPACE_TODAY else "%Y-%m"
     try:
-        parsed = datetime.strptime(date_str, "%Y-%m-%d")
+        parsed = datetime.strptime(date_str, fmt)
     except (TypeError, ValueError):
         return f"## Current Sprint ({date_str})"
+    label = ""
     try:
-        weekday = parsed.strftime("%A")
+        label = parsed.strftime("%A" if space == config.SPACE_TODAY
+                                else "%B")
     except (ValueError, OSError):
-        weekday = ""
-    if not weekday:
-        weekday = str(parsed.isoweekday())
-    return f"## Current Sprint ({date_str}, {weekday})"
+        label = ""
+    if not label:
+        label = str(parsed.isoweekday())
+    return f"## Current Sprint ({date_str}, {label})"
 
 
-def _append_today_to_order() -> None:
-    """Ensure the active daily space is the LAST persisted space.
+def _append_daily_to_order(space: str) -> None:
+    """Ensure the initialized daily space is the LAST persisted space.
 
     An existing persisted sequence is preserved verbatim (only a stale
-    ``today`` entry is moved to the end); with no persisted sequence
-    the canonical reconciled order is used.
+    entry for THIS space is moved to the end); with no persisted
+    sequence the canonical reconciled order is used.
     """
     stored = read_space_order()
     if stored:
-        order = [name for name in stored if name != config.SPACE_TODAY]
+        order = [name for name in stored if name != space]
     else:
         order = [
             name for name in space_order(include_project=True)
-            if name != config.SPACE_TODAY
+            if name != space
         ]
-    order.append(config.SPACE_TODAY)
+    order.append(space)
     write_space_order(order)
 
 
-def init_daily_space() -> dict:
-    """Initialize the ``today`` daily journal; never touches history.
+def init_daily_space(space: str = config.SPACE_TODAY) -> dict:
+    """Initialize a daily/period journal; never touches history.
 
     Returns ``{"already": bool, "date": str, "created": bool}``.
     ``already`` short-circuits BEFORE any file/state write (idempotent
-    ``ck today init``). A legacy ``today.md`` without ``today_date``
-    raises :class:`ValueError` with the migration instruction.
+    ``ck <name> init``). A legacy ``today.md`` without ``today_date``
+    raises :class:`ValueError` with the migration instruction (the
+    v0.14.0 period journals were born reserved and cannot be legacy).
     """
-    active = read_today_date()
+    active = read_daily_date(space)
     if active is not None:
         return {"already": True, "date": active, "created": False}
-    if _space_exists_anywhere(config.SPACE_TODAY):
+    if space == config.SPACE_TODAY and _space_exists_anywhere(space):
         raise ValueError(
             "Legacy 'today' space detected. Run `ck today migrate` to "
             "rename it, then `ck today init`.")
-    _write_space_file(config.SPACE_TODAY)
-    date_str = datetime.now().date().isoformat()
-    set_today_date(date_str)
-    _append_today_to_order()
-    return {"already": False, "date": date_str, "created": True}
+    _write_space_file(space)
+    period = current_period(space)
+    set_daily_date(space, period)
+    _append_daily_to_order(space)
+    return {"already": False, "date": period, "created": True}
 
 
 def maybe_rollover_today() -> dict:
-    """Lazy daily rollover, called before any ``ck today *`` command.
+    """Lazy daily rollover for ``today`` (pre-v0.14.0 entry point)."""
+    return maybe_rollover_daily(config.SPACE_TODAY)
 
-    Completed tasks are DELETED (no ``HISTORY.md`` for the journal),
+
+def maybe_rollover_daily(space: str = config.SPACE_TODAY) -> dict:
+    """Lazy period rollover, called before any ``ck <daily> *`` command.
+
+    Completed tasks are DELETED (no ``HISTORY.md`` for a journal),
     open/focused tasks stay in place, and the note sidecar is shifted
-    to follow the positional re-indexing. A missing ``today.md`` with
-    ``today_date`` present is recreated empty first. The caller prints
-    the returned notices so the spaces module stays render-free.
+    to follow the positional re-indexing. A missing ``<space>.md`` with
+    the period key present is recreated empty first. The rollover
+    fires when the persisted period stamp differs from
+    :func:`current_period` — midnight for ``today``, ISO-week change
+    for ``week``, calendar-month/year change for ``month`` / ``year``.
+    The caller prints the returned notices so the spaces module stays
+    render-free.
     """
     result = {
         "rolled": False, "missing": False, "old": None, "new": None,
         "removed": 0, "carried": 0,
     }
-    old_date = read_today_date()
+    old_date = read_daily_date(space)
     if old_date is None:
         return result
-    path = space_path(config.SPACE_TODAY)
+    path = space_path(space)
     if not path.is_file():
-        _write_space_file(config.SPACE_TODAY)
+        _write_space_file(space)
         result["missing"] = True
-    local_today = datetime.now().date().isoformat()
-    if old_date == local_today:
+    new_period = current_period(space)
+    if old_date == new_period:
         return result
 
-    mgr = SpaceManager(config.SPACE_TODAY)
+    mgr = SpaceManager(space)
     tl = mgr.load()
     old_ids = [t.id for t in tl.tasks]
     old_status = {t.id: t.status for t in tl.tasks}
@@ -772,11 +848,11 @@ def maybe_rollover_today() -> dict:
         mgr._commit(tl)
         _remap_today_notes(mgr, kept_ids, done_ids)
 
-    set_today_date(local_today)
+    set_daily_date(space, new_period)
     result.update({
         "rolled": True,
         "old": old_date,
-        "new": local_today,
+        "new": new_period,
         "removed": len(done_ids),
         "carried": len(kept_ids),
     })
@@ -1138,8 +1214,8 @@ def validate_deletable_space(name: str) -> Path:
     path = _write_path(name)
     # An ACTIVE daily journal may outlive a manually deleted file; the
     # metadata still makes `ck space delete today` a meaningful cleanup
-    # (it removes today_date too).
-    if name in DAILY_SPACES and read_today_date() is not None:
+    # (it removes the period key too).
+    if name in DAILY_SPACES and read_daily_date(name) is not None:
         return path
     if not path.is_file():
         raise SpaceNotFoundError(
@@ -1196,7 +1272,7 @@ def delete_space(name: str, *, confirmed: bool = False) -> dict:
     if name in DAILY_SPACES:
         # The daily journal's date metadata is state, not the space
         # file: deleting the journal must clear it too.
-        clear_today_date()
+        clear_daily_date(name)
     return {
         "name": name,
         "removed": removed,
@@ -1570,7 +1646,8 @@ class SpaceManager:
 
         if self.space in DAILY_SPACES:
             date_str = read_daily_date(self.space)
-            header = daily_section_header(date_str) if date_str else None
+            header = (daily_section_header(self.space, date_str)
+                      if date_str else None)
             if not tl.tasks:
                 hint = (f"No tasks. Add one with "
                         f"`ck {self.space} add <text>`.")
@@ -2062,11 +2139,16 @@ __all__ = [
     "daily_date_key",
     "read_daily_date",
     "read_today_date",
+    "set_daily_date",
     "set_today_date",
+    "clear_daily_date",
     "clear_today_date",
+    "daily_status",
     "today_status",
+    "current_period",
     "daily_section_header",
     "init_daily_space",
+    "maybe_rollover_daily",
     "maybe_rollover_today",
     "space_order",
     "move_space",

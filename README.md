@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.13.3-blue)]()
+[![version](https://img.shields.io/badge/version-0.13.4-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -105,7 +105,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.13.3
+ck -v    # → ck version 0.13.4
 ```
 
 ---
@@ -207,6 +207,7 @@ ck -v    # → ck version 0.13.3
 | ck today init | Initialize the daily journal: create `~/.config/ck/spaces/today.md` from the empty template, set `today_date` in `~/.config/ck/state.json`, and append `today` to `spaces_order`. Idempotent (`[ok] Already initialized for YYYY-MM-DD.`); refuses a legacy `today.md` with a migration hint |
 | ck today migrate [--name \<new\>] | Rename a pre-0.12.0 regular `today` space (default target: `todo`), carrying its note sidecar and HISTORY archive; then run `ck today init` to create the daily journal |
 | ck today [\<command\>] | Daily journal tasks (`~/.config/ck/spaces/today.md`): `add`, `list` (default), `st`, `done`, `focus`/`start`, `delete`, `note`, `notes`, `edit`, `dashboard`. `list` / `st` / bare `today` are byte-identical flat dated views. At the start of the first `ck today *` command of a new local day, completed `[x]` tasks are deleted (no `HISTORY.md`) and open/focused tasks stay; `save` / `log` are refused |
+| ck week / month / year [\<command\>] | Period journals (v0.13.4) — the `DAILY_SPACES` family beside `today`: same lifecycle, longer periods. `ck week init` creates `spaces/week.md` + the `week_date` key (same for `month` / `year`), a bare `ck week` is the flat dated list (`## Current Sprint (2026-W47)`; `month` renders the locale month name — `(2026-11, November)`, `year` the bare stamp — `(2026)`). Rollover fires lazily on ISO-week / calendar-month / calendar-year change (ISO week-year: the New Year week keeps one identity). `done` deletes completed rows (no HISTORY), `save` / `log` are refused, `migrate` is a today-only legacy verb, and the journals are reserved names (never `ck space create week`, never renamable while active) |
 | ck \<space\> \<command\> | Dynamic space routing: ANY space file placed in `~/.config/ck/spaces/<name>.md` is automatically routable with the same commands (`add` / `list` / `st` / `done` / `focus` / `start` / `note` / `notes` / `edit` / `dashboard`), rendered uniformly in the `SPACES (GLOBAL CONTEXTS)` dashboard table |
 
 **`ck <name>` routes only to spaces.** A registered project is never a dynamic space, even if its name matches. Running `ck <project-name> <command>` prints `[err] '<name>' is a registered project, not a space.` and exits 1 — no `.lock`, no `[ok]`, no silent loss. To operate on a project from another directory, either `cd` into it, or use `ck list <name>` for a read-only view.
@@ -305,7 +306,7 @@ errors (exit 2 / exit 1 respectively) and never persist a partial order.
 > **global spaces** and never touch a plan. Likewise `ck delete <ID>` deletes a
 > task, while `ck space delete <name>` deletes a whole space and its notes.
 
-### Daily Journal (`today`)
+### Daily & Period Journals (`today`, `week`, `month`, `year`)
 
 **Daily journal — `today`.** `today` is a reserved daily space. It is not
 created automatically; initialize it explicitly:
@@ -346,8 +347,32 @@ journal has no history). Every other task and space command works as usual
 daily journal; use `ck space delete today` to remove it entirely (this also
 clears `today_date`).
 
-**Future.** `weekend` and `month`-style journals are planned as separate MINOR
-versions; the underlying constant is `DAILY_SPACES = {"today"}` in the code.
+**Period journals — `week` / `month` / `year` (v0.13.4).** The same
+lifecycle extended to longer periods: each is a reserved
+`DAILY_SPACES` member, explicitly initialized and rolled over lazily.
+
+```bash
+ck week init      # → spaces/week.md + week_date = 2026-W47
+ck month init     # → spaces/month.md + month_date = 2026-11
+ck year init      # → spaces/year.md  + year_date  = 2026
+```
+
+- **Headers.** `week` renders the ISO stamp — `## Current Sprint
+  (2026-W47)`; `month` adds the locale month name — `(2026-11,
+  November)`; `year` the bare stamp — `(2026)`. `today` keeps its
+  locale weekday.
+- **Rollover.** `week` resets when the ISO week changes (the ISO
+  week-YEAR is used, so the week spanning New Year keeps one
+  identity: Jan 1 2027 belongs to `2026-W53`); `month` on
+  calendar-month change; `year` on New Year. Semantics are identical
+  to the midnight rollover: completed rows deleted (no HISTORY),
+  open/focused tasks carried with re-indexed IDs, notes remapped,
+  missing files recreated with a warning.
+- **Reserved names.** `ck space create week` refuses (`'week' is
+  reserved. Run \`ck week init\`.`); an ACTIVE period journal cannot
+  be renamed (its `<name>_date` state key would orphan) —
+  `ck space delete week -f` removes it and clears the key.
+  `migrate` is the legacy-`today` verb only.
 
 ### Shell Completion
 
@@ -1457,7 +1482,7 @@ project, not a space.` и завершается с кодом 1 — без `.lo
 реальное пространство и проект получают одинаковое имя. Строгая маршрутизация
 сохраняет `<name>` предсказуемым: это всегда пространство, никогда проект.
 
-### Ежедневный журнал (`today`)
+### Ежедневный журнал и периодические журналы (`today`, `week`, `month`, `year`)
 
 **Ежедневный журнал — `today`.** `today` — зарезервированное ежедневное
 пространство. Оно не создаётся автоматически; инициализируйте его явно:
@@ -1504,8 +1529,33 @@ Markdown-файл сохраняет обычный заголовок `## Curre
 переименовать; для полного удаления используйте `ck space delete today`
 (это также очищает `today_date`).
 
-**Будущее.** Журналы `weekend` и `month` запланированы отдельными MINOR-
-версиями; в коде для этого есть константа `DAILY_SPACES = {"today"}`.
+**Периодические журналы — `week` / `month` / `year` (v0.13.4).** Тот же
+жизненный цикл, растянутый на более длинные периоды: каждый —
+зарезервированный член `DAILY_SPACES` с явной инициализацией и ленивым
+перекатом.
+
+```bash
+ck week init      # → spaces/week.md + week_date = 2026-W47
+ck month init     # → spaces/month.md + month_date = 2026-11
+ck year init      # → spaces/year.md  + year_date  = 2026
+```
+
+- **Заголовки.** `week` — ISO-штамп `## Current Sprint (2026-W47)`;
+  `month` добавляет название месяца по локали — `(2026-11, Ноябрь)`;
+  `year` — голый штамп `(2026)`. `today` сохраняет день недели по локали.
+- **Перекат.** `week` сбрасывается при смене ISO-недели (используется
+  ISO-ГОД недели, поэтому неделя через Новый год сохраняет одну
+  идентичность: 1 января 2027 — это `2026-W53`); `month` — при смене
+  календарного месяца; `year` — в Новый год. Семантика та же, что и в
+  полночном перекате: завершённые строки удаляются (без HISTORY),
+  открытые/сфокусированные задачи переносятся с переиндексацией ID,
+  заметки перемапливаются, отсутствующий файл пересоздаётся с
+  предупреждением.
+- **Зарезервированные имена.** `ck space create week` отклоняется
+  (`'week' is reserved. Run \`ck week init\`.`); АКТИВНЫЙ периодический
+  журнал нельзя переименовать (state-ключ `<name>_date` осиротел бы) —
+  `ck space delete week -f` удаляет его и очищает ключ. `migrate` —
+  легаси-глагол только для `today`.
 
 ### Инициализация и регистрация
 

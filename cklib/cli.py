@@ -91,6 +91,10 @@ _HELP_GROUPS: List[tuple] = [
         ("today init", "Initialize the daily journal"),
         ("today migrate [--name]",
          "Rename a legacy 'today' space"),
+        ("week|month|year [<command>]",
+         "Period journal: ISO week / month / year (default: list)"),
+        ("week|month|year init",
+         "Initialize the period journal"),
         ("<space> <command>",
          "Run any task command against a space (local / remote / "
          "<name>)"),
@@ -571,7 +575,7 @@ _LEGACY_CHOICES = (
     "help", "list", "register", "unregister", "prune", "info",
     "move", "swap", "reorder", "migrate",
     "delete", "rm",
-    "local", "remote", "today", "space",
+    "local", "remote", "today", "week", "month", "year", "space",
     "completion",
     "dev", "sandbox", "ck-clean",
     "export",
@@ -613,7 +617,9 @@ _SPACE_MGMT_FLAGS: dict[str, frozenset] = {
 # EXCLUDED: `ck local …` / `ck remote …` route through the space
 # dispatcher (uniformly with every dynamic space) instead of the
 # generic command dispatch.
-_COMMAND_HEADS = frozenset(_LEGACY_CHOICES) - {"local", "remote", "today"}
+_COMMAND_HEADS = frozenset(_LEGACY_CHOICES) - {
+    "local", "remote", "today", "week", "month", "year",
+}
 
 # Top-level shorthands for the ``st`` view flags: ``ck -l`` is an
 # exact synonym for ``ck st -l``, ``ck -e`` for ``ck st -e`` and
@@ -656,6 +662,9 @@ _LEGACY_FLAGS: dict[str, frozenset] = {
     "local": frozenset(),
     "remote": frozenset(),
     "today": frozenset(),
+    "week": frozenset(),
+    "month": frozenset(),
+    "year": frozenset(),
     "completion": frozenset({"--list-projects", "--list-spaces"}),
     "install": frozenset({"--dev"}),
     "uninstall": frozenset(),
@@ -817,12 +826,13 @@ def _space_routed_command(raw: List[str]) -> Optional[str]:
     head = raw[0]
     if head.startswith("-") or head in _COMMAND_HEADS:
         return None
-    # ``today`` has daily-specific routing (init / migrate / rollover /
-    # save-log refusals), so it is handled by ``_run_today_command``
+    # Daily/period journals (``today`` / ``week`` / ``month`` /
+    # ``year``) have daily-specific routing (init / migrate / rollover /
+    # save-log refusals), so they are handled by ``_run_daily_command``
     # in the legacy dispatcher instead of the generic space path.
-    if head == "today":
-        return None
     from . import spaces
+    if head in spaces.DAILY_SPACES:
+        return None
     return spaces.routable_space_name(head)
 
 
@@ -1837,16 +1847,16 @@ def _run_space_mgmt(rest: List[str]) -> int:
                     "ERROR: `ck space create` takes exactly one name "
                     f"(got {len(args)}). Spaces never contain spaces.")
                 return 2
-            if args[0] == "today":
-                status = spaces.today_status()
+            if args[0] in spaces.DAILY_SPACES:
+                status = spaces.daily_status(args[0])
                 if status == "legacy":
-                    message = ("'today' is reserved. Run `ck today "
-                               "migrate` first.")
+                    message = (f"'{args[0]}' is reserved. Run `ck "
+                               f"{args[0]} migrate` first.")
                 elif status == "active":
-                    message = "'today' is reserved."
+                    message = f"'{args[0]}' is reserved."
                 else:
-                    message = ("'today' is reserved. Run `ck today "
-                               "init`.")
+                    message = (f"'{args[0]}' is reserved. Run "
+                               f"`ck {args[0]} init`.")
                 _notice(ui.ERR, message)
                 return 1
             path = spaces.create_space(args[0])
@@ -1859,21 +1869,32 @@ def _run_space_mgmt(rest: List[str]) -> int:
                 print("Usage: ck space rename <old> <new>")
                 return 2
             old_name, new_name = args
-            if new_name == "today":
+            if new_name in spaces.DAILY_SPACES:
                 _notice(ui.ERR,
-                        "Cannot rename to reserved name 'today'.")
+                        f"Cannot rename to reserved name '{new_name}'.")
                 return 1
-            if old_name == "today":
-                status = spaces.today_status()
+            if old_name in spaces.DAILY_SPACES:
+                status = spaces.daily_status(old_name)
                 if status == "active":
-                    _notice(
-                        ui.ERR,
-                        "Cannot rename active daily space. "
-                        "Use `ck today migrate <new>`.")
+                    if old_name == "today":
+                        _notice(
+                            ui.ERR,
+                            "Cannot rename active daily space. "
+                            "Use `ck today migrate <new>`.")
+                    else:
+                        # A period journal's state key (<name>_date) is
+                        # bound to the name: renaming would orphan it.
+                        _notice(
+                            ui.ERR,
+                            f"Cannot rename active daily space "
+                            f"'{old_name}'.")
                     return 1
                 if status == "none":
-                    _notice(ui.ERR, "No space 'today'.")
+                    _notice(ui.ERR, f"No space '{old_name}'.")
                     return 1
+                # 'legacy' falls through: the pre-v0.12.0 'today' file
+                # is an ordinary space until migrated — renaming it is
+                # exactly what `ck today migrate` does.
             info = spaces.rename_space(old_name, new_name)
             _notice(ui.OK, f"Renamed space {info['from']!r} -> "
                       f"{info['to']!r}: {info['moved']}")
@@ -1933,8 +1954,9 @@ def _run_space_mgmt(rest: List[str]) -> int:
                     "ERROR: `ck space delete` takes exactly one name.")
                 return 2
             name = names[0]
-            if name == "today" and spaces.today_status() == "none":
-                _notice(ui.ERR, "No space 'today'.")
+            if (name in spaces.DAILY_SPACES
+                    and spaces.daily_status(name) == "none"):
+                _notice(ui.ERR, f"No space '{name}'.")
                 return 1
             # PRE-FLIGHT: validate the TARGET before asking anything.
             # A space that does not exist (or a protected built-in) can
@@ -2448,8 +2470,8 @@ def _legacy_dispatch(raw: List[str]) -> int:
                           "purged from the global registry.")
             else:
                 _notice(ui.OK, "Nothing to prune.")
-        elif cmd == "today":
-            return _run_today_command(rest)
+        elif cmd in ("today", "week", "month", "year"):
+            return _run_daily_command(cmd, rest)
         elif cmd in ("local", "remote"):
             return _run_space_command(cmd, rest)
         elif cmd == "space":
@@ -2503,14 +2525,16 @@ def _legacy_dispatch(raw: List[str]) -> int:
 # Out-of-project spaces (ck local / ck remote)
 # ---------------------------------------------------------------------- #
 
-def _run_today_command(rest: List[str]) -> int:
-    """Dispatch ``ck today *`` — the daily journal surface (v0.12.0).
+def _run_daily_command(space: str, rest: List[str]) -> int:
+    """Dispatch ``ck <daily> *`` — the daily/period journal surface.
 
-    ``init`` / ``migrate`` manage the journal itself, ``save`` / ``log``
-    are refused (a daily space has no HISTORY.md), and every ordinary
-    task action is delegated to the shared space engine AFTER the lazy
-    date rollover. A bare ``ck today`` is the documented shortcut for
-    ``ck today list`` (the flat daily view).
+    ``today`` (v0.12.0) plus the v0.14.0 period journals ``week`` /
+    ``month`` / ``year`` share one lifecycle: ``init`` manages the
+    journal itself (``migrate`` is the legacy-``today`` rename only),
+    ``save`` / ``log`` are refused (a journal has no HISTORY.md), and
+    every ordinary task action is delegated to the shared space engine
+    AFTER the lazy period rollover. A bare ``ck <daily>`` is the
+    documented shortcut for ``ck <daily> list`` (the flat view).
     """
     from . import spaces
 
@@ -2519,10 +2543,11 @@ def _run_today_command(rest: List[str]) -> int:
 
     if action == "init":
         if args:
-            _print_error("ERROR: `ck today init` takes no arguments.")
+            _print_error(
+                f"ERROR: `ck {space} init` takes no arguments.")
             return 2
         try:
-            info = spaces.init_daily_space()
+            info = spaces.init_daily_space(space)
         except ValueError as e:
             _notice(ui.ERR, str(e))
             return 1
@@ -2531,10 +2556,15 @@ def _run_today_command(rest: List[str]) -> int:
         else:
             _notice(
                 ui.OK,
-                f"Initialized daily space 'today' for {info['date']}.")
+                f"Initialized daily space '{space}' for {info['date']}.")
         return 0
 
     if action == "migrate":
+        if space != "today":
+            _print_error(
+                f"ERROR: Unknown `ck {space}` action: 'migrate'\n"
+                "   'migrate' renames the LEGACY 'today' space only.")
+            return 2
         new_name = "todo"
         if args:
             if args[0] == "--name" and len(args) == 2:
@@ -2575,30 +2605,32 @@ def _run_today_command(rest: List[str]) -> int:
 
     if action not in _SPACE_ACTIONS:
         _print_error(
-            f"ERROR: Unknown `ck today` action: {action!r}\n"
-            "   Usage: ck today [st|list|add|start|done|note|notes|"
-            "edit|dashboard|init|migrate]")
+            f"ERROR: Unknown `ck {space}` action: {action!r}\n"
+            f"   Usage: ck {space} [st|list|add|start|done|note|notes|"
+            f"edit|dashboard|init"
+            + ("|migrate]" if space == "today" else "]"))
         return 2
 
-    status = spaces.today_status()
+    status = spaces.daily_status(space)
     if status == "none":
         _notice(
             ui.ERR,
-            "Daily space 'today' is not initialized. "
-            "Run `ck today init`.")
+            f"Daily space '{space}' is not initialized. "
+            f"Run `ck {space} init`.")
         return 1
     if status == "active":
-        rolled = spaces.maybe_rollover_today()
+        rolled = spaces.maybe_rollover_daily(space)
         if rolled["missing"]:
-            _notice(ui.WARN, "today.md was missing, recreated empty.")
+            _notice(ui.WARN,
+                    f"{space}.md was missing, recreated empty.")
         if rolled["rolled"]:
             _notice(
                 ui.OK,
                 f"Rolled over {rolled['old']} → {rolled['new']}: "
                 f"removed {rolled['removed']} completed, "
                 f"carried over {rolled['carried']}.")
-    # A bare ``ck today`` is the documented shortcut for ``ck today list``.
-    return _run_space_command("today", rest or ["list"])
+    # A bare ``ck <daily>`` is the documented shortcut for the list view.
+    return _run_space_command(space, rest or ["list"])
 
 
 def _run_space_command(space: str, rest: List[str]) -> int:
