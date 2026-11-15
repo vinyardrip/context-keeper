@@ -77,6 +77,7 @@ COMPLETION_COMMANDS: Tuple[Tuple[str, str], ...] = (
     ("notes", "list active process notes"),
     ("edit", "open PLAN.md in the editor"),
     ("log", "open HISTORY.md in the editor"),
+    ("export", "assemble AI context report on STDOUT"),
     ("save", "save the current context"),
     ("space", "manage global spaces"),
     ("local", "workstation space"),

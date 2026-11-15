@@ -98,7 +98,9 @@ from .parser import (
     normalize_plan,
     parse_history_file,
     parse_plan_file,
+    render_history_notes,
     render_plan,
+    render_task_notes,
     sanitize_task_text,
 )
 
@@ -119,6 +121,19 @@ _BLANKET_IGNORE_PATTERNS = (
 # wrapped in ``` fences by ``Notes.render``; the date anchor plus
 # fence-state tracking excludes those false matches.
 _HISTORY_ENTRY_RE = re.compile(r"^### \d{4}-\d{2}-\d{2}.*$")
+
+
+def _strip_fences(text: str) -> str:
+    """Remove fence markers so a nested block cannot break Markdown.
+
+    Same defensive idiom as :meth:`cklib.models.Notes.render`: any
+    `` ```text `` / `` ``` `` / ``~~~`` inside captured content is
+    stripped, so a fenced export section can never be closed early
+    by the file it quotes.
+    """
+    for fence in ("```text", "```", "~~~"):
+        text = text.replace(fence, "")
+    return text
 
 
 def _iter_history_lines(content: str):
@@ -2973,6 +2988,185 @@ class ContextKeeper:
         if not parts:
             return notice(INFO, "No history entries found.")
         return "\n".join(parts)
+
+    # ------------------------------------------------------------------ #
+    # COMMAND: export (AI context assembly, STDOUT Markdown)              #
+    # ------------------------------------------------------------------ #
+
+    def export_report(self, *, task_id: Optional[int] = None,
+                      with_errors: bool = False) -> str:
+        """Assemble the project context as ONE clean Markdown document.
+
+        The report is written for copy-paste into an AI chat: plain
+        text, no ANSI styling, deterministic section order.
+
+        Sections (default mode):
+
+        - ``# CK Context Export: <project>`` + a generation stamp;
+        - ``## Plan (PLAN.md)`` — the display plan verbatim (same
+          path :meth:`full_plan_text` reads: a hand-edited root
+          ``PLAN.md`` wins over the ``.ck/`` copy);
+        - ``## History (HISTORY.md)`` — the live history file
+          verbatim (rotation archives are NOT pulled in; the current
+          ledger is the context that matters);
+        - ``## Recent Commits`` — ``git log -n 5 --oneline`` of the
+          project root (a muted note when unavailable).
+
+        ``task_id`` (``--task``) switches to a single-task report:
+        the task is looked up in PLAN.md first (positional ID, same
+        numbering ``ck list`` prints), then — when the plan has no
+        such ID — positionally in HISTORY.md's completed ledger
+        (``1`` = oldest entry). Raises ``ValueError`` when neither
+        file can serve the ID.
+
+        ``with_errors`` (``--with-errors``) appends a ``## Recent
+        Errors`` section: the most recently modified ``*.log`` /
+        ``*.err`` files found directly inside ``airlock/`` and
+        ``tests/`` under the project root (tail of each file, in a
+        fence). Conventional locations only — never a recursive
+        sweep of the whole project.
+
+        ROOTLESS keeper: raises the standard ValueError the CLI
+        reports as ``ERROR: No active project found.`` (exit 1).
+        """
+        if self.root is None or self.ck_path is None:
+            raise ValueError(
+                "No active project found. Run 'ck init' in a project "
+                "directory first."
+            )
+        # An uninitialized directory (cwd itself is returned as the
+        # root) would otherwise render a report of empty placeholders:
+        # assembling "project context" without any context is an error,
+        # the same guard `ck log` applies to history reads.
+        if not (self._plan_display_path().is_file()
+                or self.history_file.is_file()):
+            raise ValueError(
+                "No active project found. Run 'ck init' in a project "
+                "directory first."
+            )
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        header = (f"# CK Context Export: {self.root.name}\n\n"
+                  f"Generated: {now} | ck v{VERSION}")
+        body = self._export_task_block(task_id) if task_id is not None \
+            else self._export_triad_blocks()
+        parts = [header, body]
+        if with_errors:
+            parts.append(self._export_errors_block())
+        return "\n\n".join(parts) + "\n"
+
+    def _export_triad_blocks(self) -> str:
+        """The default Plan + History + Recent Commits section trio."""
+        plan_text = self._read_export_file(self._plan_display_path())
+        history_path = self.history_file
+        if is_dev_mode() and history_path is not None:
+            mirrored = resolve_write_path(history_path)
+            if mirrored.exists():
+                history_path = mirrored
+        history_text = self._read_export_file(history_path)
+        blocks = [
+            "## Plan (PLAN.md)\n\n" + (plan_text or "_(no plan yet)_"),
+            "## History (HISTORY.md)\n\n"
+            + (history_text or "_(no history yet)_"),
+        ]
+        commits = gith.recent_commits(5, path=self.root)
+        blocks.append(
+            "## Recent Commits\n\n"
+            + (commits
+               or "_(not a git repository, no commits yet, or git "
+                  "unavailable)_")
+        )
+        return "\n\n".join(blocks)
+
+    def _export_task_block(self, task_id: int) -> str:
+        """The ``--task`` section: one task, its status and its notes.
+
+        PLAN.md wins (positional ID); a miss falls through to the
+        HISTORY.md completed ledger by position (1 = oldest entry).
+        """
+        tl = parse_plan_file(self._plan_display_path())
+        task = tl.by_id(task_id)
+        if task is not None:
+            status_word = {
+                TaskStatus.OPEN: "open",
+                TaskStatus.FOCUSED: "focused",
+                TaskStatus.PAUSED: "paused",
+                TaskStatus.DONE: "done",
+            }[task.status]
+            lines = [task.to_line(), *render_task_notes(task)]
+            return (f"## Task #{task.id} ({status_word})\n\n"
+                    + "\n".join(lines))
+        entries = parse_history_file(self.history_file)
+        if 1 <= task_id <= len(entries):
+            entry = entries[task_id - 1]
+            lines = [entry.to_line(), *render_history_notes(entry)]
+            return (f"## Task #{task_id} (done {entry.timestamp})\n\n"
+                    + "\n".join(lines))
+        raise ValueError(
+            f"Task #{task_id} not found in PLAN.md or HISTORY.md."
+        )
+
+    def _export_errors_block(self) -> str:
+        """The ``--with-errors`` section: tails of the newest logs.
+
+        Scans ``<root>/airlock/`` and ``<root>/tests/`` (conventional
+        error-log locations; see ROADMAP ``--with-errors``) for
+        ``*.log`` / ``*.err`` files, newest-modified first. A header
+        with a muted note is emitted even when nothing is found, so
+        AI consumers can rely on the section set being stable.
+        """
+        candidates: list[Path] = []
+        for dirname in ("airlock", "tests"):
+            base = self.root / dirname
+            if not base.is_dir():
+                continue
+            for pattern in ("*.log", "*.err"):
+                try:
+                    candidates.extend(
+                        p for p in base.glob(pattern) if p.is_file())
+                except OSError:
+                    continue
+        ranked: list[tuple[int, Path]] = []
+        for path in candidates:
+            try:
+                ranked.append((path.stat().st_mtime_ns, path))
+            except OSError:
+                continue
+        ranked.sort(key=lambda pair: pair[0], reverse=True)
+        blocks: list[str] = ["## Recent Errors"]
+        if not ranked:
+            blocks.append("_(no error logs found in airlock/ or tests/)_")
+        for mtime_ns, path in ranked[:3]:
+            text = self._read_export_file(path)
+            if not text:
+                continue
+            tail = "\n".join(text.splitlines()[-40:])
+            try:
+                rel = path.relative_to(self.root)
+            except ValueError:
+                rel = path
+            stamp = datetime.fromtimestamp(
+                mtime_ns / 1e9, tz=timezone.utc,
+            ).strftime("%Y-%m-%d %H:%M UTC")
+            blocks.append(
+                f"### {rel} (modified {stamp})\n\n"
+                f"```text\n{_strip_fences(tail)}\n```"
+            )
+        return "\n\n".join(blocks)
+
+    @staticmethod
+    def _read_export_file(path: Optional[Path]) -> Optional[str]:
+        """Read a file for the export report (None when absent/unreadable).
+
+        Content is returned verbatim (rstripped) — the ``<!-- id: ...
+        -->`` references and ``* Note`` lines stay in, because they are
+        exactly the stable identifiers an AI consumer needs.
+        """
+        if path is None or not path.is_file():
+            return None
+        try:
+            return path.read_text(encoding="utf-8").rstrip()
+        except (OSError, UnicodeDecodeError):
+            return None
 
     # ------------------------------------------------------------------ #
     # COMMAND: update (git pull --ff-only / standalone in-place refresh)  #

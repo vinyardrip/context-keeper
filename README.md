@@ -25,6 +25,7 @@ CLI bridge between your brain, AI agents, and Git. Persistently saves the curren
 - 📂 Project Structure
 - 🛠 Commands
 - ck save Workflow
+- AI Workflow
 - 🔧 Core Mechanics
 - 🧪 Developer Environment & Isolated Sandbox
 - 🗺 Roadmap
@@ -155,6 +156,9 @@ ck -v    # → ck version 0.13.3
 | ck save | Checkpoint workflow (does **not** complete the task): append an optional note body + short summary to `.ck/JOURNAL.md`, then optionally create a **local** Git commit. Completion stays a separate `ck done <ID>` action |
 | ck log | Open HISTORY.md in your editor (see [Editor Resolution](#editor-resolution)) |
 | ck log --all | View the full history: every rotation archive (`.md.gz` decompressed / legacy `.md.bak`, oldest first) concatenated with the current HISTORY.md |
+| ck export | Assemble the AI context report on STDOUT: PLAN.md + HISTORY.md + `git log -n 5 --oneline` as ONE clean Markdown document (plain text, no ANSI) — copy-paste it straight into an AI chat. See [AI Workflow](#ai-workflow) |
+| ck export --task \<ID\> | Export a single task: its line, status and process notes. The ID is looked up in PLAN.md first (the numbering `ck list` prints), then positionally in HISTORY.md (1 = the oldest completed entry). Unknown ID → exit 1 |
+| ck export --with-errors | Append a `## Recent Errors` section: tails of the most recently modified `*.log` / `*.err` files found in `airlock/` and `tests/` under the project root (up to 3 files, last 40 lines each); a muted note is printed when there is nothing to capture. Flags combine: `ck export --task 7 --with-errors` |
 | ck st | Status overview: a top focus line `-> CURRENT FOCUS: [#<id>] <title>` (with its note), then the WORK CONTEXT block — `[>] Focus`, `[~] Paused` (tasks parked by `ck focus`, notes attached), `[x] History (last 3)` (the latest HISTORY.md ledger entries; `ck st --history N` widens it), and a highlighted bottom banner `>> Backlog: N task(s) remaining` |
 | ck notes | List all active process notes: `[>] Active Focus:` plus `[!] Unfocused / Paused Context:` with every entry of each task's note, in append order (`[i] No active process notes found.` when none) |
 | ck st -l / --list | Print the task list to STDOUT. Inside a project this is identical to `ck list`; outside one it follows the `ck st` hierarchy (global-registry fallback), whereas `ck list` deliberately never guesses — see [ck list Outside a Project](#ck-list-outside-a-project) |
@@ -690,6 +694,59 @@ the task — notes included — into HISTORY.md).
    If Git is unavailable or you decline, the journal entry stays saved.
 4. Auto-archive JOURNAL.md when the limit is reached (gapless rotation,
    original preserved as a compressed `.md.gz` archive by default).
+
+---
+
+## <a name="ai-workflow"></a>AI Workflow
+
+`ck export` assembles everything an AI assistant needs to know about the
+current project into ONE clean Markdown document on STDOUT — paste it
+straight into an AI chat (opencode, Claude, …), an issue body or a
+hand-off note.
+
+```bash
+ck export
+```
+
+Output sections (fixed order, plain text — no ANSI codes, safe to pipe):
+
+1. `# CK Context Export: <project>` — header with a generation stamp;
+2. `## Plan (PLAN.md)` — the current plan verbatim: open / focused /
+   paused tasks, inline notes, stable `<!-- id: ... -->` references;
+3. `## History (HISTORY.md)` — the completed-task ledger;
+4. `## Recent Commits` — `git log -n 5 --oneline` of the project root
+   (a muted note when the directory is not a git repository).
+
+```bash
+ck export > context.md        # save for later / attach as a file
+ck export | clip              # or pipe it straight into the clipboard
+```
+
+### Focus one task
+
+```bash
+ck export --task 7
+```
+
+Prints ONLY task #7: its status, line and process notes. The ID is
+looked up in PLAN.md first (the same numbering `ck list` prints); when
+the plan has no such ID the lookup falls back positionally to
+HISTORY.md (1 = the oldest completed entry), so finished work can be
+exported by the same handle. An unknown ID exits 1.
+
+### Include recent error logs
+
+```bash
+ck export --with-errors
+```
+
+Appends a `## Recent Errors` section: the tails of the most recently
+modified `*.log` / `*.err` files found in `airlock/` and `tests/`
+under the project root (up to 3 files, last 40 lines each, newest
+first, each wrapped in a fenced text block). When the folders hold no
+logs, the section prints a muted note instead of disappearing.
+
+Flags combine: `ck export --task 7 --with-errors`.
 
 ---
 
@@ -1298,6 +1355,7 @@ CLI-мост между вашим разумом, ИИ-агентами и Git.
 - 📂 Структура проекта
 - 🛠 Команды
 - Сценарий работы ck save
+- AI Workflow (русская версия)
 - 🔧 Механика работы
 - 🧪 Разработка и изолированная песочница
 - 🗺 Roadmap
@@ -1707,6 +1765,58 @@ $ echo $?
    запись журнала остаётся сохранённой.
 4. Авто-архивация JOURNAL.md при превышении лимита (бесшовная ротация,
    оригинал сохраняется как сжатый `.md.gz`-архив).
+
+---
+
+## AI Workflow (русская версия)
+
+`ck export` собирает всё, что ИИ-ассистенту нужно знать о текущем
+проекте, в ОДИН чистый Markdown-документ на STDOUT — вставьте его
+прямо в чат с ИИ (opencode, Claude, …), в issue или в заметку для
+передачи контекста.
+
+```bash
+ck export
+```
+
+Секции вывода (фиксированный порядок, чистый текст — без ANSI-кодов):
+
+1. `# CK Context Export: <проект>` — заголовок со штампом времени;
+2. `## Plan (PLAN.md)` — текущий план как есть: открытые / сфокусированные /
+   приостановленные задачи, инлайновые заметки, стабильные ссылки
+   `<!-- id: ... -->`;
+3. `## History (HISTORY.md)` — журнал завершённых задач;
+4. `### Recent Commits` — `git log -n 5 --oneline` корня проекта
+   (вежливая пометка, если каталог не git-репозиторий).
+
+```bash
+ck export > context.md        # сохранить на потом / приложить файлом
+```
+
+### Фокус на одной задаче
+
+```bash
+ck export --task 7
+```
+
+Печатает ТОЛЬКО задачу №7: статус, строку и процессные заметки. ID
+сначала ищется в PLAN.md (нумерация та же, что печатает `ck list`);
+если в плане такого ID нет — позиционно в HISTORY.md (1 = самая
+старая завершённая запись). Неизвестный ID — exit 1.
+
+### Последние логи ошибок
+
+```bash
+ck export --with-errors
+```
+
+Добавляет секцию `## Recent Errors`: хвосты самых свежих
+`*.log` / `*.err`-файлов из `airlock/` и `tests/` в корне проекта
+(до 3 файлов, последние 40 строк каждый, от новых к старым, каждый
+в текстовом fence-блоке). Если логов нет — секция печатает вежливую
+пометку вместо того, чтобы исчезнуть.
+
+Флаги комбинируются: `ck export --task 7 --with-errors`.
 
 ---
 

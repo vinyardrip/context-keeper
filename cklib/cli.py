@@ -72,6 +72,7 @@ _HELP_GROUPS: List[tuple] = [
         ("st --history N", "Show the last N completed entries"),
         ("list [project]", "Print task list (pipe-friendly)"),
         ("dashboard [-v]", "Cross-project dashboard"),
+        ("export", "Assemble AI context (PLAN+HISTORY+git log) on STDOUT"),
     ]),
     ("SAVE", [
         ("save", "Checkpoint to JOURNAL.md + optional local git commit"),
@@ -207,7 +208,7 @@ _NOTIFIER_COMMANDS = frozenset({"done", "save"})
 # dangling (the keeper is rootless there, not broken).
 _LOCAL_ONLY_COMMANDS = frozenset({
     "init", "start", "done", "add", "note", "notes", "save", "edit",
-    "log",
+    "log", "export",
 })
 # ``delete`` / ``rm`` are deliberately NOT local-only: with
 # ``-s <space>`` they mutate a GLOBAL space and must work even when
@@ -445,6 +446,22 @@ def build_parser() -> "argparse.ArgumentParser":
              "decompressed / legacy .md.bak, oldest first) followed by "
              "the current HISTORY.md",
     )
+    p_export = sub.add_parser(
+        "export",
+        help="Assemble project context (PLAN.md + HISTORY.md + recent "
+             "git commits) as clean Markdown on STDOUT",
+    )
+    p_export.add_argument(
+        "--task", type=int, default=None, metavar="ID",
+        help="Export ONE task: its line, status and notes (looked up "
+             "in PLAN.md by ID, then positionally in HISTORY.md; "
+             "1 = oldest history entry)",
+    )
+    p_export.add_argument(
+        "--with-errors", dest="with_errors", action="store_true",
+        help="Append the latest error logs (*.log / *.err) found in "
+             "airlock/ and tests/ under the project root",
+    )
     sub.add_parser("info", help="Show installation diagnostics")
 
     p_completion = sub.add_parser(
@@ -557,6 +574,7 @@ _LEGACY_CHOICES = (
     "local", "remote", "today", "space",
     "completion",
     "dev", "sandbox", "ck-clean",
+    "export",
 )
 
 # Space-routed actions: `ck <space> <action> [...]` dispatches to
@@ -628,6 +646,7 @@ _LEGACY_FLAGS: dict[str, frozenset] = {
     "save": frozenset(),
     "edit": frozenset(),
     "log": frozenset({"--all"}),
+    "export": frozenset({"--task", "--with-errors"}),
     "info": frozenset(),
     "register": frozenset({"-n", "--name", "--path"}),
     "unregister": frozenset({"--path"}),
@@ -1295,6 +1314,9 @@ def _dispatch(argv: Optional[List[str]] = None) -> int:
                 print(ck.read_full_history())
             else:
                 ck.edit_log()
+        elif args.command == "export":
+            return _run_export(ck, task_id=args.task,
+                               with_errors=args.with_errors)
         elif args.command == "register":
             path = Path(args.path).resolve() if args.path else None
             entry = ck.register(path=path, name=args.name)
@@ -2092,6 +2114,24 @@ def _run_status(ck: ContextKeeper, rest: List[str]) -> int:
     return 0
 
 
+def _run_export(ck: ContextKeeper, *, task_id: Optional[int] = None,
+                with_errors: bool = False) -> int:
+    """Run ``ck export`` — print the assembled context report.
+
+    One implementation path for BOTH dispatch styles (argparse and
+    legacy): the report goes to STDOUT verbatim (copy-paste clean,
+    no ANSI styling), errors go through the standard ``ERROR:``
+    channel with exit 1 (no project) / 2 (usage).
+    """
+    try:
+        report = ck.export_report(task_id=task_id, with_errors=with_errors)
+    except ValueError as e:
+        _print_error(f"ERROR: {e}")
+        return 1
+    print(report)
+    return 0
+
+
 def _legacy_dispatch(raw: List[str]) -> int:
     """Dispatch legacy positional invocations (preserves old UX)."""
     cmd, rest = raw[0], raw[1:]
@@ -2327,6 +2367,46 @@ def _legacy_dispatch(raw: List[str]) -> int:
                 print(ck.read_full_history())
             else:
                 ck.edit_log()
+        elif cmd == "export":
+            task_id: Optional[int] = None
+            with_errors = False
+            tokens = list(rest)
+            index = 0
+            while index < len(tokens):
+                tok = tokens[index]
+                if tok == "--task":
+                    if index + 1 >= len(tokens):
+                        _print_error("ERROR: `--task` requires a task ID.")
+                        return 2
+                    try:
+                        task_id = int(tokens[index + 1])
+                    except ValueError:
+                        _print_error(
+                            f"ERROR: Invalid task ID: {tokens[index + 1]!r}")
+                        return 2
+                    index += 2
+                    continue
+                if tok.startswith("--task="):
+                    try:
+                        task_id = int(tok.split("=", 1)[1])
+                    except ValueError:
+                        _print_error(
+                            f"ERROR: Invalid task ID: {tok!r}")
+                        return 2
+                    index += 1
+                    continue
+                if tok == "--with-errors":
+                    with_errors = True
+                    index += 1
+                    continue
+                # _reject_unknown_flags already filtered the flag set;
+                # anything reaching here is a stray positional.
+                _print_error(
+                    "ERROR: Usage: ck export [--task <ID>] "
+                    "[--with-errors]")
+                return 2
+            return _run_export(ck, task_id=task_id,
+                               with_errors=with_errors)
         elif cmd == "register":
             name = None
             path = None

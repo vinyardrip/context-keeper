@@ -204,6 +204,28 @@ def is_dirty(path: Path | None = None) -> bool:
     return bool(result.stdout.strip())
 
 
+def recent_commits(n: int = 5, path: Path | None = None,
+                   *, timeout: float = 5.0) -> Optional[str]:
+    """The last ``n`` commits as ``git log --oneline`` text, or None.
+
+    Read-only inspection for the ``ck export`` context report. Returns
+    None when Git is unavailable, ``path`` is outside any work tree,
+    the repository has no commits yet, or the probe fails — callers
+    degrade gracefully instead of surfacing a git error. ``--no-color``
+    is pinned so the text stays copy-paste clean for AI consumers.
+    """
+    if n < 1 or not _resolve_git():
+        return None
+    cwd = str(path) if path else None
+    result = _run(
+        ["--no-pager", "log", "--no-color", f"-n{n}", "--oneline"],
+        cwd=cwd, timeout=timeout,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
 # ---------------------------------------------------------------------------
 # Repo mutation (local only)
 # ---------------------------------------------------------------------------
