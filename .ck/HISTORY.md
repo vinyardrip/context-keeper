@@ -96,7 +96,6 @@
 - [x] 2026-11-15 06:05: smoke test v0.13.3 <!-- id: sro53huc -->
 - [x] 2026-11-16 01:33: ck export: сборка PLAN.md + HISTORY.md + (опционально) git log -n 5 в единый Markdown для STDOUT <!-- id: g32siqzw -->
 - [x] 2026-11-16 01:33: ck export: добавить флаг --task <ID> для фокуса только на одной задаче и её заметках <!-- id: ohb022b0 -->
-- [x] 2026-11-16 01:33: ck export: сборка PLAN.md + HISTORY.md + (опционально) git log -n 5 в единый Markdown для STDOUT <!-- id: yt87h6to -->
 - [x] 2026-11-16 01:33: DAILY_SPACES week/month/year: тесты + README/ROADMAP документация (EN/RU) <!-- id: 18nv3lpd -->
 - [x] 2026-11-16 01:33: notify: команда ck notify --check — проверка дедлайнов для cron (тихий режим, exit-коды 0/1) <!-- id: 2jx5ufhn -->
 - [x] 2026-11-16 01:48: notify: пример crontab в README + тесты (--due парсинг, notify --check) <!-- id: cclrp0jq -->
