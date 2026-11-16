@@ -100,6 +100,7 @@ from .parser import (
     parse_plan_file,
     render_history_notes,
     render_plan,
+    render_task_description,
     render_task_notes,
     sanitize_task_text,
 )
@@ -1787,6 +1788,46 @@ class ContextKeeper:
             "notes": entries,
         }
 
+    def set_description(self, task_id: int, text: str) -> dict:
+        """Replace a task's multiline description (v0.13.4).
+
+        The description is stored INLINE in ``PLAN.md`` as indented
+        ``> text`` lines directly beneath the task bullet and joined
+        with newlines on the AST node. An empty ``text`` CLEARS the
+        description. The whole value is replaced on every call (a
+        description is an edited field, unlike the append-only notes).
+
+        Returns ``{"id", "title", "description"}``.
+        """
+        self._require_bound_plan()
+        self._require_migrated()
+        tl = self._load_plan()
+        target = tl.by_id(task_id)
+        if target is None:
+            raise KeyError(f"No task with id {task_id}")
+        target.description = text.strip("\n")
+        self._commit_plan(tl)
+        return {
+            "id": target.id,
+            "title": target.title,
+            "description": target.description,
+        }
+
+    def get_description(self, task_id: int) -> Optional[str]:
+        """The task's description text, or None when it has none.
+
+        The target is looked up in the live plan only (descriptions
+        are a plan-level field; history entries do not carry one).
+        """
+        try:
+            tl = self._load_plan()
+        except (OSError, ValueError):
+            return None
+        target = tl.by_id(task_id)
+        if target is None or not target.description:
+            return None
+        return target.description
+
     def get_note(self) -> Optional[dict]:
         """Return the active task's newest note dict, or None.
 
@@ -3092,7 +3133,8 @@ class ContextKeeper:
                 TaskStatus.PAUSED: "paused",
                 TaskStatus.DONE: "done",
             }[task.status]
-            lines = [task.to_line(), *render_task_notes(task)]
+            lines = [task.to_line(), *render_task_description(task),
+                     *render_task_notes(task)]
             return (f"## Task #{task.id} ({status_word})\n\n"
                     + "\n".join(lines))
         entries = parse_history_file(self.history_file)
@@ -4191,6 +4233,10 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
         lines.append(
             " -> CURRENT FOCUS: "
             + p.bold_yellow(f"[#{focus.id}] {focus.title}"))
+        if focus.description:
+            lines.extend(
+                f"    > {chunk}" if chunk else "    >"
+                for chunk in focus.description.split("\n"))
         lines.extend(_note_display_lines(
             ck.get_note_entries(focus.id), "    ", p))
 
@@ -4341,6 +4387,12 @@ def _render_tasks_listing(tl: TaskList,
             current_section = t.section
         marker = t.status.canonical_marker
         lines.append(f"[{marker}] {t.id}. {t.title}")
+        if t.description:
+            # v0.13.4: the multiline description renders as indented
+            # ``> text`` lines directly beneath its task (only when
+            # present, so desc-less plans keep their exact output).
+            lines.extend(f"    > {chunk}" if chunk else "    >"
+                         for chunk in t.description.split("\n"))
         if p is not None:
             note = notes.get(t.id)
             if note:

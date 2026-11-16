@@ -79,6 +79,14 @@ _INLINE_NOTE_RE = re.compile(
     r"^\s*\*\s*Note(?:\s*\((?P<stamp>[^)]*)\))?:\s*(?P<text>.+?)\s*$"
 )
 
+# Multiline task description line (v0.13.4), directly beneath a task
+# bullet (or beneath another owned description / note line):
+#   "  > First description line"
+#   "  >"                            (empty paragraph-break line)
+# The indent requirement keeps column-0 blockquotes (user prose in
+# sections) unowned — only indented quotes attach to tasks.
+_DESC_LINE_RE = re.compile(r"^\s+>\s?(?P<text>.*)$")
+
 _HEADER_RE = re.compile(r"^(?P<level>#{1,6})\s+(?P<title>.+?)\s*$")
 
 # HISTORY.md completed-task line:
@@ -280,6 +288,10 @@ def parse_plan(text: str) -> TaskList:
     - ``* Note (...)`` lines directly beneath a task bullet attach to
       that task as inline note entries — they never become sections
       or standalone lines.
+    - Indented ``> text`` lines directly beneath a task bullet (or
+      beneath its note/description lines) attach to that task as the
+      multiline ``description`` (v0.13.4); a column-0 ``>`` blockquote
+      is prose and stays unowned.
 
     The ORIGINAL line endings (CRLF vs LF) are recorded on the
     TaskList (``newline``) so ``render_plan`` can emit a byte-ident
@@ -289,6 +301,10 @@ def parse_plan(text: str) -> TaskList:
     sections: list[Section] = []
     current_section = ""
     next_id = 1
+    # True while the previous non-empty line belonged to the current
+    # task block (the bullet itself, an owned note or description
+    # line) — the window in which ``> `` lines attach as description.
+    in_task_block = False
 
     # Detect the dominant line ending so the renderer can preserve
     # the file's existing format (M-4 fidelity).
@@ -309,6 +325,18 @@ def parse_plan(text: str) -> TaskList:
                 level=len(header.group("level")),
                 line_number=idx,
             ))
+            in_task_block = False
+            continue
+
+        # Multiline task description (v0.13.4): indented ``> text``
+        # lines directly beneath a task bullet (or beneath another
+        # owned note/description line of the same task). Column-0
+        # blockquotes are user prose and stay unowned.
+        desc_match = _DESC_LINE_RE.match(line)
+        if desc_match and tasks and in_task_block:
+            chunk = desc_match.group("text").rstrip()
+            prev = tasks[-1].description
+            tasks[-1].description = f"{prev}\n{chunk}" if prev else chunk
             continue
 
         # Inline note under the most recent task bullet: attached to
@@ -323,6 +351,9 @@ def parse_plan(text: str) -> TaskList:
                     "text": note_text,
                     "created": _stamp_to_iso(stamp),
                 })
+                # in_task_block stays as it was: a note INSIDE a
+                # contiguous task block keeps it alive for a following
+                # description; an orphan note after prose does not.
                 continue
 
         canonical = _CANONICAL_TASK_RE.match(line)
@@ -335,6 +366,7 @@ def parse_plan(text: str) -> TaskList:
                 uuid=uuid,
             ))
             next_id += 1
+            in_task_block = True
             continue
 
         legacy = _LEGACY_OPEN_RE.match(line)
@@ -345,6 +377,7 @@ def parse_plan(text: str) -> TaskList:
                 True, uuid=uuid,
             ))
             next_id += 1
+            in_task_block = True
             continue
 
         legacy_fd = _LEGACY_FOCUSED_DONE_RE.match(line)
@@ -357,7 +390,12 @@ def parse_plan(text: str) -> TaskList:
                 uuid=uuid,
             ))
             next_id += 1
+            in_task_block = True
             continue
+
+        # Any other non-empty line (prose) ends the task block: a
+        # following ``>`` line is a blockquote, not a description.
+        in_task_block = False
 
     return TaskList(
         tasks=tasks, sections=sections, source_text=text, newline=newline
@@ -525,7 +563,8 @@ def _emit_with_source(tl: TaskList) -> str:
     # position in the surviving list, so substitution and insertion
     # hints keep working on the reduced document.
     removed = {ln for ln in getattr(tl, "removed_lines", ()) or ()
-               if isinstance(ln, int)} | _owned_note_lines(src_lines)
+               if isinstance(ln, int)} | _owned_note_lines(src_lines) \
+        | _owned_desc_lines(src_lines)
     out: list[str] = []
     pos_map: dict[int, int] = {}
     for old_pos, raw in enumerate(src_lines, start=1):
@@ -599,10 +638,12 @@ def _emit_with_source(tl: TaskList) -> str:
     for target, t in sorted(
             (pair for pair in tasks_with_position if pair[0] is not None),
             key=lambda pair: pair[0], reverse=True):
-        note_lines = render_task_notes(t)
-        if note_lines:
-            out[target + 1:target + 1] = note_lines
-            reemitted_notes.append((t.line_number, len(note_lines)))
+        # The inline block lives DIRECTLY under the task line:
+        # description first, then the note entries.
+        block = [*render_task_description(t), *render_task_notes(t)]
+        if block:
+            out[target + 1:target + 1] = block
+            reemitted_notes.append((t.line_number, len(block)))
 
     # Second pass: NEW tasks. Tasks carrying an explicit ``insert_line``
     # hint are inserted at that 1-based source position (the end of
@@ -615,7 +656,8 @@ def _emit_with_source(tl: TaskList) -> str:
             pending_append[0], out, max_src_line, pos_map=pos_map,
             reemitted_notes=reemitted_notes)
         for t in pending_append:
-            block = [t.to_line(), *render_task_notes(t)]
+            block = [t.to_line(), *render_task_description(t),
+                     *render_task_notes(t)]
             out[insert_at:insert_at] = block
             insert_at += len(block)
 
@@ -623,6 +665,22 @@ def _emit_with_source(tl: TaskList) -> str:
     if not rendered.endswith(nl):
         rendered += nl
     return rendered
+
+
+def render_task_description(task: Task) -> list[str]:
+    """The indented ``> text`` description lines for one task bullet.
+
+    Each description line renders as ``  > <text>`` (two-space
+    indent); an empty description line renders as the bare ``  >``
+    (a paragraph break inside the block), so a multiline description
+    round-trips byte-identically. An empty description emits nothing.
+    """
+    if not task.description:
+        return []
+    lines: list[str] = []
+    for chunk in task.description.split("\n"):
+        lines.append(f"  > {chunk}" if chunk else "  >")
+    return lines
 
 
 def render_task_notes(task: Task) -> list[str]:
@@ -665,6 +723,39 @@ def _owned_note_lines(src_lines: list[str]) -> set[int]:
             continue
         if _INLINE_NOTE_RE.match(line) and after_task:
             owned.add(pos)
+            continue
+        if _DESC_LINE_RE.match(line) and after_task:
+            # An owned description line keeps the task block alive
+            # for a note that follows it.
+            continue
+        after_task = _is_task_line(line)
+    return owned
+
+
+def _owned_desc_lines(src_lines: list[str]) -> set[int]:
+    """1-based source positions of DESCRIPTION lines owned by a task.
+
+    Same contiguous-block walk as :func:`_owned_note_lines`, extended
+    to the v0.13.4 indented ``> text`` description lines: a ``>``
+    line belongs to the task block when it follows the bullet, another
+    owned description line, or an owned note line. Column-0
+    blockquotes and ``>`` lines after unrelated prose are NOT owned
+    (they stay verbatim). The renderer drops these positions and
+    re-emits the description from the AST, so editing a description
+    never duplicates stale blocks.
+    """
+    owned: set[int] = set()
+    after_task = False
+    for pos, raw in enumerate(src_lines, start=1):
+        line = raw.rstrip()
+        if not line:
+            continue
+        if _DESC_LINE_RE.match(line) and after_task:
+            owned.add(pos)
+            continue
+        if _INLINE_NOTE_RE.match(line) and after_task:
+            # An owned note line keeps the task block alive for a
+            # description that follows it.
             continue
         after_task = _is_task_line(line)
     return owned
@@ -1012,6 +1103,7 @@ __all__ = [
     "parse_history_file",
     "render_history",
     "render_history_notes",
+    "render_task_description",
     "render_task_notes",
     "append_to_history",
     "sanitize_task_text",

@@ -188,6 +188,16 @@ class Task:
     notes: list = field(default_factory=list)
     legacy_syntax: bool = False
     uuid: str = ""
+    # Multiline task description (v0.13.4), stored INLINE as indented
+    # ``> text`` lines directly beneath the task bullet:
+    #
+    #     - [ ] title <!-- id: a1b2c3d4 -->
+    #       > First description line
+    #       > Second line
+    #
+    # Joined with newlines on the AST node; an empty string means "no
+    # description" (the renderer emits nothing).
+    description: str = ""
     # 1-based source position where a NEW task should be inserted
     # (end of the ``## Current Sprint`` section). Parsed tasks never
     # carry this hint; it routes the renderer through the INSERT

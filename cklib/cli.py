@@ -66,6 +66,8 @@ _HELP_GROUPS: List[tuple] = [
     ("NOTES", [
         ("note <text>", "Append a process note to the active task"),
         ("notes", "List active process notes"),
+        ("desc <ID> [text]", "Show / set the task's multiline "
+                             "description (--stdin / --clear)"),
     ]),
     ("VIEW", [
         ("st", "Status: Focus / Next / Paused / last history"),
@@ -211,8 +213,8 @@ _NOTIFIER_COMMANDS = frozenset({"done", "save"})
 # — all three groups stay usable even when the working directory is
 # dangling (the keeper is rootless there, not broken).
 _LOCAL_ONLY_COMMANDS = frozenset({
-    "init", "start", "done", "add", "note", "notes", "save", "edit",
-    "log", "export",
+    "init", "start", "done", "add", "note", "notes", "desc", "save",
+    "edit", "log", "export",
 })
 # ``delete`` / ``rm`` are deliberately NOT local-only: with
 # ``-s <space>`` they mutate a GLOBAL space and must work even when
@@ -436,6 +438,20 @@ def build_parser() -> "argparse.ArgumentParser":
     sub.add_parser(
         "notes", help="List all active process notes (focus + paused)")
 
+    p_desc = sub.add_parser(
+        "desc", help="Show or set a task's multiline description "
+                     "(stored inline in PLAN.md as `> text` lines)")
+    p_desc.add_argument("task_id", type=int, help="Task ID")
+    p_desc.add_argument(
+        "text", nargs="*", help="New description (omit to show; an "
+        "empty --stdin value clears it)")
+    p_desc.add_argument(
+        "--stdin", dest="stdin_mode", action="store_true",
+        help="Read the (multi-line) description from STDIN")
+    p_desc.add_argument(
+        "--clear", action="store_true",
+        help="Remove the task's description")
+
     sub.add_parser(
         "save", help="Checkpoint to HISTORY.md + optional local commit "
                      "(does not complete the task; use `ck done`)")
@@ -571,7 +587,8 @@ def build_parser() -> "argparse.ArgumentParser":
 # invocations like `ck add foo bar`).
 _LEGACY_CHOICES = (
     "init", "st", "dashboard", "start", "focus", "done", "add", "note",
-    "notes", "save", "edit", "log", "install", "uninstall", "update",
+    "notes", "desc", "save", "edit", "log", "install", "uninstall",
+    "update",
     "help", "list", "register", "unregister", "prune", "info",
     "move", "swap", "reorder", "migrate",
     "delete", "rm",
@@ -649,6 +666,7 @@ _LEGACY_FLAGS: dict[str, frozenset] = {
     "rm": frozenset({"-f", "--force", "-s", "--space"}),
     "note": frozenset({"--clear", "--list"}),
     "notes": frozenset(),
+    "desc": frozenset({"--stdin", "--clear"}),
     "save": frozenset(),
     "edit": frozenset(),
     "log": frozenset({"--all"}),
@@ -1314,6 +1332,16 @@ def _dispatch(argv: Optional[List[str]] = None) -> int:
             print(f"* Note saved for [{info['id']}]: {info['note']}")
         elif args.command == "notes":
             print(ck.notes())
+        elif args.command == "desc":
+            # One implementation path: translate the argparse
+            # namespace into the legacy token pipeline.
+            rest = [str(args.task_id)]
+            if args.clear:
+                rest.append("--clear")
+            if args.stdin_mode:
+                rest.append("--stdin")
+            rest.extend(args.text)
+            return _run_desc(ck, rest)
         elif args.command == "save":
             ck.save()
             _maybe_notify(ck)
@@ -2136,6 +2164,68 @@ def _run_status(ck: ContextKeeper, rest: List[str]) -> int:
     return 0
 
 
+def _run_desc(ck: ContextKeeper, rest: List[str]) -> int:
+    """Run ``ck desc`` — show / set / clear a task's description.
+
+    One implementation path for BOTH dispatch styles. ``rest`` after
+    the command word: ``<ID> [text...]`` (show when no text follows),
+    ``<ID> --stdin`` (multi-line value from STDIN) or
+    ``<ID> --clear``. Returns 0 on success, 1 on errors (unknown
+    task, unbound project, schema gate), 2 on usage errors.
+    """
+    if not rest:
+        print("Usage: ck desc <ID> [text] [--stdin|--clear]")
+        return 2
+    try:
+        task_id = int(rest[0])
+    except ValueError:
+        _print_error(f"ERROR: Invalid task ID: {rest[0]!r}")
+        return 2
+    args = rest[1:]
+    clear = "--clear" in args
+    stdin_mode = "--stdin" in args
+    text_tokens = [tok for tok in args if tok not in ("--clear",
+                                                      "--stdin")]
+    if clear and (stdin_mode or text_tokens):
+        _print_error(
+            "ERROR: `--clear` cannot be combined with a description "
+            "value.")
+        return 2
+    try:
+        if clear:
+            ck.set_description(task_id, "")
+            _notice(ui.OK, f"Description cleared on task #{task_id}.")
+            return 0
+        if stdin_mode:
+            text = sys.stdin.read().strip("\n")
+            if not text.strip():
+                ck.set_description(task_id, "")
+                _notice(ui.OK,
+                        f"Description cleared on task #{task_id} "
+                        "(empty STDIN).")
+                return 0
+        elif text_tokens:
+            text = " ".join(text_tokens)
+        else:
+            description = ck.get_description(task_id)
+            if description is None:
+                _notice(ui.INFO,
+                        f"No description on task #{task_id}.")
+            else:
+                print(description)
+            return 0
+        info = ck.set_description(task_id, text)
+        _notice(ui.OK, f"Description set on task #{task_id}.")
+        print(info["description"])
+        return 0
+    except KeyError:
+        _print_error(f"ERROR: No task with id {task_id}")
+        return 1
+    except ValueError as e:
+        _print_error(f"ERROR: {e}")
+        return 1
+
+
 def _run_export(ck: ContextKeeper, *, task_id: Optional[int] = None,
                 with_errors: bool = False) -> int:
     """Run ``ck export`` — print the assembled context report.
@@ -2378,6 +2468,8 @@ def _legacy_dispatch(raw: List[str]) -> int:
             print(f"* Note saved for [{info['id']}]: {info['note']}")
         elif cmd == "notes":
             print(ck.notes())
+        elif cmd == "desc":
+            return _run_desc(ck, rest)
         elif cmd == "save":
             ck.save()
             if notifiable:
