@@ -23,3 +23,15 @@
 - [ ] Fix remaining pre-existing test failures unrelated to v0.13.x <!-- id: m3mffqzd -->
 - [ ] Remove .ck_backup_* dirs after user verifies 12 migrated projects <!-- id: ucpibo83 -->
 - [ ] Keep version in sync across config/pyproject/README (single source: cklib/config.py) <!-- id: tvumm871 -->
+- [ ] BUG: _plan_display_path() prefers root PLAN.md over .ck/PLAN.md — ignored unless symlink (common: users wrote PLAN.md manually before installing ck) <!-- id: enwv6ea6 -->
+- [ ] BUG: ck st shows the same task in both [>] Next and [~] Paused when it has a note (duplicate title) <!-- id: hz1h95a0 -->
+- [ ] FEAT: ck <space> move/swap/reorder — task reordering inside spaces (parity with project commands) <!-- id: aq96ndsg -->
+- [ ] DAILY_SPACES week/month/year: расширить константу и период-логику дат (ключи <name>_date в state.json, шаблоны заголовков периода) <!-- id: o4ipjr6p -->
+- [ ] DAILY_SPACES week/month/year: rollover/reset как у today (без HISTORY, сброс при смене периода, today init/migrate паритет) <!-- id: 52mx7o1m -->
+- [ ] DAILY_SPACES week/month/year: тесты + README/ROADMAP документация (EN/RU) <!-- id: 18nv3lpd -->
+- [ ] description: многострочное описание задачи в PLAN.md — AST/parser (блок под задачей, byte-exact render_plan round-trip) <!-- id: 43d8jzsq -->
+- [ ] description: CLI — ck desc <ID> set/show/clear + вывод в st/list и ck export --task <!-- id: lmcfxg3m -->
+- [ ] description: тесты (round-trip, CLI) + README документация (EN/RU) <!-- id: 5ynv58xu -->
+- [ ] notify: --due YYYY-MM-DD — парсинг дедлайна в строке задачи (parser/models), просроченные подсвечиваются в st <!-- id: hl3vgwds -->
+- [ ] notify: команда ck notify --check — проверка дедлайнов для cron (тихий режим, exit-коды 0/1) <!-- id: 2jx5ufhn -->
+- [ ] notify: пример crontab в README + тесты (--due парсинг, notify --check) <!-- id: cclrp0jq -->
