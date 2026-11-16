@@ -15,7 +15,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional, Tuple
 
@@ -103,6 +103,7 @@ from .parser import (
     render_task_description,
     render_task_notes,
     sanitize_task_text,
+    parse_due,
 )
 
 
@@ -1319,7 +1320,7 @@ class ContextKeeper:
         with file_lock(self.plan_file):
             _atomic_write_text(self.plan_file, text)
 
-    def add_task(self, task_text: str) -> int:
+    def add_task(self, task_text: str, due: str = "") -> int:
         """Insert a new ``[ ] title`` task into PLAN.md and return its ID.
 
         The title is sanitized (ANSI escapes, control characters,
@@ -1328,6 +1329,10 @@ class ContextKeeper:
         at the end of ``## Current Sprint`` when that section exists,
         otherwise at the document end.
 
+        ``due`` (v0.13.5) optionally carries an ISO ``YYYY-MM-DD``
+        deadline; it is validated (calendar-exact) and stored as the
+        trailing ``@due(YYYY-MM-DD)`` marker on the task line.
+
         Every added task carries a fresh stable UUID rendered as the
         hidden ``<!-- id: ... -->`` comment (v0.13.0), so the
         reference survives every later re-index.
@@ -1335,13 +1340,16 @@ class ContextKeeper:
         title = sanitize_task_text(task_text)
         if not title:
             raise ValueError("Task text is empty")
+        if due and parse_due(due) is None:
+            raise ValueError(
+                f"Invalid due date (YYYY-MM-DD expected): {due!r}")
 
         self._require_migrated()
         self._ensure_ck_dir()
 
         if not self.plan_file.exists():
             tl = TaskList(source_text="")
-            tl.add(title, status=TaskStatus.OPEN)
+            tl.add(title, status=TaskStatus.OPEN, due=due)
             self._commit_plan(tl)
             return 1
 
@@ -1357,6 +1365,7 @@ class ContextKeeper:
         if _is_pristine_default_plan(tl):
             seed = tl.tasks[0]
             seed.title = title
+            seed.due = due
             # v0.13.0: the init seed itself is a placeholder without a
             # UUID; the moment it becomes a REAL task it is stamped so
             # every user-created task carries a stable reference.
@@ -1367,7 +1376,7 @@ class ContextKeeper:
         insert_line = _sprint_insert_line(tl)
         new_task = tl.add(
             title, status=TaskStatus.OPEN, section=section,
-            insert_line=insert_line,
+            insert_line=insert_line, due=due,
         )
 
         # ``render_plan`` will place any task whose ``line_number``
@@ -1827,6 +1836,40 @@ class ContextKeeper:
         if target is None or not target.description:
             return None
         return target.description
+
+    def notify_check(self) -> list[dict]:
+        """Every ACTIVE task carrying a due date, sorted by date (v0.13.5).
+
+        Rows: ``{"id", "title", "status", "due", "overdue", "due_today"}``.
+        ``overdue`` compares the due date against local TODAY
+        (:func:`_today`): a task due TODAY is actionable for cron but
+        not overdue. Completed tasks are excluded — HISTORY.md keeps
+        its own record. Raises ``ValueError`` when no project plan is
+        bound (the caller reports it like any other view command).
+        """
+        self._require_bound_plan()
+        self._require_migrated()
+        tl = self._load_plan()
+        today = _today()
+        rows: list[dict] = []
+        for t in tl.tasks:
+            if t.status == TaskStatus.DONE or not t.due:
+                continue
+            parsed = parse_due(t.due)
+            if parsed is None:
+                # A junk marker parsed as plain title text can never
+                # reach the AST ``due`` field, but stay defensive.
+                continue
+            rows.append({
+                "id": t.id,
+                "title": t.title,
+                "status": t.status.canonical_marker,
+                "due": t.due,
+                "overdue": parsed < today,
+                "due_today": parsed == today,
+            })
+        rows.sort(key=lambda row: row["due"])
+        return rows
 
     def get_note(self) -> Optional[dict]:
         """Return the active task's newest note dict, or None.
@@ -4123,6 +4166,35 @@ def _note_display_lines(entries, indent: str, palette) -> list[str]:
     return lines
 
 
+def _today() -> "date":
+    """The reference day for due-date comparisons (test seam).
+
+    Tests patch this instead of freezing the clock; production always
+    uses the local calendar day. One seam serves BOTH consumers
+    (:meth:`ContextKeeper.notify_check` and :func:`_due_suffix`) so
+    they can never disagree about what "today" is.
+    """
+    return date.today()
+
+
+def _due_suffix(task: Task, palette: "ui.Palette") -> str:
+    """The styled ``st`` suffix for a task's due date (v0.13.5).
+
+    `` [!] OVERDUE 2026-11-01`` (bold red) when the date is past,
+    `` (due 2026-12-01)`` (muted) when it is today or ahead; an empty
+    string without a due date. Shared by every ``st`` block so the
+    deadline marking is identical wherever the task appears.
+    """
+    if not task.due:
+        return ""
+    parsed = parse_due(task.due)
+    if parsed is None:
+        return ""
+    if parsed < _today():
+        return " " + palette.bold_red(f"[!] OVERDUE {task.due}")
+    return " " + palette.muted(f"(due {task.due})")
+
+
 def _render_local_status(ck: ContextKeeper, tl: TaskList,
                          *, palette: Optional["ui.Palette"] = None,
                          source: str = "local",
@@ -4232,7 +4304,8 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
         lines.append("")
         lines.append(
             " -> CURRENT FOCUS: "
-            + p.bold_yellow(f"[#{focus.id}] {focus.title}"))
+            + p.bold_yellow(f"[#{focus.id}] {focus.title}")
+            + _due_suffix(focus, p))
         if focus.description:
             lines.extend(
                 f"    > {chunk}" if chunk else "    >"
@@ -4263,12 +4336,14 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
         lines.append("    [>] Focus:")
         lines.append(
             "       - "
-            + p.bold_yellow(f"[#{focus.id}] {focus.title}"))
+            + p.bold_yellow(f"[#{focus.id}] {focus.title}")
+            + _due_suffix(focus, p))
     elif tl.open:
         t = tl.open[0]
         lines.append("    [>] Next:")
         lines.append(
             f"       - {p.bold_yellow(f'[{t.id}] {t.title}')} [ ]"
+            + _due_suffix(t, p)
         )
     else:
         lines.append(p.muted("    [>] Next: (no open tasks)"))
@@ -4292,11 +4367,12 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
             # Space adapter: an unnoted open task is backlog.
             continue
         paused_ids.add(p_task.id)
-        paused_display.append((p_task.id, p_task.title, p_entries))
+        paused_display.append((p_task.id, p_task.title, p_entries,
+                               _due_suffix(p_task, p)))
     if paused_display:
         lines.append(p.bold_yellow("    [~] Paused:"))
-        for pid, ptitle, pentries in paused_display:
-            lines.append(f"       - [{pid}] {ptitle}")
+        for pid, ptitle, pentries, pdue in paused_display:
+            lines.append(f"       - [{pid}] {ptitle}" + pdue)
             lines.extend(_note_display_lines(pentries, "         ", p))
     else:
         lines.append(p.muted("    [~] Paused: (none)"))
@@ -4347,7 +4423,9 @@ def _render_tasks_listing(tl: TaskList,
         [x] 4. old done task
 
     Status markers mirror PLAN.md syntax: ``[ ]`` open, ``[>]``
-    focused, ``[x]`` done. Empty plans render a single hint line.
+    focused, ``[x]`` done. A task with a deadline suffixes the same
+    greppable ``@due(YYYY-MM-DD)`` marker the file carries (v0.13.5).
+    Empty plans render a single hint line.
 
     ``notes`` (optional) maps task ID -> process note. Space
     lists (``ck <space> list``) pass their sidecar notes so every
@@ -4386,7 +4464,8 @@ def _render_tasks_listing(tl: TaskList,
             lines.append(header)
             current_section = t.section
         marker = t.status.canonical_marker
-        lines.append(f"[{marker}] {t.id}. {t.title}")
+        due_marker = f" @due({t.due})" if t.due else ""
+        lines.append(f"[{marker}] {t.id}. {t.title}{due_marker}")
         if t.description:
             # v0.13.4: the multiline description renders as indented
             # ``> text`` lines directly beneath its task (only when

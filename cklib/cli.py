@@ -23,6 +23,7 @@ from .core import (
     is_standalone_install,
     maybe_notify_update_for,
 )
+from .parser import parse_due
 from .models import CompletedTaskError
 from .registry import RegistryCorruptError
 from .sandbox import (
@@ -54,7 +55,8 @@ from .sandbox import (
 # down the page.
 _HELP_GROUPS: List[tuple] = [
     ("TASKS", [
-        ("add <text>", "Add a new task"),
+        ("add <text> [--due DATE]",
+         "Add a task (optional deadline: @due marker)"),
         ("start <ID>", "Focus a task (0 resets; refuses to steal focus)"),
         ("focus <ID>", "Switch focus: pause the current task ([~])"),
         ("done <ID|range>", "Mark task(s) done -> HISTORY.md"),
@@ -73,6 +75,7 @@ _HELP_GROUPS: List[tuple] = [
         ("st", "Status: Focus / Next / Paused / last history"),
         ("st --history N", "Show the last N completed entries"),
         ("list [project]", "Print task list (pipe-friendly)"),
+        ("notify --check", "Due-date check for cron (exit 1 when due)"),
         ("dashboard [-v]", "Cross-project dashboard"),
         ("export", "Assemble AI context (PLAN+HISTORY+git log) on STDOUT"),
     ]),
@@ -213,8 +216,8 @@ _NOTIFIER_COMMANDS = frozenset({"done", "save"})
 # — all three groups stay usable even when the working directory is
 # dangling (the keeper is rootless there, not broken).
 _LOCAL_ONLY_COMMANDS = frozenset({
-    "init", "start", "done", "add", "note", "notes", "desc", "save",
-    "edit", "log", "export",
+    "init", "start", "done", "add", "note", "notes", "desc", "notify",
+    "save", "edit", "log", "export",
 })
 # ``delete`` / ``rm`` are deliberately NOT local-only: with
 # ``-s <space>`` they mutate a GLOBAL space and must work even when
@@ -413,6 +416,10 @@ def build_parser() -> "argparse.ArgumentParser":
 
     p_add = sub.add_parser("add", help="Add a new task")
     p_add.add_argument("text", nargs="+", help="Task text")
+    p_add.add_argument(
+        "--due", default=None, metavar="YYYY-MM-DD",
+        help="Attach a deadline: stored as the trailing "
+             "@due(YYYY-MM-DD) marker on the task line")
 
     sub.add_parser(
         "move",
@@ -451,6 +458,12 @@ def build_parser() -> "argparse.ArgumentParser":
     p_desc.add_argument(
         "--clear", action="store_true",
         help="Remove the task's description")
+
+    p_notify = sub.add_parser(
+        "notify", help="Deadline checks for cron (quiet; exit 1 when due)")
+    p_notify.add_argument(
+        "--check", action="store_true",
+        help="Print due/overdue tasks; exit 0 clean, 1 when due")
 
     sub.add_parser(
         "save", help="Checkpoint to HISTORY.md + optional local commit "
@@ -587,8 +600,8 @@ def build_parser() -> "argparse.ArgumentParser":
 # invocations like `ck add foo bar`).
 _LEGACY_CHOICES = (
     "init", "st", "dashboard", "start", "focus", "done", "add", "note",
-    "notes", "desc", "save", "edit", "log", "install", "uninstall",
-    "update",
+    "notes", "desc", "notify", "save", "edit", "log", "install",
+    "uninstall", "update",
     "help", "list", "register", "unregister", "prune", "info",
     "move", "swap", "reorder", "migrate",
     "delete", "rm",
@@ -616,6 +629,7 @@ _SPACE_ACTIONS = frozenset({
 # action takes no flags at all, so a stray ``-x`` is reported as an
 # error instead of being swallowed into task text.
 _SPACE_ACTION_FLAGS: dict[str, frozenset] = {
+    "add": frozenset({"--due"}),
     "st": frozenset({"-l", "--list", "-e", "--edit", "-g", "--global"}),
     "status": frozenset({"-l", "--list", "-e", "--edit",
                          "-g", "--global"}),
@@ -658,7 +672,7 @@ _LEGACY_FLAGS: dict[str, frozenset] = {
     "start": frozenset({"--no-input", "-y", "--yes"}),
     "focus": frozenset({"--no-input", "-y", "--yes"}),
     "done": frozenset(),
-    "add": frozenset(),
+    "add": frozenset({"--due"}),
     "move": frozenset(),
     "swap": frozenset(),
     "reorder": frozenset(),
@@ -667,6 +681,7 @@ _LEGACY_FLAGS: dict[str, frozenset] = {
     "note": frozenset({"--clear", "--list"}),
     "notes": frozenset(),
     "desc": frozenset({"--stdin", "--clear"}),
+    "notify": frozenset({"--check"}),
     "save": frozenset(),
     "edit": frozenset(),
     "log": frozenset({"--all"}),
@@ -1282,8 +1297,15 @@ def _dispatch(argv: Optional[List[str]] = None) -> int:
             return _run_task_delete(args.command, rest)
         elif args.command == "add":
             text = " ".join(args.text)
-            new_id = ck.add_task(text)
-            _notice(ui.OK, f"Added task (id={new_id}): {text}")
+            if args.due is not None and parse_due(args.due) is None:
+                _print_error(
+                    "ERROR: Invalid --due date (YYYY-MM-DD expected): "
+                    f"{args.due!r}")
+                return 2
+            due = args.due or ""
+            new_id = ck.add_task(text, due=due)
+            echoed = text + (f" @due({due})" if due else "")
+            _notice(ui.OK, f"Added task (id={new_id}): {echoed}")
         elif args.command == "note":
             tokens = list(args.text)
             if args.clear and args.list_notes:
@@ -1342,6 +1364,8 @@ def _dispatch(argv: Optional[List[str]] = None) -> int:
                 rest.append("--stdin")
             rest.extend(args.text)
             return _run_desc(ck, rest)
+        elif args.command == "notify":
+            return _run_notify(ck, ["--check"] if args.check else [])
         elif args.command == "save":
             ck.save()
             _maybe_notify(ck)
@@ -2226,6 +2250,40 @@ def _run_desc(ck: ContextKeeper, rest: List[str]) -> int:
         return 1
 
 
+def _run_notify(ck: ContextKeeper, rest: List[str]) -> int:
+    """Run ``ck notify`` — deadline checks for cron (v0.13.5).
+
+    One implementation path for BOTH dispatch styles. ``ck notify
+    --check`` is QUIET: one line per ACTIVE task whose due date has
+    arrived (today or past), no banner, no colour — pipe the output
+    straight into a cron notifier. Exit codes: 0 nothing due, 1 at
+    least one task is due/overdue, 2 usage or unbound-project errors.
+    """
+    if "--check" not in rest:
+        print("Usage: ck notify --check")
+        return 2
+    unknown = [tok for tok in rest if tok != "--check"]
+    if unknown:
+        _print_error(
+            "ERROR: ck notify accepts only --check "
+            f"(got: {' '.join(unknown)}).")
+        return 2
+    try:
+        rows = ck.notify_check()
+    except ValueError as e:
+        _print_error(f"ERROR: {e}")
+        return 2
+    fired = False
+    for row in rows:
+        if not (row["overdue"] or row["due_today"]):
+            continue
+        fired = True
+        overdue = " [!] OVERDUE" if row["overdue"] else ""
+        print(f"[{row['status']}] #{row['id']} {row['title']} "
+              f"(due {row['due']}){overdue}")
+    return 1 if fired else 0
+
+
 def _run_export(ck: ContextKeeper, *, task_id: Optional[int] = None,
                 with_errors: bool = False) -> int:
     """Run ``ck export`` — print the assembled context report.
@@ -2393,9 +2451,36 @@ def _legacy_dispatch(raw: List[str]) -> int:
             if not rest:
                 print("Usage: ck add <text>")
                 return 2
-            text = " ".join(rest)
-            new_id = ck.add_task(text)
-            _notice(ui.OK, f"Added task (id={new_id}): {text}")
+            # ``--due YYYY-MM-DD`` is the ONLY flag: it must never
+            # leak into the task title as literal text.
+            due = ""
+            tokens: List[str] = []
+            index = 0
+            while index < len(rest):
+                tok = rest[index]
+                if tok == "--due":
+                    if index + 1 >= len(rest):
+                        print("Usage: ck add <text> --due YYYY-MM-DD")
+                        return 2
+                    due = rest[index + 1]
+                    index += 2
+                    continue
+                tokens.append(tok)
+                index += 1
+            if not tokens:
+                print("Usage: ck add <text>")
+                return 2
+            if due and parse_due(due) is None:
+                _print_error(
+                    "ERROR: Invalid --due date (YYYY-MM-DD expected): "
+                    f"{due!r}")
+                return 2
+            text = " ".join(tokens)
+            new_id = ck.add_task(text, due=due)
+            echoed = text + (f" @due({due})" if due else "")
+            _notice(ui.OK, f"Added task (id={new_id}): {echoed}")
+        elif cmd == "notify":
+            return _run_notify(ck, rest)
         elif cmd == "move":
             if len(rest) < 2:
                 print("Usage: ck move <ID> <position|top|bottom>")
@@ -2813,9 +2898,36 @@ def _run_space_command(space: str, rest: List[str]) -> int:
         if not args:
             print(f"Usage: ck {space} add <text>")
             return 2
-        text = " ".join(args)
-        new_id = mgr.add_task(text)
-        _notice(ui.OK, f"Added task to {space} space (id={new_id}): {text}")
+        # ``--due YYYY-MM-DD`` is the ONLY flag: it must never leak
+        # into the task title as literal text (project `ck add`
+        # parity, v0.13.5).
+        due = ""
+        tokens: List[str] = []
+        index = 0
+        while index < len(args):
+            tok = args[index]
+            if tok == "--due":
+                if index + 1 >= len(args):
+                    print(f"Usage: ck {space} add <text> --due YYYY-MM-DD")
+                    return 2
+                due = args[index + 1]
+                index += 2
+                continue
+            tokens.append(tok)
+            index += 1
+        if not tokens:
+            print(f"Usage: ck {space} add <text>")
+            return 2
+        if due and parse_due(due) is None:
+            _print_error(
+                "ERROR: Invalid --due date (YYYY-MM-DD expected): "
+                f"{due!r}")
+            return 2
+        text = " ".join(tokens)
+        new_id = mgr.add_task(text, due=due)
+        echoed = text + (f" @due({due})" if due else "")
+        _notice(ui.OK,
+                f"Added task to {space} space (id={new_id}): {echoed}")
         return 0
 
     if action == "list":

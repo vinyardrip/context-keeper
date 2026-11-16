@@ -24,9 +24,9 @@ from __future__ import annotations
 import os
 import re
 import tempfile
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
 
 from .models import (
     HistoryEntry,
@@ -86,6 +86,15 @@ _INLINE_NOTE_RE = re.compile(
 # The indent requirement keeps column-0 blockquotes (user prose in
 # sections) unowned — only indented quotes attach to tasks.
 _DESC_LINE_RE = re.compile(r"^\s+>\s?(?P<text>.*)$")
+
+# Inline due-date marker at the END of a task title (v0.13.5):
+#   "- [ ] Ship the release @due(2026-12-01) <!-- id: a1b2c3d4 -->"
+# Only a strict, calendar-valid TRAILING marker is extracted into the
+# AST ``due`` field; anything else (mid-title occurrences, junk dates)
+# stays plain title text. The renderer re-attaches the marker in the
+# same position (before the UUID comment), so the round-trip stays
+# byte-exact.
+_TASK_DUE_RE = re.compile(r"@due\((?P<date>\d{4}-\d{2}-\d{2})\)\s*$")
 
 _HEADER_RE = re.compile(r"^(?P<level>#{1,6})\s+(?P<title>.+?)\s*$")
 
@@ -292,6 +301,9 @@ def parse_plan(text: str) -> TaskList:
       beneath its note/description lines) attach to that task as the
       multiline ``description`` (v0.13.4); a column-0 ``>`` blockquote
       is prose and stays unowned.
+    - A trailing ``@due(YYYY-MM-DD)`` marker on a task title is
+      extracted into the ``due`` field (v0.13.5); mid-title or
+      calendar-invalid markers stay plain title text.
 
     The ORIGINAL line endings (CRLF vs LF) are recorded on the
     TaskList (``newline``) so ``render_plan`` can emit a byte-ident
@@ -360,10 +372,11 @@ def parse_plan(text: str) -> TaskList:
         if canonical:
             marker = canonical.group("marker")
             title, uuid = _split_uuid_comment(canonical.group("title"))
+            title, due = _split_due_marker(title)
             status = TaskStatus.from_marker(marker)
             tasks.append(_make_task(
                 next_id, status, title, idx, marker, current_section, False,
-                uuid=uuid,
+                uuid=uuid, due=due,
             ))
             next_id += 1
             in_task_block = True
@@ -372,9 +385,10 @@ def parse_plan(text: str) -> TaskList:
         legacy = _LEGACY_OPEN_RE.match(line)
         if legacy:
             title, uuid = _split_uuid_comment(legacy.group("title"))
+            title, due = _split_due_marker(title)
             tasks.append(_make_task(
                 next_id, TaskStatus.OPEN, title, idx, "", current_section,
-                True, uuid=uuid,
+                True, uuid=uuid, due=due,
             ))
             next_id += 1
             in_task_block = True
@@ -384,10 +398,11 @@ def parse_plan(text: str) -> TaskList:
         if legacy_fd:
             marker = legacy_fd.group("marker")
             title, uuid = _split_uuid_comment(legacy_fd.group("title"))
+            title, due = _split_due_marker(title)
             status = TaskStatus.from_marker(marker)
             tasks.append(_make_task(
                 next_id, status, title, idx, marker, current_section, False,
-                uuid=uuid,
+                uuid=uuid, due=due,
             ))
             next_id += 1
             in_task_block = True
@@ -415,6 +430,39 @@ def _split_uuid_comment(title: str) -> tuple[str, str]:
     return clean, match.group("uuid")
 
 
+def parse_due(due: str) -> Optional[date]:
+    """Validate an ISO ``YYYY-MM-DD`` due date; ``None`` when invalid.
+
+    Strict on BOTH the shape (``\\d{4}-\\d{2}-\\d{2}``) and the
+    calendar (:func:`datetime.date.fromisoformat`), so ``2026-02-30``
+    is rejected together with looser forms like ``2026-2-1``.
+    """
+    text = (due or "").strip()
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        return None
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _split_due_marker(title: str) -> tuple[str, str]:
+    """Split a trailing ``@due(YYYY-MM-DD)`` marker off a task title.
+
+    Returns ``(clean_title, due)``; ``due`` is "" when no valid marker
+    trails the title. Only a CALENDAR-VALID date is extracted — a junk
+    marker (``@due(2026-02-30)``) stays plain title text so user
+    content is never silently eaten.
+    """
+    match = _TASK_DUE_RE.search(title)
+    if match is None:
+        return title.strip(), ""
+    due = match.group("date")
+    if parse_due(due) is None:
+        return title.strip(), ""
+    return title[:match.start()].rstrip(), due
+
+
 def _stamp_to_iso(stamp: str) -> str:
     """Convert an inline note stamp to an ISO ``created`` value.
 
@@ -434,7 +482,7 @@ def _stamp_to_iso(stamp: str) -> str:
 
 
 def _make_task(task_id, status, title, line_number, marker_raw,
-               section, legacy, *, uuid: str = "") -> Task:
+               section, legacy, *, uuid: str = "", due: str = "") -> Task:
     return Task(
         id=task_id,
         status=status,
@@ -444,6 +492,7 @@ def _make_task(task_id, status, title, line_number, marker_raw,
         section=section,
         legacy_syntax=legacy,
         uuid=uuid,
+        due=due,
     )
 
 
@@ -1107,6 +1156,7 @@ __all__ = [
     "render_task_notes",
     "append_to_history",
     "sanitize_task_text",
+    "parse_due",
     "repair_plan_text",
     "_find_completed_header",
     "_find_section_end",

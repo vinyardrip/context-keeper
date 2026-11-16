@@ -198,6 +198,15 @@ class Task:
     # Joined with newlines on the AST node; an empty string means "no
     # description" (the renderer emits nothing).
     description: str = ""
+    # Inline due date (v0.13.5), stored in the task line itself as a
+    # trailing ``@due(YYYY-MM-DD)`` marker:
+    #
+    #     - [ ] Ship the release @due(2026-12-01) <!-- id: a1b2c3d4 -->
+    #
+    # The AST keeps the CLEAN title plus the ISO date; an empty string
+    # means "no due date" (the renderer emits no marker). Only
+    # calendar-valid dates are carried — see :func:`cklib.parser.parse_due`.
+    due: str = ""
     # 1-based source position where a NEW task should be inserted
     # (end of the ``## Current Sprint`` section). Parsed tasks never
     # carry this hint; it routes the renderer through the INSERT
@@ -211,9 +220,13 @@ class Task:
 
         The stable UUID is appended as a hidden HTML comment so the
         reference survives renumbering:
-        ``- [ ] title <!-- id: a1b2c3d4 -->``.
+        ``- [ ] title <!-- id: a1b2c3d4 -->``. A due date renders as
+        the trailing ``@due(YYYY-MM-DD)`` marker (v0.13.5), placed
+        BEFORE the comment so the marker never hides inside it.
         """
         line = f"- [{self.status.canonical_marker}] {self.title}".rstrip()
+        if self.due:
+            line += f" @due({self.due})"
         if self.uuid:
             line += f" <!-- id: {self.uuid} -->"
         return line
@@ -336,7 +349,8 @@ class TaskList:
     def add(self, title: str, status: TaskStatus = TaskStatus.OPEN,
             section: str = "", line_number: int | None = None,
             insert_line: int | None = None,
-            uuid: str | None = None) -> Task:
+            uuid: str | None = None,
+            due: str = "") -> Task:
         """Append a new task node and return it.
 
         New nodes are placed **past the end of the source document**
@@ -354,6 +368,9 @@ class TaskList:
         ``uuid`` pins a specific stable reference (the migration
         preserves the task's original UUID); when omitted a fresh
         one is generated so every new task is addressable forever.
+
+        ``due`` carries the ISO ``YYYY-MM-DD`` due date (v0.13.5);
+        empty means no deadline.
         """
         new_id = (max((t.id for t in self.tasks), default=0)) + 1
         if line_number is None:
@@ -381,6 +398,7 @@ class TaskList:
             legacy_syntax=False,
             insert_line=insert_line,
             uuid=uuid if uuid is not None else new_task_uuid(),
+            due=due,
         )
         self.tasks.append(task)
         return task

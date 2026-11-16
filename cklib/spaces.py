@@ -61,6 +61,7 @@ from .models import Notes, TaskList, TaskStatus
 from .parser import (
     _atomic_write_text,
     normalize_plan,
+    parse_due,
     parse_plan,
     render_plan,
     sanitize_task_text,
@@ -1380,21 +1381,29 @@ class SpaceManager:
     # Commands
     # ------------------------------------------------------------------ #
 
-    def add_task(self, text: str) -> int:
+    def add_task(self, text: str, due: str = "") -> int:
         """Append a new open task to the space; return its numeric ID.
 
         The title is sanitized the same way project tasks are (ANSI
         escapes / control characters / whitespace runs stripped), the
         file is created lazily, and the write is atomic under a
         fail-closed lock.
+
+        ``due`` (v0.13.5) optionally carries an ISO ``YYYY-MM-DD``
+        deadline, validated exactly like :meth:`ContextKeeper.add_task`
+        and stored as the trailing ``@due(YYYY-MM-DD)`` marker.
         """
         title = sanitize_task_text(text)
         if not title:
             raise ValueError("Task text is empty")
+        if due and parse_due(due) is None:
+            raise ValueError(
+                f"Invalid due date (YYYY-MM-DD expected): {due!r}")
 
         tl = self.load()
         section = self._section_for_new_task(tl)
-        new_task = tl.add(title, status=TaskStatus.OPEN, section=section)
+        new_task = tl.add(title, status=TaskStatus.OPEN, section=section,
+                          due=due)
         self._commit(tl)
         return new_task.id
 

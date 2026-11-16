@@ -207,10 +207,11 @@ class TestHelpColors(unittest.TestCase):
         done = _run_binary_env(["-h"], _clean_color_env(FORCE_COLOR="1"))
         self.assertEqual(done.returncode, 0)
         self.assertIn("\x1b[1;36mTASKS:\x1b[0m", done.stdout)
-        self.assertIn("\x1b[1;32madd <text>\x1b[0m", done.stdout)
+        self.assertIn("\x1b[1;32madd <text> [--due DATE]\x1b[0m", done.stdout)
         self.assertIn("\x1b[1m--- CK - Context Keeper ---\x1b[0m", done.stdout)
         # Descriptions (and inline aliases) stay neutral.
-        self.assertIn("            Add a new task", done.stdout)
+        self.assertIn("Add a task (optional deadline: @due marker)",
+                      done.stdout)
         self.assertIn("Delete a task (alias: rm)", done.stdout)
 
     def test_ansi_is_zero_width_alignment_preserved(self):

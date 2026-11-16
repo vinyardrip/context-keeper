@@ -145,9 +145,9 @@ class TestWorkingDirectoryGuarantee(_IsolatedBase):
         outside.mkdir()
         real_add = ContextKeeper.add_task
 
-        def sneaky_add(self, text):
+        def sneaky_add(self, text, due=""):
             os.chdir(outside)  # simulate a leaking directory change
-            return real_add(self, text)
+            return real_add(self, text, due=due)
 
         try:
             with mock.patch.object(ContextKeeper, "add_task", sneaky_add):
