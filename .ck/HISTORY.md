@@ -94,3 +94,19 @@
 - [x] 2026-11-15 02:05: `ck <TAB>` без filename-fallback (никакого `-o default` / `-o bashdefault`); таблица примеров автодополнения в README (`v0.8.20`) <!-- id: qp4ni1wq -->
 - [x] 2026-11-15 02:05: Sandbox registry safeguard: production-регистрация `.sandbox/`-путей отклоняется, completion скрывает устаревшие fixture-записи (`v0.8.20`) <!-- id: qcm3hzcv -->
 - [x] 2026-11-15 06:05: smoke test v0.13.3 <!-- id: sro53huc -->
+- [x] 2026-11-16 01:33: ck export: сборка PLAN.md + HISTORY.md + (опционально) git log -n 5 в единый Markdown для STDOUT <!-- id: g32siqzw -->
+- [x] 2026-11-16 01:33: ck export: добавить флаг --task <ID> для фокуса только на одной задаче и её заметках <!-- id: ohb022b0 -->
+- [x] 2026-11-16 01:33: ck export: сборка PLAN.md + HISTORY.md + (опционально) git log -n 5 в единый Markdown для STDOUT <!-- id: yt87h6to -->
+- [x] 2026-11-16 01:33: DAILY_SPACES week/month/year: тесты + README/ROADMAP документация (EN/RU) <!-- id: 18nv3lpd -->
+- [x] 2026-11-16 01:33: notify: команда ck notify --check — проверка дедлайнов для cron (тихий режим, exit-коды 0/1) <!-- id: 2jx5ufhn -->
+- [x] 2026-11-16 01:48: notify: пример crontab в README + тесты (--due парсинг, notify --check) <!-- id: cclrp0jq -->
+- [x] 2026-11-16 01:48: notify: --due YYYY-MM-DD — парсинг дедлайна в строке задачи (parser/models), просроченные подсвечиваются в st <!-- id: hl3vgwds -->
+- [x] 2026-11-16 01:48: description: тесты (round-trip, CLI) + README документация (EN/RU) <!-- id: 5ynv58xu -->
+- [x] 2026-11-16 01:48: description: CLI — ck desc <ID> set/show/clear + вывод в st/list и ck export --task <!-- id: lmcfxg3m -->
+- [x] 2026-11-16 01:48: description: многострочное описание задачи в PLAN.md — AST/parser (блок под задачей, byte-exact render_plan round-trip) <!-- id: 43d8jzsq -->
+- [x] 2026-11-16 01:48: DAILY_SPACES week/month/year: rollover/reset как у today (без HISTORY, сброс при смене периода, today init/migrate паритет) <!-- id: 52mx7o1m -->
+- [x] 2026-11-16 01:48: DAILY_SPACES week/month/year: расширить константу и период-логику дат (ключи <name>_date в state.json, шаблоны заголовков периода) <!-- id: o4ipjr6p -->
+- [x] 2026-11-16 01:48: Keep version in sync across config/pyproject/README (single source: cklib/config.py) <!-- id: tvumm871 -->
+- [x] 2026-11-16 01:48: Fix remaining pre-existing test failures unrelated to v0.13.x <!-- id: m3mffqzd -->
+- [x] 2026-11-16 01:48: Добавить в README раздел 'AI Workflow': примеры использования ck export для передачи контекста в opencode <!-- id: c41y9pl8 -->
+- [x] 2026-11-16 01:48: ck export: добавить флаг --with-errors для захвата последних логов ошибок из airlock/tests <!-- id: hlzndw5m -->
