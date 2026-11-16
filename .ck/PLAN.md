@@ -19,3 +19,4 @@
 - [ ] BUG: _plan_display_path() prefers root PLAN.md over .ck/PLAN.md — ignored unless symlink (common: users wrote PLAN.md manually before installing ck) <!-- id: enwv6ea6 -->
 - [ ] BUG: ck st shows the same task in both [>] Next and [~] Paused when it has a note (duplicate title) <!-- id: hz1h95a0 -->
 - [ ] FEAT: ck <space> move/swap/reorder — task reordering inside spaces (parity with project commands) <!-- id: aq96ndsg -->
+- [ ] Push backlog: 37 непушенных коммитов в 8 репо по ~/projects (grand-mebel 9 — сначала проверить содержимое); без remote: ck_test(6), cfs_next(5), avto-calculator(2) — решить, заводить ли remote <!-- id: 1xkwlvw4 -->
