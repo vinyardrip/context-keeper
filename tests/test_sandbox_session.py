@@ -122,7 +122,15 @@ class TestBannerRendering(unittest.TestCase):
     """
 
     def test_exact_layout_with_binary_row(self):
-        out = render_sandbox_banner(color=False)
+        # Pin the live-resolved binary to a SHORT path: the exact
+        # width assertion below (the hint row is the longest content
+        # row) must not depend on the host's ck path length —
+        # expansion for LONG paths is covered by
+        # test_width_expands_for_long_binary_path.
+        with mock.patch.object(
+                cksandbox, "active_binary_path",
+                return_value=Path("/usr/bin/ck")):
+            out = render_sandbox_banner(color=False)
         lines = out.splitlines()
         # Border rule counts match the widest content row + padding;
         # all rows share one width (aligned box, never ragged).
