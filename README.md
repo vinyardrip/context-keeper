@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.13.4-blue)]()
+[![version](https://img.shields.io/badge/version-0.13.5-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -48,6 +48,8 @@ Context Keeper (ck) acts as a bridge between your brain, AI agents, and Git, per
 - Self-Updater: ck update (git fetch + `pull --ff-only` for checkouts; in-place `install.sh` refresh for standalone installs, preserving `.ck/`; refuses on dirty work tree)
 - CLI Task Management: ck add <text>, ck start <ID>, ck done <ID|range|list>
 - Process Notes: `ck note <ID> <text>` appends a timestamped scratchpad entry to a task (never overwrites) — stored INLINE beneath its task, shown in `ck st`, graduated into HISTORY.md with the task on `ck done`, and preserved when a focus switch parks the task as `[~]`; `--list` shows one task's notes, `--clear` removes them
+- Task Descriptions: `ck desc <ID> [text]` attaches a multiline description to a task — stored INLINE beneath its task as indented `> text` lines, shown in `ck st` / `ck list` / `ck export --task`, replaced whole on every set (`--stdin` for multiline, `--clear` removes)
+- Deadlines & Notifications: `ck add <text> --due YYYY-MM-DD` stamps a deadline into the task line; `ck st` highlights overdue tasks (`[!] OVERDUE <date>`), and `ck notify --check` is a quiet cron check (one line per due task, exit 0 clean / 1 when due)
 - Global Registry: Cross-project dashboard (ck dashboard) backed by `~/.config/ck/projects.json`; registration is explicit
 - Fail-Closed Locking: Cross-process file locking guards registry, PLAN.md, HISTORY.md, JOURNAL.md and global state.json writes
 - Full Plan View: ck st --all
@@ -105,7 +107,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.13.4
+ck -v    # → ck version 0.13.5
 ```
 
 ---
@@ -142,7 +144,7 @@ ck -v    # → ck version 0.13.4
 | ck migrate [--apply] | One-time upgrade of a pre-0.13 project (the `.ck/state.json` monolith) to the split layout. Default is a DRY-RUN preview (`Dry run: nothing written. Re-run with --apply.`); `--apply` backs the whole `.ck/` up to `.ck_backup_<version>/`, moves completed `[x]` rows into HISTORY.md, stamps every task with a stable UUID, inlines the legacy `state.json` notes beneath their tasks, creates `JOURNAL.md` / `version` / `meta.json` / `links.json` / `AGENTS.md` and deletes `state.json`. Write commands on an unmigrated project refuse with `Run `ck migrate` to upgrade it, then retry.` |
 | ck migrate --spaces [--apply] | Batch-upgrade ALL global spaces in `~/.config/ck/spaces/` to the v0.13 inline-note format (same engine as the project migration). Default is a DRY-RUN plan (`Spaces migration plan for <dir> (schema -> v0.13):` with one `- <name>: …` line per space); `--apply` copies the spaces directory to `~/.config/ck/spaces_backup_0.13.3/` first, then per REGULAR space: completed `[x]` rows move into `<name>.HISTORY.md` as dated `<!-- id: uuid -->` ledger entries (sidecar notes travel beneath), every remaining task is stamped with a UUID, and the `<name>.json` note sidecar is inlined beneath its tasks and deleted. DAILY spaces (`today.md`) keep NO history: their completed rows are deleted permanently, exactly like the midnight rollover |
 | ck migrate --all [--apply] | The `--spaces` migration PLUS every project registered in `~/.config/ck/projects.json` (spaces first, then the projects in registry order). Prints a per-project summary — `[ok] Project <name>: migrated`, `[!] Project <name>: already at v0.13.0`, `[!] Project <name>: path missing, skipped (<path>)` — and one failing project never aborts the batch (the walk continues, exit 1 only when something failed). An empty registry answers `No registered projects; nothing to migrate.` |
-| ck add \<text\> | Add a new open task (inserted before `## Completed`). On a freshly initialized plan holding only the untouched `ck init` seed task (`Describe the first task` / `Описать первую задачу`), the seed is replaced in place instead of appending a second entry |
+| ck add \<text\> | Add a new open task (inserted before `## Completed`). `--due YYYY-MM-DD` stamps a deadline into the line as a trailing `@due(YYYY-MM-DD)` marker (see [Deadlines](#deadlines--notifications-due-notify-check)); an invalid or impossible date is a clean usage error (exit 2). On a freshly initialized plan holding only the untouched `ck init` seed task (`Describe the first task` / `Описать первую задачу`), the seed is replaced in place instead of appending a second entry |
 | ck move \<ID\> \<pos\|top\|bottom\> | Move a PENDING/ACTIVE task (`[ ]` / `[>]`) to a 1-based position among the active tasks, or to the first/last slot. The other active tasks shift to close the gap; titles, status markers and the focus are left untouched |
 | ck swap \<ID1\> \<ID2\> | Exchange the positions of two active tasks |
 | ck reorder \<ID1\> \<ID2\> ... | Set the relative order of the active tasks. Listed IDs move ahead of the unlisted ones, which keep their relative order — so `ck reorder 3 1` simply means "3 before 1". The confirmation is multi-line (applied IDs, then the resulting order with their post-reorder positions) and is followed by the auto-rendered sprint view — the exact `ck list` output for that project |
@@ -152,6 +154,8 @@ ck -v    # → ck version 0.13.4
 | ck done \<ID\|range\|list\> | Complete task(s) — the row is REMOVED from PLAN.md and graduates into `.ck/HISTORY.md` as a dated `- [x] <ts>: <title> <!-- id: uuid -->` ledger entry (its inline notes travel beneath it); the remaining IDs re-index. Accepts `3`, `2-4`, `1,3,5`; bare `ck done` completes the CURRENT FOCUS (usage error without one) |
 | ck delete \<ID\> [-s \<space\>] / ck rm \<ID\> | Permanently remove ONE task and re-index the remaining task IDs 1..N. The default target is the active project (`project`); `-s` / `--space <name>` targets a global space instead, mutating only that space file and leaving the project's `PLAN.md` untouched. Prints `Task #<ID>: <title>` and asks `Permanently delete task #<ID> from space '<space>'? [y/N]`; `-f` / `--force` skips the prompt — a non-interactive run without `-f` refuses (exit 2). After the confirmation the REFRESHED listing (post re-index) is printed, so the next `ck done N` always points at what you just saw. Notes are archived to the target's `HISTORY.md`; a targeted space archives to `~/.config/ck/spaces/<space>.HISTORY.md`. Whole spaces are removed with the separate `ck space delete <name>` |
 | ck note \<ID\> \<text\> | **Append** a timestamped process note to the task (never overwrite). `ck note <text>` keeps the active-task shortcut. `ck note <ID> --list` prints that task's notes with timestamps; `ck note <ID> --clear` removes all of them. Shown in `ck st`; every entry is archived to HISTORY.md by `ck done` |
+| ck desc \<ID\> [text] | Show or set the task's multiline **description** (stored INLINE beneath its task as indented `> text` lines; see [Task Descriptions](#task-descriptions-ck-desc)). Omit the text to show it; `--stdin` reads a multiline value from STDIN (an empty value clears); `--clear` removes the block; `--clear` cannot be combined with a text value. `ck st`, `ck list` and `ck export --task` surface it when present — plans without descriptions keep byte-identical output |
+| ck notify --check | Deadline check for cron (quiet): prints one line per ACTIVE task whose due date has arrived (due today or overdue), sorted by date — `[ ] #2 Fix the bug (due 2026-11-01) [!] OVERDUE`. Exit 0 when nothing is due, 1 when at least one task is due, 2 on usage errors. Pipe it into any notifier; see [Deadlines](#deadlines--notifications-due-notify-check) |
 | ck edit | Open PLAN.md in your editor (see [Editor Resolution](#editor-resolution)) |
 | ck save | Checkpoint workflow (does **not** complete the task): append an optional note body + short summary to `.ck/JOURNAL.md`, then optionally create a **local** Git commit. Completion stays a separate `ck done <ID>` action |
 | ck log | Open HISTORY.md in your editor (see [Editor Resolution](#editor-resolution)) |
@@ -159,7 +163,7 @@ ck -v    # → ck version 0.13.4
 | ck export | Assemble the AI context report on STDOUT: PLAN.md + HISTORY.md + `git log -n 5 --oneline` as ONE clean Markdown document (plain text, no ANSI) — copy-paste it straight into an AI chat. See [AI Workflow](#ai-workflow) |
 | ck export --task \<ID\> | Export a single task: its line, status and process notes. The ID is looked up in PLAN.md first (the numbering `ck list` prints), then positionally in HISTORY.md (1 = the oldest completed entry). Unknown ID → exit 1 |
 | ck export --with-errors | Append a `## Recent Errors` section: tails of the most recently modified `*.log` / `*.err` files found in `airlock/` and `tests/` under the project root (up to 3 files, last 40 lines each); a muted note is printed when there is nothing to capture. Flags combine: `ck export --task 7 --with-errors` |
-| ck st | Status overview: a top focus line `-> CURRENT FOCUS: [#<id>] <title>` (with its note), then the WORK CONTEXT block — `[>] Focus`, `[~] Paused` (tasks parked by `ck focus`, notes attached), `[x] History (last 3)` (the latest HISTORY.md ledger entries; `ck st --history N` widens it), and a highlighted bottom banner `>> Backlog: N task(s) remaining` |
+| ck st | Status overview: a top focus line `-> CURRENT FOCUS: [#<id>] <title>` (with its description and note), then the WORK CONTEXT block — `[>] Focus`, `[~] Paused` (tasks parked by `ck focus`, notes attached), `[x] History (last 3)` (the latest HISTORY.md ledger entries; `ck st --history N` widens it), and a highlighted bottom banner `>> Backlog: N task(s) remaining`. Tasks with a deadline show a muted `(due <date>)`; overdue ones a bold `[!] OVERDUE <date>` |
 | ck notes | List all active process notes: `[>] Active Focus:` plus `[!] Unfocused / Paused Context:` with every entry of each task's note, in append order (`[i] No active process notes found.` when none) |
 | ck st -l / --list | Print the task list to STDOUT. Inside a project this is identical to `ck list`; outside one it follows the `ck st` hierarchy (global-registry fallback), whereas `ck list` deliberately never guesses — see [ck list Outside a Project](#ck-list-outside-a-project) |
 | ck st -e / --edit | Open PLAN.md in your editor (same as `ck edit`) |
@@ -168,7 +172,7 @@ ck -v    # → ck version 0.13.4
 | ck -l / --list | Top-level shorthand for `ck st -l` (list tasks) |
 | ck -e / --edit | Top-level shorthand for `ck st -e` (edit plan) |
 | ck -g / --global | Top-level shorthand for `ck st -g` (global dashboard) |
-| ck list | Print the task list to STDOUT (pipe-friendly). Accepts an optional project name: `ck list <project_name>` lists that REGISTERED project from any directory (an unknown name exits 1 with `ERROR: Project '<name>' not found.`). With no argument outside every project it never guesses — one nested project is listed with its name in the header (`## Current Sprint (alpha)`), several (or none) produce the list of available nested projects plus the `ck list <project_name>` hint |
+| ck list | Print the task list to STDOUT (pipe-friendly). Tasks carrying a deadline suffix the greppable `@due(YYYY-MM-DD)` marker. Accepts an optional project name: `ck list <project_name>` lists that REGISTERED project from any directory (an unknown name exits 1 with `ERROR: Project '<name>' not found.`). With no argument outside every project it never guesses — one nested project is listed with its name in the header (`## Current Sprint (alpha)`), several (or none) produce the list of available nested projects plus the `ck list <project_name>` hint |
 | ck dashboard | Cross-project dashboard (compact table: Project \| Focus Task \| Progress \| Last Active) |
 | ck dashboard -v / --verbose | Detailed view: one card per project **and** per space, framed by thin `─` dividers (no side rails, so long titles never wrap), each carrying the progress line and the full `<< PREV` / `[>] FOCUS` / `>> NEXT` triad plus its process notes |
 | ck register [-n NAME] [--path PATH] | Add a project to the global registry |
@@ -181,7 +185,7 @@ ck -v    # → ck version 0.13.4
 | ck space swap \<name1\> \<name2\> | Exchange the positions of two spaces (any two entries of the sequence, including `project`) |
 | ck space reorder | Normalize/re-index the persisted sequence against the spaces that currently exist: stale names are dropped, new spaces appended, duplicates collapsed, and the `project` sentinel keeps its slot. Prints the numbered result |
 | ck space delete \<name\> [-f] | Permanently delete a space **and** its note sidecar / `.HISTORY.md`, then drop it from the persisted order. The target is validated **first** (a missing space reports `ERROR:` with exit 1 immediately — no stdin read, no prompt; invalid input exits 2), and an existing space asks `Permanently delete …? [y/N]` on a terminal and refuses without confirmation when non-interactive; `-f` / `--force` (or `-y` / `--yes`) skips the prompt. The virtual `project` space and the built-in `local` / `remote` can never be deleted; the daily `today` journal is deletable (`ck space delete today` also clears `today_date`). No `rm` alias — the verb is spelled out, and task deletion stays the separate top-level `ck delete <ID>` |
-| ck local add \<text\> | Add a task to the workstation space (`~/.config/ck/spaces/local.md`; `local`/`remote` are auto-initialized at startup — an existing space file is never overwritten) |
+| ck local add \<text\> | Add a task to the workstation space (`~/.config/ck/spaces/local.md`; `local`/`remote` are auto-initialized at startup — an existing space file is never overwritten). `--due YYYY-MM-DD` works exactly like the project command |
 | ck local list | List workstation space tasks in the project `ck list` layout (`##` section headers, `[ ]`/`[>]`/`[x]` markers), with attached process notes rendered as `* Note:` lines under their tasks |
 | ck local st / ck local status | Detailed workstation space status view — same layout as `ck st` (header bar, progress, CURRENT FOCUS with its process note, WORK CONTEXT: `[>] Focus` / `[~] Paused` / `[x] History (last 3)` / `>> Backlog`) |
 | ck local st -l / --list | Space task listing (synonym of `ck local list`) |
@@ -970,6 +974,100 @@ When nothing carries a note: `[i] No active process notes found.`
 
 ---
 
+## Task Descriptions (`ck desc`)
+
+A **process note** is an append-only scratchpad; a **description** is the
+task's editable statement of WHAT it is and HOW to approach it. It lives
+INLINE in `PLAN.md` as indented `> text` lines directly beneath the task
+bullet — plain text, git-diffable, no sidecar files:
+
+```
+- [ ] Ship release <!-- id: a1b2c3d4 -->
+  > Cut 0.13.5 when the notify tests are green
+  > Bump config/pyproject/README in one commit
+  * Note (2026-11-16 10:00 UTC): waiting on CI
+```
+
+```text
+$ ck desc 2                      # show (prints the stored text verbatim)
+$ ck desc 2 build the thing      # set (replaces the whole value)
+$ echo "step one
+step two" | ck desc 2 --stdin    # multiline from STDIN (blank lines kept)
+$ ck desc 2 --clear              # remove the block
+```
+
+Rules:
+
+- **Show** — `ck desc <ID>` prints `No description on task #<ID>.` and
+  exits 0 when the task has none;
+- **Set** — the value is replaced WHOLE on every call (unlike the
+  append-only notes); text tokens are joined with single spaces;
+- **Clear** — `--clear` cannot be combined with a text value (exit 2);
+- **Rendering** — `ck st` shows the description in the CURRENT FOCUS
+  block, `ck list` and `ck export --task` render the `> text` lines
+  beneath their task; a description-less plan keeps byte-identical
+  output everywhere;
+- **Ownership** — only indented `>` lines directly beneath a task
+  bullet (or its note/description block) attach to it. Column-0
+  blockquotes and `>` lines after unrelated prose stay unowned prose,
+  so hand-written Markdown keeps its meaning;
+- **Round-trip** — descriptions survive every parse/render cycle
+  byte-exactly, including CRLF files and either note/description order.
+
+---
+
+## <a name="deadlines--notifications-due-notify-check"></a>Deadlines & Notifications (`--due`, `ck notify --check`)
+
+A task can carry a **deadline**: a strict calendar date stamped INTO the
+task line itself as a trailing `@due(YYYY-MM-DD)` marker. The AST keeps
+the clean title plus the date; the marker is re-emitted before the
+`<!-- id: ... -->` comment, so plans round-trip byte-exactly:
+
+```
+- [ ] Fix the bug @due(2026-11-01) <!-- id: e5f6a7b8 -->
+```
+
+```text
+$ ck add "Fix the bug" --due 2026-11-01
+$ ck todo add "Restore backups" --due 2026-12-01   # spaces, same flag
+```
+
+- **Validation** — both the shape (`YYYY-MM-DD`) and the calendar are
+  checked: `2026-02-30` and `tomorrow` are clean usage errors (exit 2).
+  A `@due(...)` written by hand with an impossible date stays plain
+  title text — user content is never silently eaten;
+- **`ck st`** — every view (CURRENT FOCUS, `[>] Focus`, `[>] Next`,
+  `[~] Paused`) marks a past date with a bold `[!] OVERDUE <date>` and
+  a today/future date with a muted `(due <date>)`. `ck list` suffixes
+  the marker itself;
+- **`ck notify --check`** — the cron entry point. QUIET: no banner, no
+  color, one line per ACTIVE task whose due date has arrived (due
+  today or overdue), sorted by date; completed tasks are excluded.
+  Exit codes: `0` nothing due, `1` at least one task is due, `2` usage
+  or unbound-project errors;
+
+Cron example — check every morning at 08:00 and surface anything due
+through `notify-send` (Linux) or `osascript` (macOS):
+
+```bash
+# crontab -e : deadline check at 08:00
+0 8 * * * (cd /home/user/projects/my-project && ck notify --check) | \
+  xargs -r -I{} notify-send "ck deadline" "{}"
+# exit 0 = nothing due (empty output -> xargs -r sends nothing)
+```
+
+`--check` targets the ACTIVE project: run it from the project
+directory (as above), or loop over several projects in one entry:
+
+```bash
+0 8 * * * for p in /home/user/projects/alpha /home/user/projects/beta; do
+    (cd "$p" && ck notify --check) | \
+      xargs -r -I{} notify-send "ck deadline: $p" "{}"
+  done
+```
+
+---
+
 ## Colors
 
 Status badges are colored **by default** and keep their color when the output is
@@ -1073,9 +1171,10 @@ The parser accepts both canonical CommonMark and the legacy no-space form; the w
 - [>] focused task   (exactly one focus is enforced on write)
 - [~] paused task    (parked by `ck focus`; resumes with `ck start` / `ck focus`)
 - [x] done task      (lives in HISTORY.md — never written into PLAN.md)
+- [ ] task with deadline @due(2026-12-01)   (trailing marker; see Deadlines)
 ```
 
-Every task line carries a stable `<!-- id: 8-char-uuid -->` comment, written once and never regenerated (re-indexing, reordering and section edits all preserve it). Process notes render as indented `* Note (<ts> UTC): <text>` lines directly beneath their task.
+Every task line carries a stable `<!-- id: 8-char-uuid -->` comment, written once and never regenerated (re-indexing, reordering and section edits all preserve it). Process notes render as indented `* Note (<ts> UTC): <text>` lines directly beneath their task; a multiline description renders as indented `> text` lines beneath it (see [Task Descriptions](#task-descriptions-ck-desc)).
 
 ### Auto-Archive
 When `HISTORY.md` or `JOURNAL.md` reaches `HISTORY_LIMIT` entries it is rotated into a timestamped archive and a fresh file is started. Rotation is crash-safe: the new content is staged before the old file is renamed.
@@ -1361,6 +1460,8 @@ Logs go **exclusively** to `stderr` and `.sandbox/dev.log` — `stdout` stays co
 - [x] Colored `ck -h`: bold cyan group headers, bold green command names and a bold banner; descriptions stay neutral, `NO_COLOR=1` wins, piped output stays plain, and ANSI wrappers never shift alignment (`v0.11.1`)
 - [x] Daily journal `today`: explicit `ck today init` / `ck today migrate`, reserved name, lazy local-midnight rollover that deletes completed `[x]` tasks (no `HISTORY.md`) and carries open/focused tasks, dated locale-aware `ck today st` header, and `save` / `log` refusals (`v0.12.0`)
 - [x] Daily view simplified: `ck today`, `ck today st`, and `ck today list` are byte-identical flat lists with the dated header, no progress / CURRENT FOCUS / WORK CONTEXT / Skipped / Backlog; non-daily spaces keep the full status view (`v0.12.1`)
+- [x] Multiline task descriptions: `ck desc <ID>` show / set (whole-value replace) / `--stdin` / `--clear`, stored INLINE in PLAN.md as indented `> text` lines with byte-exact round-trips (LF/CRLF, either note order), surfaced in `ck st` / `ck list` / `ck export --task`, spaces included (`v0.13.5`)
+- [x] Task due dates: `--due YYYY-MM-DD` stamps a validated `@due(...)` marker into the line (junk dates stay text), `ck st` highlights overdue tasks, `ck list` suffixes the marker, and `ck notify --check` is the quiet cron check with 0/1/2 exit codes (`v0.13.5`)
 
 ---
 
@@ -1397,6 +1498,8 @@ Context Keeper (ck) служит мостом между вашим разумо
 - Интеграция с Git (только локальные коммиты, без push)
 - Авто-архивация: ротация HISTORY.md по лимиту HISTORY_LIMIT со сжатыми `.md.gz`-архивами (COMPRESS_ARCHIVES) и FIFO-очисткой по MAX_BAK_FILES
 - Процессные заметки: `ck note <ID> <text>` добавляет заметку с меткой времени к задаче (не перезаписывает предыдущую) — хранится прямо в PLAN.md под задачей, видна в `ck st`, уходит в HISTORY.md вместе с задачей по `ck done` и сохраняется при парковке `[~]`; `--list` показывает заметки одной задачи, `--clear` удаляет их
+- Описания задач: `ck desc <ID> [text]` добавляет многострочное описание к задаче — хранится прямо в PLAN.md строками `> text` под задачей, показывается в `ck st` / `ck list` / `ck export --task`, заменяется целиком при каждой установке (`--stdin` — многострочно, `--clear` — удалить)
+- Дедлайны и уведомления: `ck add <text> --due YYYY-MM-DD` записывает срок в строку задачи; `ck st` подсвечивает просроченные (`[!] OVERDUE <дата>`), а `ck notify --check` — тихая проверка для cron (строка на каждую задачу «к сроку», exit 0 — чисто / 1 — есть дедлайны)
 - Парсинг `- [ ]` / `- [>]` / `[~]` / `- [x]` (устаревший `- []` нормализуется): PLAN.md хранит только активные задачи, завершённые переходят в `.ck/HISTORY.md`; каждая задача несёт стабильную ссылку `<!-- id: uuid -->`
 - Поддержка AI
 - Глобальный реестр проектов и панель мониторинга
@@ -1948,6 +2051,103 @@ no-op (`Task #<ID> is already focused.`).
 
 ---
 
+## Описания задач (`ck desc`)
+
+**Процессная заметка** — append-only блокнот; **описание** — редактируемое
+поле задачи: ЧТО это и КАК подступиться. Оно живёт ИНЛАЙНОВО в `PLAN.md`
+строками `> text` с отступом прямо под буллетом задачи — чистый текст,
+читаемый git-diff, без sidecar-файлов:
+
+```
+- [ ] Выпустить релиз <!-- id: a1b2c3d4 -->
+  > Резать 0.13.5, когда тесты notify позеленеют
+  > Поднять версию в config/pyproject/README одним коммитом
+  * Note (2026-11-16 10:00 UTC): ждём CI
+```
+
+```text
+$ ck desc 2                      # показать (печатает сохранённый текст как есть)
+$ ck desc 2 собрать тесты        # установить (заменяет значение целиком)
+$ echo "шаг один
+шаг два" | ck desc 2 --stdin     # многострочно из STDIN (пустые строки сохраняются)
+$ ck desc 2 --clear              # удалить блок
+```
+
+Правила:
+
+- **Показ** — `ck desc <ID>` без описания печатает `No description on
+  task #<ID>.` и завершается с кодом 0;
+- **Установка** — значение заменяется ЦЕЛИКОМ при каждом вызове
+  (в отличие от append-only заметок); слова объединяются одинарными
+  пробелами;
+- **Очистка** — `--clear` нельзя совместить с текстовым значением (код 2);
+- **Отображение** — `ck st` показывает описание в блоке CURRENT FOCUS,
+  `ck list` и `ck export --task` рендерят строки `> text` под задачей;
+  план без описаний сохраняет побайтово идентичный вывод;
+- **Владение** — к задаче прикрепляются только строки `>` с отступом
+  непосредственно под её буллетом (или её блоком заметки/описания).
+  Цитаты в нулевой колонке и строки `>` после постороннего прозе-текста
+  остаются ничейным текстом — рукописный Markdown сохраняет смысл;
+- **Round-trip** — описания проходят каждый цикл parse/render побайтово
+  точно, включая CRLF-файлы и любой порядок заметки/описания.
+
+---
+
+## <a name="дедлайны--уведомления-due-notify-check"></a>Дедлайны и уведомления (`--due`, `ck notify --check`)
+
+Задача может нести **срок**: строгую календарную дату, записанную прямо
+В СТРОКУ задачи завершающим маркером `@due(YYYY-MM-DD)`. AST хранит
+чистый заголовок и дату; маркер выводится перед комментарием
+`<!-- id: ... -->`, поэтому планы проходят цикл parse/render побайтово
+точно:
+
+```
+- [ ] Починить баг @due(2026-11-01) <!-- id: e5f6a7b8 -->
+```
+
+```text
+$ ck add "Починить баг" --due 2026-11-01
+$ ck todo add "Восстановить бэкапы" --due 2026-12-01   # пространства, тот же флаг
+```
+
+- **Валидация** — проверяются и форма (`YYYY-MM-DD`), и календарь:
+  `2026-02-30` и `tomorrow` — чистые ошибки использования (код 2).
+  Маркер `@due(...)` с невозможной датой, написанный вручную, остаётся
+  обычным текстом заголовка — пользовательский контент никогда не
+  съедается молча;
+- **`ck st`** — каждый блок (CURRENT FOCUS, `[>] Focus`, `[>] Next`,
+  `[~] Paused`) помечает прошедшую дату жирным `[!] OVERDUE <дата>`,
+  а сегодняшнюю/будущую — приглушённой `(due <дата>)`. `ck list`
+  добавляет сам маркер;
+- **`ck notify --check`** — точка входа для cron. ТИХО: без баннера, без
+  цвета, по одной строке на каждую АКТИВНУЮ задачу, срок которой
+  наступил (сегодня или просрочена), отсортировано по дате;
+  завершённые задачи исключаются. Коды выхода: `0` — ничего не наступило,
+  `1` — хотя бы одна задача «к сроку», `2` — ошибка использования или
+  отсутствие проекта.
+
+Пример cron — проверка каждое утро в 08:00 и всплывающее уведомление
+через `notify-send` (Linux) или `osascript` (macOS):
+
+```bash
+# crontab -e : проверка дедлайнов в 08:00
+0 8 * * * (cd /home/user/projects/my-project && ck notify --check) | \
+  xargs -r -I{} notify-send "ck дедлайн" "{}"
+# exit 0 = ничего не наступило (пустой вывод -> xargs -r ничего не шлёт)
+```
+
+`--check` работает с АКТИВНЫМ проектом: запускайте из каталога проекта
+(как выше) или обойдите несколько проектов в одной записи cron:
+
+```bash
+0 8 * * * for p in /home/user/projects/alpha /home/user/projects/beta; do
+    (cd "$p" && ck notify --check) | \
+      xargs -r -I{} notify-send "ck дедлайн: $p" "{}"
+  done
+```
+
+---
+
 ## ⌨️ Выбор редактора
 
 `ck edit`, `ck log` и опция `e=editor` в `ck save` запускают внешний редактор, который определяется по строгому приоритету (побеждает первое совпадение):
@@ -1972,7 +2172,7 @@ export EDITOR="nano"  # используется, если VISUAL не зада�
 ---
 
 ## 🔧 Механика работы
-- Формат задач: `- [ ]` / `- [>]` / `[~]` / `- [x]` (устаревший `- []` принимается и нормализуется); каждая задача несёт `<!-- id: uuid -->`, заметки — инлайновые строки `* Note (<ts> UTC):` под задачей; PLAN.md хранит только активные задачи, `[x]` живут в HISTORY.md
+- Формат задач: `- [ ]` / `- [>]` / `[~]` / `- [x]` (устаревший `- []` принимается и нормализуется); каждая задача несёт `<!-- id: uuid -->`, заметки — инлайновые строки `* Note (<ts> UTC):` под задачей, многострочное описание — строки `> text` под ней (см. «Описания задач»); дедлайн — завершающий маркер `@due(YYYY-MM-DD)` в строке задачи (см. «Дедлайны и уведомления»); PLAN.md хранит только активные задачи, `[x]` живут в HISTORY.md
 - Ротация истории и журнала (безопасная при сбоях): `HISTORY_LIMIT` записей → архив `*_*.md.gz` (`COMPRESS_ARCHIVES`, сжатие встроенным модулем `gzip`), удержание `MAX_BAK_FILES` архивов (FIFO-очистка старых); весь журнал — `ck log --all` (архивы `.md.gz` и legacy `.md.bak` читаются прозрачно, повреждённые пропускаются с предупреждением)
 - Локальные коммиты Git (без push)
 - Fail-closed блокировка файлов и атомарная запись
@@ -2214,3 +2414,5 @@ CK_DEBUG=1 ./ck-dev add "traced"    # или: ./ck-dev -v add "traced"
 - [x] Цветной `ck -h`: жирные бирюзовые заголовки групп, жирные зелёные имена команд и жирный баннер; описания нейтральны, `NO_COLOR=1` побеждает, перенаправленный вывод остаётся без ANSI, а обёртки не смещают выравнивание (`v0.11.1`)
 - [x] Ежедневный журнал `today`: явные `ck today init` / `ck today migrate`, зарезервированное имя, ленивый перекат в локальную полночь с удалением завершённых `[x]` задач (без `HISTORY.md`) и сохранением открытых/сфокусированных, датированный заголовок `ck today st` с локалью и запрет `save` / `log` (`v0.12.0`)
 - [x] Упрощённый ежедневный вид: `ck today`, `ck today st` и `ck today list` выводят байт-в-байт одинаковый плоский список с датированным заголовком, без progress / CURRENT FOCUS / WORK CONTEXT / Skipped / Backlog; остальные пространства сохраняют полный статус (`v0.12.1`)
+- [x] Многострочные описания задач: `ck desc <ID>` показ / установка (замена целиком) / `--stdin` / `--clear`, хранение ИНЛАЙНОВО в PLAN.md строками `> text` с побайт-точными round-trip (LF/CRLF, любой порядок заметок), отображение в `ck st` / `ck list` / `ck export --task`, включая пространства (`v0.13.5`)
+- [x] Дедлайны задач: `--due YYYY-MM-DD` записывает проверенный маркер `@due(...)` в строку (мусорные даты остаются текстом), `ck st` подсвечивает просроченные, `ck list` добавляет маркер, а `ck notify --check` — тихая cron-проверка с кодами выхода 0/1/2 (`v0.13.5`)
