@@ -186,9 +186,13 @@ class TestAddDue(_Harness):
         root = self._project()
         code, out, _err = self._run(["list"], root)
         self.assertEqual(code, 0)
-        self.assertIn("[ ] 2. Beta overdue @due(2026-11-01)", out)
-        self.assertIn("[ ] 3. Gamma due-later @due(2026-12-01)", out)
-        self.assertIn("[ ] 1. Alpha task\n", out)
+        self.assertRegex(
+            out, r"\[ \] 2\. Beta overdue @due\(2026-11-01\) \[#[0-9a-z]{8}\]")
+        self.assertRegex(
+            out, r"\[ \] 3\. Gamma due-later @due\(2026-12-01\) "
+                 r"\[#[0-9a-z]{8}\]")
+        self.assertRegex(
+            out, r"\[ \] 1\. Alpha task \[#[0-9a-z]{8}\]")
 
 
 class TestStatusDueHighlight(_Harness):

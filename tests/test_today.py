@@ -22,6 +22,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -520,7 +521,9 @@ class TestTodaySurface(_TodayHome):
 
         self.assertEqual(code, 0, out)
         lines = out.splitlines()
-        task_index = lines.index("[ ] 1. task A")
+        task_index = next(
+            i for i, l in enumerate(lines)
+            if re.match(r"^\[ \] 1\. task A( \[[#0-9a-zA-Z]{9}\])?$", l))
         self.assertTrue(lines[task_index + 1].startswith("    * Note ("),
                         lines[task_index + 1])
         self.assertIn("first thought", lines[task_index + 1])

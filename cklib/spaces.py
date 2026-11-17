@@ -1407,6 +1407,24 @@ class SpaceManager:
         self._commit(tl)
         return new_task.id
 
+    def resolve_task_ref(self, token: str) -> Optional[int]:
+        """Resolve ONE task reference token to a positional ID.
+
+        Space analogue of
+        :meth:`cklib.core.ContextKeeper.resolve_task_ref`: accepts a
+        positional ID (``3``) or a STABLE uuid (``a1b2c3d4``). A
+        positional ID that is out of range is NOT resolved here —
+        callers validate existence against the operations they run.
+        Returns ``None`` when the token is neither a valid integer
+        nor a known uuid.
+        """
+        try:
+            return int(token)
+        except ValueError:
+            pass
+        task = self.load().by_uuid(token)
+        return task.id if task is not None else None
+
     def task_summary(self, task_id: int) -> dict:
         """Read-only snapshot of a task for a deletion confirmation.
 
@@ -1787,13 +1805,13 @@ class SpaceManager:
         the spec references a task the space does not have.
         """
         # Imported lazily: core imports this module at load time.
-        from .core import _parse_id_spec
+        from .core import resolve_id_spec
 
-        ids = _parse_id_spec(spec)
+        tl = self.load()
+        ids = resolve_id_spec(spec, tl)
         if not ids:
             raise ValueError(f"No valid task IDs in spec: {spec!r}")
 
-        tl = self.load()
         unknown = [i for i in ids if tl.by_id(i) is None]
         if unknown:
             raise KeyError(

@@ -1,6 +1,4 @@
 ## Current Sprint
-- [ ] Изолированный dev-режим (`ck-dev`), песочница и фикстуры <!-- id: d9bh8tjc -->
-- [>] Автозамена дефолтной задачи при первом `ck add` <!-- id: 8yi2zbai -->
 - [ ] Подготовка клиентского модуля синхронизации состояний (`.ck/state.json`) <!-- id: 93n9dufi -->
 - [ ] Дополнительные шаблоны `prompt.md` для ролей ИИ <!-- id: vy7wwy8k -->
 - [ ] Экспорт и инжекция контекста в сторонние инструменты <!-- id: xr6qnbid -->
@@ -20,3 +18,4 @@
 - [ ] BUG: ck st shows the same task in both [>] Next and [~] Paused when it has a note (duplicate title) <!-- id: hz1h95a0 -->
 - [ ] FEAT: ck <space> move/swap/reorder — task reordering inside spaces (parity with project commands) <!-- id: aq96ndsg -->
 - [ ] Push backlog: 37 непушенных коммитов в 8 репо по ~/projects (grand-mebel 9 — сначала проверить содержимое); без remote: ck_test(6), cfs_next(5), avto-calculator(2) — решить, заводить ли remote <!-- id: 1xkwlvw4 -->
+- [>] UX: контекст-хедер в list/st, стабильные ID (uuid) в командах, prune -y, list-фолбэк вне проекта, ROADMAP-синк в done <!-- id: 6dpsey4t -->

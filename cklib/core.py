@@ -79,7 +79,7 @@ from .config import (
     warn_if_sensitive_root,
 )
 from .models import (CompletedTaskError, HistoryEntry, Notes, Task,
-                     TaskList, TaskStatus, history_timestamp,
+                     TaskList, TaskStatus, _UUID_LENGTH, history_timestamp,
                      new_task_uuid)
 from .history import (
     archive_name,
@@ -1501,11 +1501,11 @@ class ContextKeeper:
         task is deleted permanently without a history record.
         """
         self._require_migrated()
-        ids = _parse_id_spec(spec)
+        tl = self._load_plan()
+        ids = resolve_id_spec(spec, tl)
         if not ids:
             raise ValueError(f"No valid task IDs in spec: {spec!r}")
 
-        tl = self._load_plan()
         completed: list[Task] = []
         for tid in ids:
             task = tl.by_id(tid)
@@ -1535,6 +1535,28 @@ class ContextKeeper:
     # ------------------------------------------------------------------ #
     # COMMAND: delete / rm (remove a task from PLAN.md)
     # ------------------------------------------------------------------ #
+
+    def resolve_task_ref(self, token: str) -> Optional[int]:
+        """Resolve ONE task reference token to a positional ID.
+
+        Accepts a positional ID (``3``) or a STABLE uuid
+        (``a1b2c3d4``, v0.13.0's ``<!-- id: ... -->`` comment). The
+        uuid is the address that survives every delete/reindex, so
+        interactive commands can take it anywhere a positional ID is
+        expected. Returns ``None`` when the token is neither a valid
+        integer nor a known uuid — the caller keeps its standard
+        "invalid/unknown ID" error path.
+
+        Raises ``ValueError`` when no project plan is bound (the same
+        fail-closed contract as the other plan-reading operations).
+        """
+        self._require_bound_plan()
+        try:
+            return int(token)
+        except ValueError:
+            pass
+        task = self._load_plan().by_uuid(token)
+        return task.id if task is not None else None
 
     def task_summary(self, task_id: int) -> dict:
         """Read-only snapshot of a task for the deletion confirmation.
@@ -4195,6 +4217,26 @@ def _due_suffix(task: Task, palette: "ui.Palette") -> str:
     return " " + palette.muted(f"(due {task.due})")
 
 
+def _stable_suffix(task: Task, palette: Optional["ui.Palette"] = None) -> str:
+    """The `` [#a1b2c3d4]`` stable-ID suffix (v0.13.6).
+
+    Every task line in ``ck list`` / ``ck st`` / ``ck notes`` ends
+    with the task's STABLE reference — the address that survives
+    deletes, reorders and re-indexing, and that ``ck done`` /
+    ``ck delete`` / ``ck start`` accept directly. Positional IDs shift
+    on every mutation; this suffix is the copy-paste-safe handle.
+    Styled muted when a palette is available, plain otherwise; an
+    empty string for tasks without a uuid (legacy hand-written
+    plans).
+    """
+    if not task.uuid:
+        return ""
+    suffix = f" [#{task.uuid}]"
+    if palette is not None:
+        return palette.muted(suffix)
+    return suffix
+
+
 def _render_local_status(ck: ContextKeeper, tl: TaskList,
                          *, palette: Optional["ui.Palette"] = None,
                          source: str = "local",
@@ -4305,7 +4347,8 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
         lines.append(
             " -> CURRENT FOCUS: "
             + p.bold_yellow(f"[#{focus.id}] {focus.title}")
-            + _due_suffix(focus, p))
+            + _due_suffix(focus, p)
+            + _stable_suffix(focus, p))
         if focus.description:
             lines.extend(
                 f"    > {chunk}" if chunk else "    >"
@@ -4337,13 +4380,15 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
         lines.append(
             "       - "
             + p.bold_yellow(f"[#{focus.id}] {focus.title}")
-            + _due_suffix(focus, p))
+            + _due_suffix(focus, p)
+            + _stable_suffix(focus, p))
     elif tl.open:
         t = tl.open[0]
         lines.append("    [>] Next:")
         lines.append(
             f"       - {p.bold_yellow(f'[{t.id}] {t.title}')} [ ]"
             + _due_suffix(t, p)
+            + _stable_suffix(t, p)
         )
     else:
         lines.append(p.muted("    [>] Next: (no open tasks)"))
@@ -4368,11 +4413,12 @@ def _render_local_status(ck: ContextKeeper, tl: TaskList,
             continue
         paused_ids.add(p_task.id)
         paused_display.append((p_task.id, p_task.title, p_entries,
-                               _due_suffix(p_task, p)))
+                               _due_suffix(p_task, p),
+                               _stable_suffix(p_task, p)))
     if paused_display:
         lines.append(p.bold_yellow("    [~] Paused:"))
-        for pid, ptitle, pentries, pdue in paused_display:
-            lines.append(f"       - [{pid}] {ptitle}" + pdue)
+        for pid, ptitle, pentries, pdue, psuffix in paused_display:
+            lines.append(f"       - [{pid}] {ptitle}" + pdue + psuffix)
             lines.extend(_note_display_lines(pentries, "         ", p))
     else:
         lines.append(p.muted("    [~] Paused: (none)"))
@@ -4465,7 +4511,8 @@ def _render_tasks_listing(tl: TaskList,
             current_section = t.section
         marker = t.status.canonical_marker
         due_marker = f" @due({t.due})" if t.due else ""
-        lines.append(f"[{marker}] {t.id}. {t.title}{due_marker}")
+        lines.append(f"[{marker}] {t.id}. {t.title}{due_marker}"
+                     + _stable_suffix(t))
         if t.description:
             # v0.13.4: the multiline description renders as indented
             # ``> text`` lines directly beneath its task (only when
@@ -4530,12 +4577,17 @@ def _render_notes_listing(ck: ContextKeeper, tl: TaskList) -> str:
     out: list[str] = []
     if focus is not None:
         out.append(p.bold_yellow("[>] Active Focus:"))
-        out.append(f"   - [{focus.id}] {focus.title}")
+        out.append(f"   - [{focus.id}] {focus.title}"
+                   + _stable_suffix(focus, p))
         out.extend(_note_display_lines(active_entries, "     ", p))
     if paused_entries:
         out.append(notice(WARN, "Unfocused / Paused Context:", p))
         for pid, ptitle, pentries in paused_entries:
-            out.append(f"   - [{pid}] {ptitle}")
+            task = tl.by_id(pid)
+            line = f"   - [{pid}] {ptitle}"
+            if task is not None:
+                line += _stable_suffix(task, p)
+            out.append(line)
             if pentries:
                 out.extend(_note_display_lines(pentries, "     ", p))
             else:
@@ -5874,6 +5926,35 @@ def _render_dashboard_verbose(states: list,
 # ID spec parsing
 # ---------------------------------------------------------------------- #
 
+def resolve_id_spec(spec: str, tl: "TaskList") -> list[int]:
+    """Parse an ID spec into positional IDs, UUID tokens included.
+
+    ``spec`` accepts everything :func:`_parse_id_spec` does (``3``,
+    ``2-4``, ``1,3,5``, ``1-2,4,6-7``) PLUS stable task references
+    (``a1b2c3d4``), which resolve through the plan's ``uuid`` map.
+    Mixing forms is allowed: ``a1b2c3d4,3-4`` is a valid spec, and the
+    chunk ORDER is preserved. An unknown UUID raises ``KeyError``
+    (same contract as an unknown positional ID) instead of being
+    silently dropped — a typo must never complete/delete the WRONG
+    task.
+    """
+    ids: list[int] = []
+    for chunk in spec.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        bounds = chunk.split("-") if "-" in chunk else [chunk]
+        if all(b.isdigit() for b in bounds):
+            ids.extend(_parse_id_spec(chunk))
+        elif len(chunk) == _UUID_LENGTH and chunk.isalnum():
+            task = tl.by_uuid(chunk)
+            if task is None:
+                raise KeyError(f"No task with stable id {chunk!r}")
+            ids.append(task.id)
+    seen: set[int] = set()
+    return [i for i in ids if not (i in seen or seen.add(i))]
+
+
 def _parse_id_spec(spec: str) -> list[int]:
     """Parse IDs/ranges/lists: '3', '2-4', '1,3,5', '1-2,4,6-7'."""
     ids: list[int] = []
@@ -5916,6 +5997,7 @@ __all__ = [
     "ProjectContext",
     "UpdateResult",
     "_parse_id_spec",
+    "resolve_id_spec",
     "TRACKED_GITIGNORE_PROTECTIONS",
     "GLOBAL_REGISTRY_FILE",
     "GLOBAL_STATE_FILE",

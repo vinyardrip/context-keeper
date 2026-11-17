@@ -288,6 +288,22 @@ class TaskList:
                 return t
         return None
 
+    def by_uuid(self, uuid: str) -> Optional[Task]:
+        """Resolve the STABLE task reference (``<!-- id: ... -->``).
+
+        The positional ID shifts on every delete/reindex; the uuid is
+        written once on the task line and never regenerated (v0.13.0),
+        so it is the address that survives reordering. An empty or
+        unknown token resolves to ``None`` — callers report it the
+        same way as an unknown positional ID.
+        """
+        if not uuid:
+            return None
+        for t in self.tasks:
+            if t.uuid and t.uuid == uuid:
+                return t
+        return None
+
     # ---- analytics ----
 
     @property

@@ -32,6 +32,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -1183,6 +1184,11 @@ class TestSpaceManager(_IsolatedHome):
 # --------------------------------------------------------------------------- #
 
 
+def _without_uuid_suffix(line: str) -> str:
+    """Strip the `` [#a1b2c3d4]`` stable-ID suffix (v0.13.6)."""
+    return re.sub(r" \[[#0-9a-zA-Z]{9}\]$", "", line)
+
+
 class TestSpaceListViewAlignment(_IsolatedHome):
     """`ck <space> list` uses the project list rendering engine.
 
@@ -1217,11 +1223,12 @@ class TestSpaceListViewAlignment(_IsolatedHome):
 
         self.assertEqual(code, 0)
         lines = out.splitlines()
-        # Badge line first, then the project-list structure.
+        # Badge line first, then the project-list structure. Task rows
+        # carry the trailing stable-ID suffix.
         self.assertEqual(lines[0], "[local] 0/2 done")
         self.assertEqual(lines[1], "## Current Sprint")
-        self.assertEqual(lines[2], "[ ] 1. open task")
-        self.assertEqual(lines[3], "[>] 2. focused task")
+        self.assertEqual(_without_uuid_suffix(lines[2]), "[ ] 1. open task")
+        self.assertEqual(_without_uuid_suffix(lines[3]), "[>] 2. focused task")
 
     def test_local_list_renders_notes_under_tasks(self):
         self._seed("local", "first task", "second task")
@@ -1232,9 +1239,9 @@ class TestSpaceListViewAlignment(_IsolatedHome):
 
         self.assertEqual(code, 0)
         lines = out.splitlines()
-        self.assertEqual(lines[2], "[ ] 1. first task")
+        self.assertEqual(_without_uuid_suffix(lines[2]), "[ ] 1. first task")
         self.assertEqual(lines[3], "    * Note: not yet started")
-        self.assertEqual(lines[4], "[ ] 2. second task")
+        self.assertEqual(_without_uuid_suffix(lines[4]), "[ ] 2. second task")
         self.assertEqual(lines[5], "    * Note: halfway through")
 
     def test_local_list_note_attached_to_focused_task(self):
@@ -1245,8 +1252,11 @@ class TestSpaceListViewAlignment(_IsolatedHome):
         _, out = self._run(["local", "list"])
 
         lines = out.splitlines()
-        self.assertIn("[>] 2. second task", lines)
-        idx = lines.index("[>] 2. second task")
+        self.assertTrue(
+            any(_without_uuid_suffix(l) == "[>] 2. second task"
+                for l in lines))
+        idx = next(i for i, l in enumerate(lines)
+                   if _without_uuid_suffix(l) == "[>] 2. second task")
         self.assertEqual(lines[idx + 1], "    * Note: active note")
 
     def test_local_list_groups_completed_section(self):
@@ -1290,9 +1300,9 @@ class TestSpaceListViewAlignment(_IsolatedHome):
         lines = out.splitlines()
         self.assertEqual(lines[0], "[remote] 0/2 done")
         self.assertEqual(lines[1], "## Current Sprint")
-        self.assertEqual(lines[2], "[>] 1. provision VPS")
+        self.assertEqual(_without_uuid_suffix(lines[2]), "[>] 1. provision VPS")
         self.assertEqual(lines[3], "    * Note: waiting for IP")
-        self.assertEqual(lines[4], "[ ] 2. open firewall")
+        self.assertEqual(_without_uuid_suffix(lines[4]), "[ ] 2. open firewall")
 
     def test_space_list_body_is_engine_output(self):
         """The list body is byte-identical to the project engine."""
@@ -1322,7 +1332,7 @@ class TestSpaceListViewAlignment(_IsolatedHome):
         lines = out.splitlines()
         self.assertEqual(lines[0], "[custom] 0/1 done")
         self.assertEqual(lines[1], "## Current Sprint")
-        self.assertEqual(lines[2], "[ ] 1. custom task")
+        self.assertEqual(_without_uuid_suffix(lines[2]), "[ ] 1. custom task")
 
     def test_done_tasks_keep_note_display(self):
         """A completed task's note still renders beneath it."""
@@ -1334,8 +1344,11 @@ class TestSpaceListViewAlignment(_IsolatedHome):
 
         lines = out.splitlines()
         self.assertEqual(lines[0], "[local] 1/1 done")
-        self.assertIn("[x] 1. first task", lines)
-        idx = lines.index("[x] 1. first task")
+        self.assertTrue(
+            any(_without_uuid_suffix(l) == "[x] 1. first task"
+                for l in lines))
+        idx = next(i for i, l in enumerate(lines)
+                   if _without_uuid_suffix(l) == "[x] 1. first task")
         self.assertEqual(lines[idx + 1], "    * Note: done note")
 
 
@@ -1414,14 +1427,17 @@ class TestSpaceStatusEditStart(_IsolatedHome):
         # 2) progress line
         self.assertEqual(
             lines[2], " [%] Progress: 1/3 tasks done (33.3%)")
-        # 3) current focus + its process note
+        # 3) current focus + its process note (with stable-ID suffix)
         self.assertEqual(
-            lines[4], " -> CURRENT FOCUS: [#2] second task")
+            _without_uuid_suffix(lines[4]),
+            " -> CURRENT FOCUS: [#2] second task")
         self.assertEqual(lines[5], "    * Note: halfway through")
         # 4) work context sections (v0.13.0 layout)
         self.assertEqual(lines[7], " -> WORK CONTEXT:")
         self.assertEqual(lines[8], "    [>] Focus:")
-        self.assertEqual(lines[9], "       - [#2] second task")
+        self.assertEqual(
+            _without_uuid_suffix(lines[9]),
+            "       - [#2] second task")
         self.assertEqual(lines[10], "    [~] Paused: (none)")
         self.assertEqual(lines[11], "    [x] History (last 3):")
         self.assertEqual(lines[12], "       - [x] 1. first task")
@@ -1450,7 +1466,7 @@ class TestSpaceStatusEditStart(_IsolatedHome):
         self.assertIn("Run 'ck local start <ID>'", out)
         self.assertIn("(e.g., 'ck local start 1') to set focus.", out)
         self.assertIn("    [>] Next:", out)
-        self.assertIn("       - [1] alpha [ ]", out)
+        self.assertRegex(out, r"       - \[1\] alpha \[ \] \[#[0-9a-z]{8}\]")
 
     def test_local_st_surfaces_paused_task_notes(self):
         """Noted, non-focused open tasks fill the paused ledger."""
@@ -1785,7 +1801,9 @@ class TestSpaceNotesAndFlags(_IsolatedHome):
         code, out = self._run(["local", "notes"])
 
         self.assertEqual(code, 0)
-        self.assertEqual(out.splitlines(), [
+        lines = [
+            _without_uuid_suffix(l) for l in out.splitlines()]
+        self.assertEqual(lines, [
             "[>] Active Focus:",
             "   - [2] second task",
             "     * Note: halfway through",

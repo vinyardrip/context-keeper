@@ -20,6 +20,7 @@ from .core import (
     ContextKeeper,
     FocusExistsError,
     UpdateResult,
+    _collapse_ids,
     is_standalone_install,
     maybe_notify_update_for,
 )
@@ -913,6 +914,24 @@ def _prompt_note_before_switch(ck: ContextKeeper, *, no_input: bool = False,
     print(f"* Note saved for [{saved['id']}]: {saved['note']}")
 
 
+def _resolve_task_id(owner, raw: str) -> Optional[int]:
+    """Resolve ONE CLI token to a positional task ID.
+
+    ``owner`` is the project keeper or a ``SpaceManager``; both expose
+    :meth:`resolve_task_ref` (positional ID or STABLE uuid, v0.13.6).
+    ``None`` means "unresolvable" — callers keep their standard
+    invalid-ID error path.
+    """
+    try:
+        return int(raw)
+    except ValueError:
+        pass
+    try:
+        return owner.resolve_task_ref(raw)
+    except (KeyError, ValueError, OSError):
+        return None
+
+
 def _run_start_like(ck: ContextKeeper, verb: str, task_id: int, *,
                     no_input: bool = False, assume_yes: bool = False) -> int:
     """Shared runner for ``ck start <ID>`` / ``ck focus <ID>``.
@@ -1327,11 +1346,7 @@ def _dispatch(argv: Optional[List[str]] = None) -> int:
                     return 0
                 print("Usage: ck note <ID> <text>")
                 return 2
-            task_id = None
-            try:
-                task_id = int(tokens[0])
-            except ValueError:
-                task_id = None
+            task_id = _resolve_task_id(ck, tokens[0]) if tokens else None
             if task_id is not None:
                 if args.list_notes:
                     print(ck.note_listing(task_id))
@@ -1728,28 +1743,14 @@ def _run_task_delete(cmd: str, rest: List[str]) -> int:
             positional.append(token)
         index += 1
 
-    usage = f"Usage: ck {cmd} <ID> [-f|--force] [-s <space>]"
+    usage = f"Usage: ck {cmd} <ID|spec> [-f|--force] [-s <space>]"
     if not positional:
         print(usage)
         return 2
-    if len(positional) > 1:
-        _print_error(
-            f"ERROR: `ck {cmd}` takes exactly one task ID "
-            f"(got {len(positional)}).")
-        return 2
-
-    raw = positional[0]
-    try:
-        task_id = int(raw)
-    except ValueError:
-        # TASK IDs are numbers. A name here is most likely an attempt
-        # to delete a SPACE — point at the dedicated command instead
-        # of guessing (and never treat it as a path to remove).
-        _print_error(
-            f"ERROR: Invalid task ID: {raw!r}. Task IDs are numbers "
-            f"(see `ck list`); to delete a global space use "
-            f"`ck space delete {raw}`.")
-        return 2
+    # ``ck delete 3 5`` and ``ck delete 3,5`` are the same spec; every
+    # form _parse-style specs accept (ranges, lists, stable UUIDs)
+    # works here too.
+    spec = ",".join(positional)
 
     target_space = space_name or spaces.PROJECT_SPACE
     ck = None
@@ -1776,27 +1777,66 @@ def _run_task_delete(cmd: str, rest: List[str]) -> int:
             return 1
         summary_owner = manager
 
+    # SPEC RESOLUTION: positional IDs, ranges, lists and STABLE UUIDs
+    # (v0.13.6) all land here. UUID resolution needs the target's
+    # TaskList; an unbound project (no .ck/PLAN.md) fails the same way
+    # the other project mutations do.
+    from .core import resolve_id_spec
+
     try:
-        info = summary_owner.task_summary(task_id)
+        tl = ck._load_plan() if ck is not None else manager.load()
+    except ValueError as e:
+        _print_error(f"ERROR: {e}")
+        return 2
+    try:
+        ids = resolve_id_spec(spec, tl)
     except KeyError:
-        _print_error(f"ERROR: No task with id {task_id}.")
+        # A non-numeric token here is most likely an attempt to delete
+        # a SPACE — point at the dedicated command instead of guessing
+        # (and never treat it as a path to remove).
+        _print_error(
+            f"ERROR: Invalid task ID or spec: {spec!r}. Task IDs are "
+            f"numbers or stable IDs (see `ck list`); to delete a "
+            f"global space use `ck space delete {spec}`.")
+        return 2
+    if not ids:
+        _print_error(
+            f"ERROR: Invalid task ID or spec: {spec!r}. Task IDs are "
+            f"numbers or stable IDs (see `ck list`); to delete a "
+            f"global space use `ck space delete {spec}`.")
+        return 2
+
+    try:
+        infos = []
+        for tid in ids:
+            infos.append(summary_owner.task_summary(tid))
+    except KeyError:
+        _print_error(f"ERROR: No task with id {tid}.")
         return 2
     except ValueError as e:
         _print_error(f"ERROR: {e}")
         return 2
 
-    print(f"Task #{info['id']}: {info['title']}")
+    for info in infos:
+        print(f"Task #{info['id']}: {info['title']}")
     if not force:
         if not sys.stdin.isatty() or not sys.stdout.isatty():
+            target_desc = (f"task #{ids[0]}" if len(ids) == 1
+                           else f"task(s) {_collapse_ids(ids)}")
             _print_error(
-                f"ERROR: Refusing to delete task #{task_id} from "
+                f"ERROR: Refusing to delete {target_desc} from "
                 f"space {target_space!r} without confirmation "
                 "(non-interactive terminal). Pass -f to confirm.")
             return 2
         try:
-            answer = input(
-                f"Permanently delete task #{task_id} from space "
-                f"'{target_space}'? [y/N]: ")
+            if len(ids) == 1:
+                answer = input(
+                    f"Permanently delete task #{ids[0]} from space "
+                    f"'{target_space}'? [y/N]: ")
+            else:
+                answer = input(
+                    f"Permanently delete {len(ids)} task(s) from space "
+                    f"'{target_space}'? [y/N]: ")
         except (EOFError, KeyboardInterrupt):
             _notice(ui.INFO, "Aborted.")
             return 2
@@ -1804,13 +1844,19 @@ def _run_task_delete(cmd: str, rest: List[str]) -> int:
             _notice(ui.INFO, "Aborted.")
             return 2
 
+    notes_archived = 0
+    last_removed = None
     try:
-        removed = (ck.delete_task(task_id) if ck is not None
-                   else manager.delete_task(task_id))
+        # Descending order: positional IDs shift on every delete, so
+        # the highest must go first (same ordering `ck done` uses).
+        for tid in sorted(ids, reverse=True):
+            last_removed = (ck.delete_task(tid) if ck is not None
+                            else manager.delete_task(tid))
+            notes_archived += int(last_removed.get("notes_archived") or 0)
     except KeyError:
         # The task vanished between the prompt and the write (another
         # process edited the plan): a clean not-found error.
-        _print_error(f"ERROR: No task with id {task_id}.")
+        _print_error(f"ERROR: No task with id {tid}.")
         return 2
     except ValueError as e:
         _print_error(f"ERROR: {e}")
@@ -1819,20 +1865,28 @@ def _run_task_delete(cmd: str, rest: List[str]) -> int:
         _print_error(f"ERROR: I/O error: {e}")
         return 4
 
-    _notice(
-        ui.OK,
-        f"Deleted task #{removed['id']}: {removed['title']} from "
-        f"space '{target_space}' ({removed['remaining']} task(s) "
-        "remaining, IDs re-indexed).")
-    if removed.get("notes_archived"):
+    if len(infos) == 1:
+        _notice(
+            ui.OK,
+            f"Deleted task #{last_removed['id']}: "
+            f"{last_removed['title']} from "
+            f"space '{target_space}' ({last_removed['remaining']} task(s) "
+            "remaining, IDs re-indexed).")
+    else:
+        _notice(
+            ui.OK,
+            f"Deleted {len(infos)} task(s) from space '{target_space}' "
+            f"({last_removed['remaining']} task(s) remaining, "
+            "IDs re-indexed).")
+    if notes_archived:
         _notice(
             ui.INFO,
-            f"Archived {removed['notes_archived']} process note(s) "
+            f"Archived {notes_archived} process note(s) "
             f"to HISTORY.md of space '{target_space}'.")
     # v0.13.0: the refreshed listing (new positional IDs) prints right
     # after the confirmation — the next `ck done N` always points at
     # what the user just saw.
-    listing = removed.get("listing")
+    listing = last_removed.get("listing")
     if listing:
         print(listing)
     return 0
@@ -2200,9 +2254,8 @@ def _run_desc(ck: ContextKeeper, rest: List[str]) -> int:
     if not rest:
         print("Usage: ck desc <ID> [text] [--stdin|--clear]")
         return 2
-    try:
-        task_id = int(rest[0])
-    except ValueError:
+    task_id = _resolve_task_id(ck, rest[0])
+    if task_id is None:
         _print_error(f"ERROR: Invalid task ID: {rest[0]!r}")
         return 2
     args = rest[1:]
@@ -2365,9 +2418,8 @@ def _legacy_dispatch(raw: List[str]) -> int:
             if not id_tokens:
                 print("Usage: ck start <ID>")
                 return 2
-            try:
-                tid = int(id_tokens[0])
-            except ValueError:
+            tid = _resolve_task_id(ck, id_tokens[0])
+            if tid is None:
                 _print_error(
                     f"ERROR: Invalid task ID: {id_tokens[0]!r}")
                 return 2
@@ -2387,9 +2439,8 @@ def _legacy_dispatch(raw: List[str]) -> int:
             if not id_tokens:
                 print("Usage: ck focus <ID>")
                 return 2
-            try:
-                tid = int(id_tokens[0])
-            except ValueError:
+            tid = _resolve_task_id(ck, id_tokens[0])
+            if tid is None:
                 _print_error(
                     f"ERROR: Invalid task ID: {id_tokens[0]!r}")
                 return 2
@@ -2525,11 +2576,7 @@ def _legacy_dispatch(raw: List[str]) -> int:
                     return 0
                 print("Usage: ck note <ID> <text>")
                 return 2
-            task_id = None
-            try:
-                task_id = int(tokens[0])
-            except ValueError:
-                task_id = None
+            task_id = _resolve_task_id(ck, tokens[0]) if tokens else None
             if task_id is not None:
                 if show:
                     print(ck.note_listing(task_id))
@@ -3003,9 +3050,8 @@ def _run_space_command(space: str, rest: List[str]) -> int:
         if not args:
             print(f"Usage: ck {space} {action} <ID>")
             return 2
-        try:
-            tid = int(args[0])
-        except ValueError:
+        tid = _resolve_task_id(mgr, args[0])
+        if tid is None:
             _print_error(f"ERROR: Invalid task ID: {args[0]!r}")
             return 2
         # IDEMPOTENCY: re-focusing the already-focused task is a
@@ -3049,8 +3095,10 @@ def _run_space_command(space: str, rest: List[str]) -> int:
             print(usage_note)
             return 2
         try:
-            tid = int(tokens[0])
-        except ValueError:
+            tid = _resolve_task_id(mgr, tokens[0])
+        except (KeyError, ValueError, OSError):
+            tid = None
+        if tid is None:
             _print_error(f"ERROR: Invalid task ID: {tokens[0]!r}")
             return 2
         if show:

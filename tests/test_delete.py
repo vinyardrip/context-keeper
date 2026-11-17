@@ -615,12 +615,16 @@ class TestDeleteCli(_Harness):
     def test_missing_id_prints_usage(self):
         rc, out, _ = _run_main(["rm"])
         self.assertEqual(rc, 2)
-        self.assertIn("Usage: ck rm <ID> [-f|--force]", out)
+        self.assertIn("Usage: ck rm <ID|spec> [-f|--force]", out)
 
-    def test_extra_ids_are_rejected(self):
+    def test_extra_ids_delete_as_a_spec(self):
+        """v0.13.6: multiple IDs delete together (ranges/lists parity)."""
+        before = self.plan_text()
         rc, out, _ = _run_main(["delete", "1", "2", "-f"])
-        self.assertEqual(rc, 2)
-        self.assertIn("takes exactly one task ID", out)
+        self.assertEqual(rc, 0)
+        self.assertIn("Deleted 2 task(s)", out)
+        after = self.plan_text()
+        self.assertEqual(len(after.splitlines()), len(before.splitlines()) - 2)
 
     def test_unknown_flag_is_rejected(self):
         rc, out, _ = _run_main(["delete", "1", "--yes"])

@@ -109,3 +109,5 @@
 - [x] 2026-11-16 01:48: Fix remaining pre-existing test failures unrelated to v0.13.x <!-- id: m3mffqzd -->
 - [x] 2026-11-16 01:48: Добавить в README раздел 'AI Workflow': примеры использования ck export для передачи контекста в opencode <!-- id: c41y9pl8 -->
 - [x] 2026-11-16 01:48: ck export: добавить флаг --with-errors для захвата последних логов ошибок из airlock/tests <!-- id: hlzndw5m -->
+- [x] 2026-11-17 01:13: Изолированный dev-режим (`ck-dev`), песочница и фикстуры <!-- id: d9bh8tjc -->
+- [x] 2026-11-17 01:13: Автозамена дефолтной задачи при первом `ck add` <!-- id: 8yi2zbai -->
