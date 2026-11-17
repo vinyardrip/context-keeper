@@ -95,3 +95,4 @@ env/
 
 # Context Keeper
 .ck/*.md.gz
+uv.lock

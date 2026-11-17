@@ -1,8 +1,0 @@
-version = 1
-revision = 5
-requires-python = ">=3.8"
-
-[[package]]
-name = "context-keeper"
-version = "0.13.5"
-source = { editable = "." }
