@@ -65,6 +65,7 @@ from .config import (
     PLAN_FILENAME,
     PROMPT_FILENAME,
     README_FILENAME,
+    ROADMAP_FILENAME,
     SNAPSHOT_INSTALL_DIR,
     TRACKED_GITIGNORE_PROTECTIONS,
     UPDATE_CHECK_INTERVAL_HOURS,
@@ -1530,7 +1531,54 @@ class ContextKeeper:
         for task in sorted(completed, key=lambda t: t.id, reverse=True):
             tl.delete(task.id)
         self._commit_plan(tl)
+        self._mirror_done_to_roadmap([t.title for t in completed])
         return [task.id for task in completed]
+
+    def _mirror_done_to_roadmap(self, titles: list[str]) -> None:
+        """Best-effort ROADMAP.md checkbox sync for completions (v0.13.6).
+
+        Projects that keep a hand-maintained ``ROADMAP.md`` (checklist
+        sections mirroring the plan) had a desync trap: ``ck done``
+        updated ``PLAN.md``/``HISTORY.md`` but the roadmap checkbox
+        stayed open, and the two sources of truth drifted apart.
+
+        The mirror flips every ``- [ ]`` / ``- [>]`` / ``- [~]`` line
+        whose title EXACTLY matches a completed task title to
+        ``- [x]`` — exact match only (``<title>`` == the text after
+        the marker), so unrelated checklists, section headers and
+        annotated done rows (``(v0.13.5)`` suffixes) are never
+        touched. Best-effort by design: a missing roadmap is a no-op,
+        and I/O or encoding failures never break the ``ck done``
+        result.
+        """
+        if self.root is None:
+            return
+        roadmap = self.root / ROADMAP_FILENAME
+        if not roadmap.is_file():
+            return
+        try:
+            text = roadmap.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return
+        targets = {title for title in titles if title}
+        if not targets:
+            return
+        changed = False
+        out_lines: list[str] = []
+        for line in text.splitlines(keepends=True):
+            match = re.match(r"^(\s*-\s*)\[([ x>~])\](.*)$", line,
+                             flags=re.DOTALL)
+            if (match and match.group(2) != "x"
+                    and match.group(3).rstrip("\r\n").strip() in targets):
+                line = f"{match.group(1)}[x]{match.group(3)}"
+                changed = True
+            out_lines.append(line)
+        if not changed:
+            return
+        try:
+            roadmap.write_text("".join(out_lines), encoding="utf-8")
+        except OSError:
+            return
 
     # ------------------------------------------------------------------ #
     # COMMAND: delete / rm (remove a task from PLAN.md)

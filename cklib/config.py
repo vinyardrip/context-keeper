@@ -71,6 +71,7 @@ def compress_archives_enabled() -> bool:
 PLAN_FILENAME = "PLAN.md"
 HISTORY_FILENAME = "HISTORY.md"
 JOURNAL_FILENAME = "JOURNAL.md"
+ROADMAP_FILENAME = "ROADMAP.md"
 META_FILENAME = "meta.json"
 VERSION_FILENAME = "version"
 LINKS_FILENAME = "links.json"
