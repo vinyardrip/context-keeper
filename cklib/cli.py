@@ -2401,6 +2401,9 @@ def _legacy_dispatch(raw: List[str]) -> int:
             if rc:
                 _print_error(out)
                 return rc
+            header = ck.list_context_banner(name)
+            if header:
+                print(header)
             print(out)
         elif cmd == "info":
             print(ck.info())

@@ -2575,6 +2575,47 @@ class ContextKeeper:
             root = self._discovered_project_by_name(name)
         return root
 
+    def list_context_banner(self, project_name: Optional[str] = None) -> str:
+        """The TTY-only context header for ``ck list`` (v0.13.6).
+
+        ``[i] project: <name> — <path> (<N> open)`` — one muted line
+        printed ABOVE the listing so the human reader always knows
+        WHICH plan the rows belong to (the "am I looking at the right
+        list?" problem: plans are per-directory, spaces are global,
+        and the two lists look alike).
+
+        Piped/redirected STDOUT returns an empty string: the listing
+        stays byte-for-byte pipe-friendly (no decorations for
+        grep/cut), the banner is a terminal-only affordance. An
+        unresolvable context or an unknown project name also returns
+        "" — the error/notice the list itself prints explains enough.
+        """
+        if not sys.stdout.isatty():
+            return ""
+        if project_name:
+            root = self.resolve_named_project(project_name)
+            if root is None:
+                return ""
+            name = project_name
+        else:
+            ctx = self.resolve_context()
+            if ctx is None or ctx.source not in ("local", "parent"):
+                # Discovery notices already name the nested project
+                # (or list the choices) — no extra banner.
+                return ""
+            root = ctx.root
+            name = Path(root).name
+        keeper = self._keeper_for(root)
+        try:
+            tl = load_repaired_plan(keeper._plan_display_path())[0]
+            open_count = len(tl.open)
+        except (OSError, ValueError, UnicodeDecodeError):
+            open_count = 0
+        p = ui.get_palette(colors=self.color_overrides())
+        return p.muted(
+            f"[i] project: {name} — {Path(root).resolve()} "
+            f"({open_count} open)")
+
     def list_tasks(self, project_name: Optional[str] = None) -> tuple:
         """``ck list`` orchestration — returns ``(output, exit_code)``.
 
