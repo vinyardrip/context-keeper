@@ -2503,7 +2503,9 @@ class ContextKeeper:
 
     @staticmethod
     def render_nested_projects_notice(names: list,
-                                      command: str = "list") -> str:
+                                      command: str = "list",
+                                      registry_names: Optional[list] = None
+                                      ) -> str:
         """The "not a project here" notice for ``ck list`` / ``ck st``.
 
         ASCII-only bullet (``-``), matching the rest of the CLI's
@@ -2523,6 +2525,13 @@ class ContextKeeper:
         as the task-listing spelling of the same target. The header
         and the choice list are identical for both commands — one
         discovery notice, two entry points.
+
+        ``registry_names`` (v0.13.6) turns the dead-end "(none
+        registered here)" case into an actionable menu: when the cwd
+        has no nested projects but OTHER projects are registered
+        globally, they are listed under "Registered projects:" with
+        the explicit ``ck list <project_name>`` spelling — the same
+        addressable target the nested branch offers.
         """
         p = get_palette()
         lines = [
@@ -2535,6 +2544,10 @@ class ContextKeeper:
             lines.extend(f"  - {n}" for n in names)
         else:
             lines.append("  (none registered here)")
+        if not names and registry_names:
+            lines.append("")
+            lines.append("Registered projects:")
+            lines.extend(f"  - {n}" for n in registry_names)
         if command == "st":
             hint = [
                 "To view status, navigate to a project directory or "
@@ -2657,8 +2670,37 @@ class ContextKeeper:
             keeper = self._keeper_for(root)
             tl = load_repaired_plan(keeper._plan_display_path())[0]
             return (_render_tasks_listing(tl, project_label=name), 0)
-        return (self.render_nested_projects_notice([n for n, _ in nested]),
+        registry_names = (
+            self._registry_names_for_fallback() if not nested else None)
+        return (self.render_nested_projects_notice(
+                    [n for n, _ in nested],
+                    registry_names=registry_names),
                 0)
+
+    def _registry_names_for_fallback(self, limit: int = 10) -> list[str]:
+        """Registered project names for the no-context ``ck list`` hint.
+
+        The discovery notice says "(none registered here)" when the
+        cwd has no nested projects — but other projects may still be
+        registered GLOBALLY and addressable via ``ck list <name>``.
+        Listing them (name only, capped) turns the dead-end notice
+        into an actionable menu; the full cross-project picture stays
+        one ``ck dashboard`` away. Names render sorted; failures are
+        swallowed (the hint must never break the listing contract).
+        """
+        try:
+            entries = registry.list_projects()
+        except Exception:
+            return []
+        names = sorted(
+            (getattr(e, "name", "") or Path(getattr(e, "path", "")).name)
+            for e in entries
+        )
+        names = [n for n in names if n]
+        if len(names) > limit:
+            hidden = len(names) - limit
+            names = names[:limit] + [f"... (+{hidden} more: ck dashboard)"]
+        return names
 
     def notes(self) -> str:
         """Return all active process notes for the resolved project.
