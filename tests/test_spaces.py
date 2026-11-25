@@ -1185,7 +1185,7 @@ class TestSpaceManager(_IsolatedHome):
 
 
 def _without_uuid_suffix(line: str) -> str:
-    """Strip the `` [#a1b2c3d4]`` stable-ID suffix (v0.13.6)."""
+    """Strip the `` [#a1b2c3d4]`` stable-ID suffix (v0.14.0)."""
     return re.sub(r" \[[#0-9a-zA-Z]{9}\]$", "", line)
 
 

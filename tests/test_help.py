@@ -126,7 +126,7 @@ class TestGroupedHelpLayout(unittest.TestCase):
                          f"ragged description columns: {sorted(offsets)}")
 
     def test_aliases_and_shorthands_shown(self):
-        self.assertRegex(HELP_TEXT, r"(?m)^    delete <ID> .*alias: rm")
+        self.assertRegex(HELP_TEXT, r"(?m)^    delete <ID\|spec> .*alias: rm")
         for line in ("-l, --list", "-e, --edit", "-g, --global"):
             self.assertRegex(
                 HELP_TEXT,

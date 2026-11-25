@@ -84,15 +84,26 @@ Thumbs.db
 *.tmp
 
 # =================================================================
-# Python Environment (если используются скрипты/тесты)
+# Python Environment & Build Artifacts
 # =================================================================
+# Python build artifacts
+*.egg-info/
+context_keeper.egg-info/
+build/
+dist/
+
+# uv
+uv.lock
+
+# Python cache
 __pycache__/
 *.py[cod]
 *$py.class
+
+# venv
 .venv/
 venv/
 env/
 
 # Context Keeper
 .ck/*.md.gz
-uv.lock

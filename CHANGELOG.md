@@ -1,0 +1,74 @@
+# Changelog
+
+All notable changes to Context Keeper are documented here. The format
+follows [Keep a Changelog](https://keepachangelog.com/) and the project
+uses [Semantic Versioning](https://semver.org/).
+
+## [0.14.0] - 2026-11-25
+
+### Added
+
+- Stable task UUIDs as first-class addresses: `ck done`, `ck delete`,
+  `ck start`, `ck focus`, `ck note`, `ck desc` and the space-routed
+  `focus` / `start` / `note` variants accept the 8-character base36
+  task UUID anywhere a positional ID works, including mixed specs
+  (`a1b2c3d4,3-4`), ranges (`2-4`) and lists (`1,3,5`).
+- Copy-paste-safe UUID suffixes in `ck list` / `ck st` / `ck notes`
+  (`[#a1b2c3d4]`); legacy tasks without a UUID render without the
+  suffix.
+- TTY-only context banner in `ck list`:
+  `[i] project: <name> — <path> (<N> open)`. Piped and redirected
+  stdout stays byte-identical, so the `grep` / `cut` contract is
+  unchanged; discovery and unknown-project branches print no banner.
+- No-context `ck list` fallback: outside every project with no nested
+  discovery matches, up to 10 registered projects are listed under
+  `Registered projects:` (then a pointer to `ck dashboard`). Every
+  printed name is addressable via `ck list <project_name>` from any
+  directory.
+- `ck done` mirrors completions into the project `ROADMAP.md`: rows
+  marked `- [ ]` / `- [>]` / `- [~]` whose title exactly matches a
+  completed task flip to `- [x]`. Best-effort — a missing file is a
+  no-op and I/O errors never break the `done` result.
+
+### Changed
+
+- `ck delete` accepts full task specs (ranges, lists, UUIDs, mixed
+  specs) with a single confirmation and deletes highest-ID-first,
+  closing the sequential-reindex bug class.
+- Package version unified to `0.14.0` across `pyproject.toml`,
+  `cklib.config.VERSION`, `cklib.__version__`, README and ROADMAP.
+- Storage schema remains the 0.13 split layout: 0.13.x projects are
+  read and written without a migration.
+
+### Fixed
+
+- `ck add` / `ck done` / `ck list` documentation and help now describe
+  spec-based addressing consistently (`<ID|spec>`).
+- Repository hygiene: `*.egg-info/`, `uv.lock`, Python caches and
+  virtualenv artifacts are ignored.
+
+## [0.13.5] - 2026-11-16
+
+### Added
+
+- Multiline task descriptions (`ck desc <ID>` show / set / `--stdin` /
+  `--clear`), stored inline in `PLAN.md` as indented `> text` lines.
+- Task due dates (`--due YYYY-MM-DD`) with the `@due(...)` marker,
+  overdue highlighting in `ck st`, and the quiet `ck notify --check`
+  cron entry point (exit 0 / 1 / 2).
+
+## [0.13.4] - 2026-11-16
+
+### Added
+
+- Period journals `week` / `month` / `year` beside `today`: dated
+  headers, lazy period rollover, reserved names, and the same
+  lifecycle guards as the daily journal.
+
+## [0.13.3] - 2026-11-15
+
+### Added
+
+- `ck export` assembles PLAN.md + HISTORY.md + recent Git log into one
+  Markdown document on stdout; `--task <ID>` narrows it to one task and
+  `--with-errors` appends recent error logs.

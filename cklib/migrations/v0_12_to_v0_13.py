@@ -45,6 +45,7 @@ from ..config import (
     LINKS_FILENAME,
     META_FILENAME,
     VERSION_FILENAME,
+    schema_compatible,
 )
 from ..models import TaskStatus, history_timestamp, new_task_uuid
 from ..notes import file_mtime_iso
@@ -259,19 +260,19 @@ class MigrateV012ToV013(Migration):
             return result
 
         found = self._stored_version(ck)
-        # major.minor only: patch releases (0.13.2 vs 0.13.3) share
-        # the schema, so an older-patch project is still "migrated".
-        if str(found).split(".")[:2] == str(VERSION).split(".")[:2] \
-                and not plan_file.is_symlink():
+        # Schema-generation comparison: patch releases share a schema,
+        # and 0.14.0 keeps the 0.13 layout, so an older-patch project
+        # is still "migrated".
+        if schema_compatible(found) and not plan_file.is_symlink():
             result.say(
-                f"Project is already at v{VERSION}; nothing to migrate.")
+                f"Project is already at v{VERSION} "
+                f"(schema v{found}); nothing to migrate.")
             result.applied = True
             return result
-        if str(found).split(".")[:2] == str(VERSION).split(".")[:2] \
-                and plan_file.is_symlink():
+        if schema_compatible(found) and plan_file.is_symlink():
             result.say(
-                f"Project is at v{VERSION}, but {plan_file} is still "
-                "a symlink; healing it into a real file.")
+                f"Project schema v{found} is current, but {plan_file} is "
+                "still a symlink; healing it into a real file.")
 
         try:
             tl = parse_plan_file(plan_file)

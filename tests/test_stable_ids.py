@@ -1,7 +1,7 @@
-"""Stable task UUIDs as first-class ID references (v0.13.6).
+"""Stable task UUIDs as first-class ID references (v0.14.0).
 
 Every task carries ``<!-- id: a1b2c3d4 -->`` — an 8-character stable
-reference written once and never regenerated. v0.13.6 promotes it
+reference written once and never regenerated. v0.14.0 promotes it
 from a hidden anchor to a first-class handle:
 
 - ``ck list`` / ``ck st`` / ``ck notes`` suffix every task row with
@@ -159,7 +159,7 @@ class TestProjectUuidCommands(unittest.TestCase):
         self.assertEqual(removed["title"], "beta")
 
     def test_delete_spec_range_and_list(self):
-        """v0.13.6: ``ck delete 2-3`` / ``ck delete 2,3`` are valid."""
+        """v0.14.0: ``ck delete 2-3`` / ``ck delete 2,3`` are valid."""
         self._seed("alpha", "beta", "gamma")
         code, out, err = _run_main(["delete", "2-3", "-f"])
         self.assertEqual(code, 0, out + err)

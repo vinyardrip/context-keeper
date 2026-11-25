@@ -1,4 +1,4 @@
-"""``ck done`` mirrors completions into the project ROADMAP.md (v0.13.6).
+"""``ck done`` mirrors completions into the project ROADMAP.md (v0.14.0).
 
 A hand-maintained roadmap checklist had a desync trap: ``ck done``
 updated PLAN.md/HISTORY.md while the roadmap checkbox stayed open.

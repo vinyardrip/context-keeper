@@ -66,6 +66,7 @@ from .config import (
     PROMPT_FILENAME,
     README_FILENAME,
     ROADMAP_FILENAME,
+    SCHEMA_VERSION,
     SNAPSHOT_INSTALL_DIR,
     TRACKED_GITIGNORE_PROTECTIONS,
     UPDATE_CHECK_INTERVAL_HOURS,
@@ -77,6 +78,7 @@ from .config import (
     get_editor,
     parse_version,
     read_color_config,
+    schema_compatible,
     warn_if_sensitive_root,
 )
 from .models import (CompletedTaskError, HistoryEntry, Notes, Task,
@@ -980,26 +982,24 @@ class ContextKeeper:
         return None
 
     def is_migrated(self) -> bool:
-        """True when the project schema matches this ck version.
+        """True when the project schema is compatible with this ck.
 
-        Compared on major.minor only: patch releases (0.13.1 vs
-        0.13.2) share the schema and are compatible.
+        Compared per schema GENERATION: patch releases share a
+        schema, and a package minor release that does not reshape the
+        files (0.14.0) keeps the 0.13 layout readable and writable.
         """
         found = self.project_schema_version()
-        return found is not None and str(found).split(".")[:2] == str(
-            VERSION).split(".")[:2]
+        return schema_compatible(found)
 
     def schema_mismatch(self) -> bool:
-        """True when a schema version exists but differs from VERSION.
+        """True when the stored schema is not compatible with this ck.
 
-        Compared on major.minor only: patch releases are compatible.
         A project with NO version markers at all is LEGACY (None) —
         also a mismatch for write commands, but the wording of the
         error differs (see :meth:`_require_migrated`).
         """
         found = self.project_schema_version()
-        return found is None or str(found).split(".")[:2] != str(
-            VERSION).split(".")[:2]
+        return not schema_compatible(found)
 
     def _require_migrated(self) -> None:
         """Write-command gate: refuse mutations on a foreign schema.
@@ -1013,7 +1013,7 @@ class ContextKeeper:
         if self.ck_path is None or not self.ck_path.is_dir():
             return  # nothing initialized; the plan guard reports that
         found = self.project_schema_version()
-        if str(found).split(".")[:2] == str(VERSION).split(".")[:2]:
+        if schema_compatible(found):
             return
         if found is None:
             raise ValueError(
@@ -1021,7 +1021,8 @@ class ContextKeeper:
                 "marker). Run `ck migrate` to upgrade it, then retry."
             )
         raise ValueError(
-            f"Project schema v{found} does not match ck v{VERSION}. "
+            f"Project schema v{found} is not compatible with ck "
+            f"v{VERSION} (schema v{SCHEMA_VERSION}). "
             "Run `ck migrate` to upgrade it, then retry."
         )
 
@@ -1042,8 +1043,8 @@ class ContextKeeper:
                 "Run `ck migrate` to split PLAN/HISTORY."
             )
         return (
-            f"Project schema v{found} != ck v{VERSION}. "
-            "Run `ck migrate`."
+            f"Project schema v{found} is not compatible with ck "
+            f"v{VERSION} (schema v{SCHEMA_VERSION}). Run `ck migrate`."
         )
 
     def migrate(self, *, dry_run: bool = True) -> "MigrationResult":
@@ -1535,7 +1536,7 @@ class ContextKeeper:
         return [task.id for task in completed]
 
     def _mirror_done_to_roadmap(self, titles: list[str]) -> None:
-        """Best-effort ROADMAP.md checkbox sync for completions (v0.13.6).
+        """Best-effort ROADMAP.md checkbox sync for completions (v0.14.0).
 
         Projects that keep a hand-maintained ``ROADMAP.md`` (checklist
         sections mirroring the plan) had a desync trap: ``ck done``
@@ -2574,7 +2575,7 @@ class ContextKeeper:
         and the choice list are identical for both commands — one
         discovery notice, two entry points.
 
-        ``registry_names`` (v0.13.6) turns the dead-end "(none
+        ``registry_names`` (v0.14.0) turns the dead-end "(none
         registered here)" case into an actionable menu: when the cwd
         has no nested projects but OTHER projects are registered
         globally, they are listed under "Registered projects:" with
@@ -2637,7 +2638,7 @@ class ContextKeeper:
         return root
 
     def list_context_banner(self, project_name: Optional[str] = None) -> str:
-        """The TTY-only context header for ``ck list`` (v0.13.6).
+        """The TTY-only context header for ``ck list`` (v0.14.0).
 
         ``[i] project: <name> — <path> (<N> open)`` — one muted line
         printed ABOVE the listing so the human reader always knows
@@ -2937,10 +2938,10 @@ class ContextKeeper:
                 "ERROR: Run `ck migrate` first "
                 "(legacy project layout detected).")
             return None
-        if str(found).split(".")[:2] != str(VERSION).split(".")[:2]:
+        if not schema_compatible(found):
             printer(
-                f"ERROR: Project schema is {found}; this ck is {VERSION}. "
-                "Run `ck migrate`.")
+                f"ERROR: Project schema is {found}; this ck is {VERSION} "
+                f"(schema v{SCHEMA_VERSION}). Run `ck migrate`.")
             return None
 
         tl = self._load_plan()
@@ -4349,7 +4350,7 @@ def _due_suffix(task: Task, palette: "ui.Palette") -> str:
 
 
 def _stable_suffix(task: Task, palette: Optional["ui.Palette"] = None) -> str:
-    """The `` [#a1b2c3d4]`` stable-ID suffix (v0.13.6).
+    """The `` [#a1b2c3d4]`` stable-ID suffix (v0.14.0).
 
     Every task line in ``ck list`` / ``ck st`` / ``ck notes`` ends
     with the task's STABLE reference — the address that survives

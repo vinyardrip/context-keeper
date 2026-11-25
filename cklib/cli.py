@@ -60,8 +60,8 @@ _HELP_GROUPS: List[tuple] = [
          "Add a task (optional deadline: @due marker)"),
         ("start <ID>", "Focus a task (0 resets; refuses to steal focus)"),
         ("focus <ID>", "Switch focus: pause the current task ([~])"),
-        ("done <ID|range>", "Mark task(s) done -> HISTORY.md"),
-        ("delete <ID>", "Delete a task (alias: rm)"),
+        ("done <ID|spec>", "Mark task(s) done -> HISTORY.md"),
+        ("delete <ID|spec>", "Delete a task (alias: rm)"),
         ("move <ID> <pos>", "Move a task"),
         ("swap <ID1> <ID2>", "Swap two tasks"),
         ("reorder <ID...>", "Set task order"),
@@ -918,7 +918,7 @@ def _resolve_task_id(owner, raw: str) -> Optional[int]:
     """Resolve ONE CLI token to a positional task ID.
 
     ``owner`` is the project keeper or a ``SpaceManager``; both expose
-    :meth:`resolve_task_ref` (positional ID or STABLE uuid, v0.13.6).
+    :meth:`resolve_task_ref` (positional ID or STABLE uuid, v0.14.0).
     ``None`` means "unresolvable" — callers keep their standard
     invalid-ID error path.
     """
@@ -1297,7 +1297,7 @@ def _dispatch(argv: Optional[List[str]] = None) -> int:
                 # standard usage error applies (non-zero exit).
                 focus_id = ck.current_focus_id()
                 if focus_id is None:
-                    print("Usage: ck done <ID|range|list>")
+                    print("Usage: ck done <ID|spec>")
                     return 2
                 spec = str(focus_id)
             ids = ck.done(spec)
@@ -1670,7 +1670,7 @@ def _run_reorder(ck, action: str, tokens: List[str]) -> int:
 
 
 def _run_task_delete(cmd: str, rest: List[str]) -> int:
-    """``ck delete <ID> [-s <space>]`` / ``ck rm <ID>``.
+    """``ck delete <ID|spec> [-s <space>]`` / ``ck rm <ID|spec>``.
 
     TASK deletion, deliberately distinct from space deletion: the
     target is one task inside either the bound project's ``PLAN.md``
@@ -1778,7 +1778,7 @@ def _run_task_delete(cmd: str, rest: List[str]) -> int:
         summary_owner = manager
 
     # SPEC RESOLUTION: positional IDs, ranges, lists and STABLE UUIDs
-    # (v0.13.6) all land here. UUID resolution needs the target's
+    # (v0.14.0) all land here. UUID resolution needs the target's
     # TaskList; an unbound project (no .ck/PLAN.md) fails the same way
     # the other project mutations do.
     from .core import resolve_id_spec
@@ -1911,7 +1911,7 @@ def _run_space_mgmt(rest: List[str]) -> int:
       NO short alias on purpose: deletion is irreversible, so the verb
       is spelled out and requires an interactive ``[y/N]`` confirmation
       (or an explicit ``-f`` / ``-y`` / ``--yes`` / ``--force``).
-      TASK deletion is the separate top-level ``ck delete <ID>``.
+      TASK deletion is the separate top-level ``ck delete <ID|spec>``.
 
     Validation lives in :mod:`cklib.spaces` (``validate_new_space_name``
     and friends); this layer only maps failures to clean ``ERROR:`` lines
@@ -2492,7 +2492,7 @@ def _legacy_dispatch(raw: List[str]) -> int:
                 # standard usage error applies (non-zero exit).
                 focus_id = ck.current_focus_id()
                 if focus_id is None:
-                    print("Usage: ck done <ID|range|list>")
+                    print("Usage: ck done <ID|spec>")
                     return 2
                 spec = str(focus_id)
             ids = ck.done(spec)

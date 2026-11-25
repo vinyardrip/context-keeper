@@ -563,7 +563,7 @@ class TestDoneImplicitFocus(_IsolatedHome, unittest.TestCase):
 
             code, out = self._run(["done"], ck.root)
             self.assertEqual(code, 2)
-            self.assertIn("Usage: ck done <ID|range|list>", out)
+            self.assertIn("Usage: ck done <ID|spec>", out)
             # Nothing was mutated.
             self.assertIn("- [ ] alpha task",
                           ck.plan_file.read_text(encoding="utf-8"))
@@ -576,7 +576,7 @@ class TestDoneImplicitFocus(_IsolatedHome, unittest.TestCase):
 
             code, out = self._run(["done"], ck.root)
             self.assertEqual(code, 2)
-            self.assertIn("Usage: ck done <ID|range|list>", out)
+            self.assertIn("Usage: ck done <ID|spec>", out)
 
     def test_explicit_id_still_works(self):
         """The classic ``ck done <ID>`` form is unchanged."""

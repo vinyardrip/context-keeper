@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
-from ..config import CK_DIR_NAME, VERSION
+from ..config import CK_DIR_NAME, VERSION, schema_compatible
 from .base import Migration, MigrationResult
 from .spaces_v0_12_to_v0_13 import (
     SPACES_BACKUP_TAG,
@@ -139,9 +139,9 @@ def migrate_all_projects(*, dry_run: bool = True) -> ProjectMigrationBatch:
         # the batch answers directly.
         plan_file = ck / "PLAN.md"
         stored = stored_schema_version(ck)
-        # major.minor only: patch releases share the schema.
-        if str(stored).split(".")[:2] == str(VERSION).split(".")[:2] \
-                and not plan_file.is_symlink():
+        # Schema-generation comparison: patch releases and the
+        # layout-preserving 0.14 minor share the 0.13 schema.
+        if schema_compatible(stored) and not plan_file.is_symlink():
             batch.entries.append(ProjectBatchEntry(
                 name=entry.name, path=entry.path, status="already"))
             batch.say(f"[!] Project {entry.name}: already at v{VERSION}")

@@ -1,4 +1,4 @@
-"""No-context ``ck list`` fallback lists registered projects (v0.13.6).
+"""No-context ``ck list`` fallback lists registered projects (v0.14.0).
 
 Outside every project with no nested discovery matches, the notice
 used to dead-end on "(none registered here)" even when OTHER projects

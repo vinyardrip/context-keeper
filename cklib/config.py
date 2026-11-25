@@ -10,7 +10,12 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-VERSION = "0.13.5"
+VERSION = "0.14.0"
+#: Storage schema generation. Package minor releases that do not
+#: change the on-disk layout keep the SAME schema: 0.14.0 reads and
+#: writes the 0.13 split layout unchanged, so existing 0.13 projects
+#: never need a migration just because the package version moved.
+SCHEMA_VERSION = "0.13.0"
 CK_DIR_NAME = ".ck"
 # Traversal-boundary markers. Kept in sync with
 # ``cklib.sandbox.SANDBOX_DIR_NAME`` (".sandbox") and Git's ".git".
@@ -28,6 +33,26 @@ MAX_BAK_FILES = 100
 # ``False`` preserves the legacy uncompressed ``.md.bak`` naming.
 # Runtime override: CK_COMPRESS_ARCHIVES (0/false/no/off disable).
 COMPRESS_ARCHIVES = True
+
+
+def _schema_minor(version: Optional[str]) -> str:
+    """The ``major.minor`` part of a schema/package version."""
+    return ".".join(str(version).split(".")[:2])
+
+
+def schema_compatible(version: Optional[str]) -> bool:
+    """True when a stored schema version is compatible with this ck.
+
+    Patch releases always share a schema. A minor release that does
+    not reshape the files (0.14.0 only adds commands/views) keeps the
+    previous generation readable and writable too, so projects at
+    0.13.x need no migration. A missing marker or an older generation
+    is still a mismatch for write commands.
+    """
+    if not version:
+        return False
+    minor = _schema_minor(version)
+    return minor in {_schema_minor(SCHEMA_VERSION), _schema_minor(VERSION)}
 
 
 def history_limit() -> int:
@@ -67,6 +92,7 @@ def compress_archives_enabled() -> bool:
     if raw is None or not raw.strip():
         return COMPRESS_ARCHIVES
     return raw.strip().lower() not in ("0", "false", "no", "off")
+
 
 PLAN_FILENAME = "PLAN.md"
 HISTORY_FILENAME = "HISTORY.md"
@@ -142,12 +168,13 @@ DEFAULT_TASK_TITLES: tuple[str, ...] = (
 )
 
 # Update notifier throttle window.
-UPDATE_CHECK_INTERVAL_HOURS = 24# GitHub releases API endpoint used by the STANDALONE startup
+UPDATE_CHECK_INTERVAL_HOURS = (
+    24  # GitHub releases API endpoint used by the STANDALONE startup
+)
 # version check: install.sh deployments carry no ``.git`` metadata
 # to probe, so the latest release tag is the remote version source.
 RELEASE_API_URL = (
-    "https://api.github.com/repos/"
-    "vinyardrip/context-keeper/releases/latest"
+    "https://api.github.com/repos/vinyardrip/context-keeper/releases/latest"
 )
 # Hard cap for the release-API probe — same reasoning as
 # ``git.NETWORK_CHECK_TIMEOUT``: a slow API must never stall the CLI.
@@ -155,8 +182,7 @@ RELEASE_CHECK_TIMEOUT = 2.0
 # Canonical remote installer used for standalone in-place updates
 # when no bundled ``install.sh`` sits inside the install directory.
 INSTALL_SH_REMOTE_URL = (
-    "https://raw.githubusercontent.com/"
-    "vinyardrip/context-keeper/main/install.sh"
+    "https://raw.githubusercontent.com/vinyardrip/context-keeper/main/install.sh"
 )
 
 INSTALL_PATH = "/usr/local/bin/ck"
@@ -332,6 +358,7 @@ def sandbox_search_boundary_active() -> bool:
     """
     try:
         from .sandbox import dev_context_active
+
         return bool(dev_context_active())
     except Exception:
         return False
@@ -458,8 +485,7 @@ def read_color_config(root: Path | None = None) -> dict:
     }
 
 
-def get_editor(root: Path | None = None,
-               *, env: dict | None = None) -> str:
+def get_editor(root: Path | None = None, *, env: dict | None = None) -> str:
     """Resolve the user's preferred editor.
 
     Strict precedence:
@@ -521,8 +547,9 @@ class LockTimeoutError(RuntimeError):
 
 
 @contextlib.contextmanager
-def file_lock(path: Path | str, *, timeout: float = 5.0,
-              poll: float = 0.05) -> Iterator[None]:
+def file_lock(
+    path: Path | str, *, timeout: float = 5.0, poll: float = 0.05
+) -> Iterator[None]:
     """Acquire an advisory exclusive lock on ``path``.
 
     ``path`` is typically the *target* of an operation (e.g. the
@@ -555,6 +582,7 @@ def file_lock(path: Path | str, *, timeout: float = 5.0,
     p = Path(path)
     try:
         from .sandbox import dev_context_active, resolve_write_path
+
         if dev_context_active():
             p = resolve_write_path(p, force=True)
     except Exception:
@@ -584,9 +612,7 @@ def file_lock(path: Path | str, *, timeout: float = 5.0,
             try:
                 fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
             except OSError as e:
-                raise LockTimeoutError(
-                    f"cannot open lock file {lock_path}: {e}"
-                ) from e
+                raise LockTimeoutError(f"cannot open lock file {lock_path}: {e}") from e
 
             while True:
                 try:

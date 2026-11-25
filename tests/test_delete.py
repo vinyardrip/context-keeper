@@ -618,7 +618,7 @@ class TestDeleteCli(_Harness):
         self.assertIn("Usage: ck rm <ID|spec> [-f|--force]", out)
 
     def test_extra_ids_delete_as_a_spec(self):
-        """v0.13.6: multiple IDs delete together (ranges/lists parity)."""
+        """v0.14.0: multiple IDs delete together (ranges/lists parity)."""
         before = self.plan_text()
         rc, out, _ = _run_main(["delete", "1", "2", "-f"])
         self.assertEqual(rc, 0)

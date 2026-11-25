@@ -1,4 +1,4 @@
-"""TTY-only context banner for ``ck list`` (v0.13.6).
+"""TTY-only context banner for ``ck list`` (v0.14.0).
 
 Piped output must stay byte-identical (the documented grep/cut
 contract); on a terminal the listing gains one muted context line:
