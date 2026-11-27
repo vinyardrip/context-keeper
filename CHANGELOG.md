@@ -4,6 +4,33 @@ All notable changes to Context Keeper are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 uses [Semantic Versioning](https://semver.org/).
 
+## [0.14.3] - 2026-11-27
+
+### Added
+
+- Task deletion inside global spaces now accepts single IDs, numeric
+  ranges (`2-4`) and lists, either space-separated (`1 3 5`) or
+  comma-separated (`1,3,5`): `ck delete <spec> -s <space>` and the
+  `ck rm` alias resolve every target first and refuse the whole
+  operation if any ID is invalid or missing.
+- Targets are deleted highest-ID-first, so positional re-indexing and
+  the `<space>.HISTORY.md` note shifting cannot redirect a later
+  deletion to the wrong task. The note sidecar is remapped after each
+  removal, and the active project's `PLAN.md` / `.ck/state.json` stay
+  untouched for cross-space deletions.
+- Confirmation prompts, non-interactive refusals and result notices
+  now name the target IDs/count and the target space (`project` for
+  the active project). Whole-space removal remains the separate
+  `ck space delete <name>` command.
+
+### Tests
+
+- `tests/test_delete.py`: space deletion coverage for ranges,
+  comma/positional lists, re-indexing, note archiving and sidecar
+  shifting, interactive and non-interactive messages, mixed invalid
+  specs, and ranges containing missing IDs; the full `pytest` suite
+  is green.
+
 ## [0.14.2] - 2026-11-27
 
 ### Fixed

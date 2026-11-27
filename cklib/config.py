@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-VERSION = "0.14.2"
+VERSION = "0.14.3"
 #: Storage schema generation. Package minor releases that do not
 #: change the on-disk layout keep the SAME schema: 0.14.0 reads and
 #: writes the 0.13 split layout unchanged, so existing 0.13 projects

@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.14.2-blue)]()
+[![version](https://img.shields.io/badge/version-0.14.3-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -110,7 +110,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.14.2
+ck -v    # → ck version 0.14.3
 ```
 
 ---
@@ -1567,6 +1567,7 @@ Logs go **exclusively** to `stderr` and `.sandbox/dev.log` — `stdout` stays co
 - [ ] Interactive Plan: manage PLAN.md tasks directly from the CLI / TUI
 
 ### Completed
+- [x] Task deletion inside global spaces accepts single IDs, ranges (`2-4`) and lists (`1 3 5` / `1,3,5`): every target is resolved and validated before any write, deletion runs highest-ID-first so re-indexing cannot hit the wrong task, notes are archived to `<space>.HISTORY.md`, and prompts/refusals/results name the target IDs, count and space (`project` for the active project) (`v0.14.3`)
 - [x] `ck space list` renders ONLY real spaces: the injected active-project row and its project-specific footer are gone, so the table is independent of the cwd; legacy `spaces_order` entries mentioning the `project` sentinel are skipped (never rewritten) and space `move`/`swap`/`reorder`/`rename`/`delete` keep working (`v0.14.2`)
 - [x] Task reordering inside spaces and daily/period journals: `ck <space> move|swap|reorder` works for `local` / `remote` / custom spaces and `today` / `week` / `month` / `year`, accepts positional IDs or stable UUIDs, refuses completed `[x]` tasks (exit 1), keeps UUIDs/notes/descriptions bound to their tasks, and re-indexes IDs 1..N (`v0.14.1`)
 - [x] Space reorder completion + docs: bash/zsh actions and help usage lines include `move` / `swap` / `reorder`; README (EN+RU) documents space/journal reordering and the refreshed-listing behavior of `reorder` (`v0.14.1`)
@@ -2652,6 +2653,7 @@ CK_DEBUG=1 ./ck-dev add "traced"    # или: ./ck-dev -v add "traced"
 - [ ] Interactive Plan: управление задачами в PLAN.md прямо из CLI / TUI
 
 ### Завершённые
+- [x] Удаление задач внутри глобальных пространств принимает одиночные ID, диапазоны (`2-4`) и списки (`1 3 5` / `1,3,5`): все цели резолвятся и проверяются до записи, удаление идёт от большего ID к меньшему, поэтому реиндексация не задевает чужие задачи, заметки архивируются в `<space>.HISTORY.md`, а промпты/отказы/результаты называют ID, количество и пространство (`project` для активного проекта) (`v0.14.3`)
 - [x] `ck space list` показывает ТОЛЬКО реальные пространства: вставленная строка активного проекта и связанный с ней футер удалены, таблица больше не зависит от текущего каталога; legacy-записи `spaces_order` с sentinel-ом `project` пропускаются при рендере (и не перезаписываются), а `move`/`swap`/`reorder`/`rename`/`delete` продолжают работать (`v0.14.2`)
 - [x] Перестановка задач внутри пространств и ежедневных/периодических журналов: `ck <space> move|swap|reorder` для `local` / `remote` / кастомных пространств и `today` / `week` / `month` / `year`, позиционные ID или стабильные UUID, отказ для завершённых `[x]` (код 1), UUID/заметки/описания остаются при своих задачах, ID перенумеровываются 1..N (`v0.14.1`)
 - [x] Completion и документация перестановки пространств: действия `move` / `swap` / `reorder` в bash/zsh и help, README (EN+RU) описывает перестановку в пространствах/журналах и перерисовку списка после `reorder` (`v0.14.1`)

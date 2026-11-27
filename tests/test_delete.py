@@ -427,6 +427,125 @@ class TestCrossSpaceDeleteCli(_Harness):
         self.assertIn("Task #3: gamma", out)
         self.assertEqual(self._space_titles(), ["alpha", "beta"])
 
+    def test_range_deletes_multiple_tasks_and_reindexes(self):
+        self.make_space("work", tasks=(
+            "alpha", "beta", "gamma", "delta", "epsilon"))
+        before_project = self.plan_text()
+
+        rc, out, err = _run_main(
+            ["delete", "2-4", "-s", "work", "-f"])
+
+        self.assertEqual(rc, 0, err)
+        self.assertIn("Task #2: beta", out)
+        self.assertIn("Task #3: gamma", out)
+        self.assertIn("Task #4: delta", out)
+        self.assertIn(
+            "Deleted 3 task(s) #2-4 from space 'work' "
+            "(2 task(s) remaining, IDs re-indexed).", out)
+        self.assertEqual(self._space_titles(), ["alpha", "epsilon"])
+        self.assertEqual(
+            [t.id for t in spaces.SpaceManager("work").load().tasks],
+            [1, 2])
+        self.assertEqual(self.plan_text(), before_project)
+
+    def test_comma_list_deletes_only_selected_space_tasks(self):
+        self.make_space("work", tasks=(
+            "alpha", "beta", "gamma", "delta"))
+
+        rc, out, err = _run_main(
+            ["delete", "1,3", "-s", "work", "-f"])
+
+        self.assertEqual(rc, 0, err)
+        self.assertIn("Deleted 2 task(s) #1, 3 from space 'work'", out)
+        self.assertEqual(self._space_titles(), ["beta", "delta"])
+
+    def test_positional_list_deletes_selected_space_tasks(self):
+        self.make_space("work", tasks=(
+            "alpha", "beta", "gamma", "delta", "epsilon"))
+
+        rc, out, err = _run_main(
+            ["delete", "1", "3", "5", "-s", "work", "-f"])
+
+        self.assertEqual(rc, 0, err)
+        self.assertIn("Deleted 3 task(s) #1, 3, 5 from space 'work'", out)
+        self.assertEqual(self._space_titles(), ["beta", "delta"])
+
+    def test_multi_delete_archives_notes_and_shifts_sidecar(self):
+        manager = self.make_space("work", tasks=(
+            "alpha", "beta", "gamma", "delta", "epsilon"))
+        manager.set_note(1, "keep alpha note")
+        manager.set_note(2, "archive beta note")
+        manager.set_note(4, "archive delta note")
+        manager.set_note(5, "shift epsilon note")
+
+        rc, out, err = _run_main(
+            ["delete", "2,4", "-s", "work", "-f"])
+
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self._space_titles(), ["alpha", "gamma", "epsilon"])
+        self.assertEqual(manager.get_note(1), "keep alpha note")
+        self.assertEqual(manager.get_note(2), "")
+        self.assertEqual(manager.get_note(3), "shift epsilon note")
+        history = spaces.history_path("work").read_text(encoding="utf-8")
+        self.assertIn("archive beta note", history)
+        self.assertIn("archive delta note", history)
+        self.assertNotIn("keep alpha note", history)
+        self.assertNotIn("shift epsilon note", history)
+        self.assertIn("Archived 2 process note(s)", out)
+
+    def test_interactive_multi_prompt_names_count_ids_and_space(self):
+        self.make_space("work")
+        prompts: list = []
+
+        rc, out, err = _run_main(
+            ["delete", "2-3", "-s", "work"],
+            tty=True, answer="y", prompt_log=prompts)
+
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(
+            prompts,
+            ["Permanently delete 2 task(s) #2-3 from space 'work'? "
+             "[y/N]: "])
+        self.assertEqual(self._space_titles(), ["alpha"])
+
+    def test_multi_non_interactive_refuses_and_names_targets(self):
+        self.make_space("work")
+        before = self._space_text()
+
+        rc, out, err = _run_main(
+            ["delete", "1", "3", "-s", "work"])
+
+        self.assertEqual(rc, 2)
+        self.assertIn(
+            "Refusing to delete task(s) #1, 3 from space 'work'", out)
+        self.assertIn("Pass -f to confirm", out)
+        self.assertEqual(self._space_text(), before)
+        self.assertNotIn("Traceback", err)
+
+    def test_range_with_missing_id_deletes_nothing(self):
+        self.make_space("work")
+        before = self._space_text()
+
+        rc, out, err = _run_main(
+            ["delete", "2-9", "-s", "work", "-f"])
+
+        self.assertEqual(rc, 2)
+        self.assertIn("No task with id 4", out)
+        self.assertEqual(self._space_text(), before)
+        self.assertNotIn("Traceback", err)
+
+    def test_mixed_invalid_spec_deletes_nothing(self):
+        self.make_space("work")
+        before = self._space_text()
+
+        rc, out, err = _run_main(
+            ["delete", "1,typo", "-s", "work", "-f"])
+
+        self.assertEqual(rc, 2)
+        self.assertIn("Invalid task ID or spec", out)
+        self.assertEqual(self._space_text(), before)
+        self.assertNotIn("Traceback", err)
+
     def test_interactive_prompt_names_space_and_task(self):
         self.make_space("work")
         prompts: list = []

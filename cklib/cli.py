@@ -1760,6 +1760,35 @@ def _run_space_reorder(mgr, space: str, action: str,
     return 0
 
 
+def _is_valid_task_id_spec(spec: str) -> bool:
+    """Whether every comma-separated chunk is a real ID/range/UUID.
+
+    ``resolve_id_spec`` intentionally ignores unrecognised chunks so
+    callers that scan free-form text can use it leniently. Deletion
+    must be stricter: ``ck delete 1,typo -f`` may not silently delete
+    task 1, so this guard rejects the whole spec before any mutation.
+    """
+    chunks = spec.split(",")
+    if not chunks:
+        return False
+    for raw in chunks:
+        chunk = raw.strip()
+        if not chunk:
+            return False
+        if "-" in chunk:
+            lo, _, hi = chunk.partition("-")
+            if not (lo.isdigit() and hi.isdigit()):
+                return False
+        elif chunk.isdigit():
+            continue
+        elif len(chunk) == 8 and chunk.isalnum():
+            # Stable task UUID; unknown values still fail resolution.
+            continue
+        else:
+            return False
+    return True
+
+
 def _run_task_delete(cmd: str, rest: List[str]) -> int:
     """``ck delete <ID|spec> [-s <space>]`` / ``ck rm <ID|spec>``.
 
@@ -1842,6 +1871,12 @@ def _run_task_delete(cmd: str, rest: List[str]) -> int:
     # form _parse-style specs accept (ranges, lists, stable UUIDs)
     # works here too.
     spec = ",".join(positional)
+    if not _is_valid_task_id_spec(spec):
+        _print_error(
+            f"ERROR: Invalid task ID or spec: {spec!r}. Task IDs are "
+            f"numbers or stable IDs (see `ck list`); to delete a "
+            f"global space use `ck space delete {spec}`.")
+        return 2
 
     target_space = space_name or spaces.PROJECT_SPACE
     ck = None
@@ -1910,10 +1945,11 @@ def _run_task_delete(cmd: str, rest: List[str]) -> int:
 
     for info in infos:
         print(f"Task #{info['id']}: {info['title']}")
+    ids_label = _collapse_ids(ids)
     if not force:
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             target_desc = (f"task #{ids[0]}" if len(ids) == 1
-                           else f"task(s) {_collapse_ids(ids)}")
+                           else f"task(s) #{ids_label}")
             _print_error(
                 f"ERROR: Refusing to delete {target_desc} from "
                 f"space {target_space!r} without confirmation "
@@ -1926,8 +1962,9 @@ def _run_task_delete(cmd: str, rest: List[str]) -> int:
                     f"'{target_space}'? [y/N]: ")
             else:
                 answer = input(
-                    f"Permanently delete {len(ids)} task(s) from space "
-                    f"'{target_space}'? [y/N]: ")
+                    f"Permanently delete {len(ids)} task(s) "
+                    f"#{ids_label} from space '{target_space}'? "
+                    "[y/N]: ")
         except (EOFError, KeyboardInterrupt):
             _notice(ui.INFO, "Aborted.")
             return 2
@@ -1966,9 +2003,9 @@ def _run_task_delete(cmd: str, rest: List[str]) -> int:
     else:
         _notice(
             ui.OK,
-            f"Deleted {len(infos)} task(s) from space '{target_space}' "
-            f"({last_removed['remaining']} task(s) remaining, "
-            "IDs re-indexed).")
+            f"Deleted {len(infos)} task(s) #{ids_label} from space "
+            f"'{target_space}' ({last_removed['remaining']} task(s) "
+            "remaining, IDs re-indexed).")
     if notes_archived:
         _notice(
             ui.INFO,
