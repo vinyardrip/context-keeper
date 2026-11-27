@@ -95,8 +95,8 @@ COMPLETION_COMMANDS: Tuple[Tuple[str, str], ...] = (
 # Actions offered after `ck local <TAB>` / `ck remote <TAB>` / any
 # dynamic `ck <space> <TAB>` (all spaces share one action vocabulary).
 _SPACE_ACTIONS: Tuple[str, ...] = (
-    "add", "list", "st", "status", "done", "focus", "start",
-    "note", "notes", "edit", "dashboard",
+    "add", "list", "st", "status", "done", "move", "swap", "reorder",
+    "focus", "start", "note", "notes", "edit", "dashboard",
 )
 
 
@@ -219,6 +219,9 @@ def _zsh_space_actions() -> str:
         "st": "detailed status view",
         "status": "detailed status view",
         "done": "complete task(s)",
+        "move": "move a task to a position",
+        "swap": "swap two tasks",
+        "reorder": "reorder active tasks",
         "focus": "focus a task",
         "start": "focus a task",
         "note": "attach a process note",
@@ -393,17 +396,17 @@ _ck_completion() {
             ;;
         local|remote)
             if [ "$COMP_CWORD" -eq 2 ]; then
-                COMPREPLY=( $(compgen -W "add list st status done focus start note notes edit dashboard" -- "$cur") )
+                COMPREPLY=( $(compgen -W "add list st status done move swap reorder focus start note notes edit dashboard" -- "$cur") )
             fi
             ;;
         today)
             if [ "$COMP_CWORD" -eq 2 ]; then
-                COMPREPLY=( $(compgen -W "init migrate add list st status done focus start note notes edit dashboard" -- "$cur") )
+                COMPREPLY=( $(compgen -W "init migrate add list st status done move swap reorder focus start note notes edit dashboard" -- "$cur") )
             fi
             ;;
         week|month|year)
             if [ "$COMP_CWORD" -eq 2 ]; then
-                COMPREPLY=( $(compgen -W "init add list st status done focus start note notes edit dashboard" -- "$cur") )
+                COMPREPLY=( $(compgen -W "init add list st status done move swap reorder focus start note notes edit dashboard" -- "$cur") )
             fi
             ;;
         completion)

@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.14.0-blue)]()
+[![version](https://img.shields.io/badge/version-0.14.1-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -110,7 +110,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.14.0
+ck -v    # → ck version 0.14.1
 ```
 
 ---
@@ -197,6 +197,9 @@ ck -v    # → ck version 0.14.0
 | ck local done \<ID\|range\|list\> | Mark workstation space task(s) done (`- [x]`); bare `ck local done` completes the space's CURRENT FOCUS (usage error without one) |
 | ck local focus \<ID\> | Focus a workstation space task (`- [>]`), demoting any other focus; `ck local focus 0` resets focus |
 | ck local start \<ID\> | Alias for `ck local focus <ID>` |
+| ck local move \<ID\> \<pos\|top\|bottom\> | Move a pending/active (`[ ]` / `[>]`) workstation space task to a 1-based position among the active tasks, or to the first/last slot. Completed (`[x]`) tasks are refused (exit 1) and the file is left byte-identical; positional IDs re-index after the move, while stable UUIDs and inline notes/descriptions travel with their task |
+| ck local swap \<ID1\> \<ID2\> | Exchange the positions of two active workstation space tasks (completed tasks refused) |
+| ck local reorder \<ID1\> \<ID2\> ... | Set the relative order of active workstation space tasks: listed IDs move first, unlisted ones keep their relative order. Prints the multi-line confirmation and then the refreshed space listing. Same engine as `ck reorder`, and UUIDs are accepted anywhere a positional ID works |
 | ck local note \<ID\> \<text\> | **Append** a timestamped process note to a workstation space task (stored in `~/.config/ck/spaces/local.json`); `--list` / `--clear` work exactly like the project command |
 | ck local notes | List every active process note of the space — the focused task's notes under `[>] Active Focus:` and every entry bound to open, unfocused tasks under `[!] Unfocused / Paused Context:` (`[i] No active process notes found.` when none); same format as the project `ck notes` |
 | ck local edit | Open the workstation space file (`~/.config/ck/spaces/local.md`) in the editor resolved by the standard logic (`.ck.json` `editor` key → `$VISUAL` → `$EDITOR` → nano/vi) |
@@ -207,15 +210,16 @@ ck -v    # → ck version 0.14.0
 | ck remote done \<ID\|range\|list\> | Mark infrastructure space task(s) done (bare form completes the space's CURRENT FOCUS) |
 | ck remote focus \<ID\> | Focus an infrastructure space task (`0` resets focus) |
 | ck remote start \<ID\> | Alias for `ck remote focus <ID>` |
+| ck remote move / swap / reorder | Task reordering inside the infrastructure space — identical semantics, messages and exit codes to `ck local move` / `swap` / `reorder` (completed tasks refused; `reorder` re-renders the space listing) |
 | ck remote note \<ID> \<text\> | **Append** a timestamped process note to an infrastructure space task (stored in `~/.config/ck/spaces/remote.json`); `--list` / `--clear` work exactly like the project command |
 | ck remote notes | List every active process note of the infrastructure space, all entries in order |
 | ck remote edit | Open the infrastructure space file (`~/.config/ck/spaces/remote.md`) in the editor |
 | ck remote dashboard | Alias for `ck dashboard` |
 | ck today init | Initialize the daily journal: create `~/.config/ck/spaces/today.md` from the empty template, set `today_date` in `~/.config/ck/state.json`, and append `today` to `spaces_order`. Idempotent (`[ok] Already initialized for YYYY-MM-DD.`); refuses a legacy `today.md` with a migration hint |
 | ck today migrate [--name \<new\>] | Rename a pre-0.12.0 regular `today` space (default target: `todo`), carrying its note sidecar and HISTORY archive; then run `ck today init` to create the daily journal |
-| ck today [\<command\>] | Daily journal tasks (`~/.config/ck/spaces/today.md`): `add`, `list` (default), `st`, `done`, `focus`/`start`, `delete`, `note`, `notes`, `edit`, `dashboard`. `list` / `st` / bare `today` are byte-identical flat dated views. At the start of the first `ck today *` command of a new local day, completed `[x]` tasks are deleted (no `HISTORY.md`) and open/focused tasks stay; `save` / `log` are refused |
+| ck today [\<command\>] | Daily journal tasks (`~/.config/ck/spaces/today.md`): `add`, `list` (default), `st`, `done`, `focus`/`start`, `move` / `swap` / `reorder`, `delete`, `note`, `notes`, `edit`, `dashboard`. `list` / `st` / bare `today` are byte-identical flat dated views. At the start of the first `ck today *` command of a new local day, completed `[x]` tasks are deleted (no `HISTORY.md`) and open/focused tasks stay; `save` / `log` are refused |
 | ck week / month / year [\<command\>] | Period journals (v0.13.4) — the `DAILY_SPACES` family beside `today`: same lifecycle, longer periods. `ck week init` creates `spaces/week.md` + the `week_date` key (same for `month` / `year`), a bare `ck week` is the flat dated list (`## Current Sprint (2026-W47)`; `month` renders the locale month name — `(2026-11, November)`, `year` the bare stamp — `(2026)`). Rollover fires lazily on ISO-week / calendar-month / calendar-year change (ISO week-year: the New Year week keeps one identity). `done` deletes completed rows (no HISTORY), `save` / `log` are refused, `migrate` is a today-only legacy verb, and the journals are reserved names (never `ck space create week`, never renamable while active) |
-| ck \<space\> \<command\> | Dynamic space routing: ANY space file placed in `~/.config/ck/spaces/<name>.md` is automatically routable with the same commands (`add` / `list` / `st` / `done` / `focus` / `start` / `note` / `notes` / `edit` / `dashboard`), rendered uniformly in the `SPACES (GLOBAL CONTEXTS)` dashboard table |
+| ck \<space\> \<command\> | Dynamic space routing: ANY space file placed in `~/.config/ck/spaces/<name>.md` is automatically routable with the same commands (`add` / `list` / `st` / `done` / `focus` / `start` / `move` / `swap` / `reorder` / `note` / `notes` / `edit` / `dashboard`), rendered uniformly in the `SPACES (GLOBAL CONTEXTS)` dashboard table |
 
 **`ck <name>` routes only to spaces.** A registered project is never a dynamic space, even if its name matches. Running `ck <project-name> <command>` prints `[err] '<name>' is a registered project, not a space.` and exits 1 — no `.lock`, no `[ok]`, no silent loss. To operate on a project from another directory, either `cd` into it, or use `ck list <name>` for a read-only view.
 
@@ -692,6 +696,33 @@ $ echo $?
 
 Exit codes: `0` success · `1` attempted to reorder a completed task · `2` usage
 error (unknown task ID, out-of-range position, non-numeric ID, missing argument).
+
+### Reordering inside spaces and daily journals
+
+The same three verbs work inside every space and journal — `ck local`, `ck
+remote`, any custom space, and the daily/period journals `today`, `week`,
+`month`, `year`:
+
+```text
+$ ck local move 3 1
+[ok] Moved task #3 -> position 1
+
+$ ck today swap 1 2
+[ok] Swapped task #1 <-> task #2
+
+$ ck week reorder 2 1
+[ok] Reordered active tasks: 2, 1
+     New order:
+       1. write the migration
+       2. review the PR
+```
+
+The semantics are identical to the project commands: only active tasks move,
+completed (`[x]`) tasks are refused with exit 1, positional IDs re-index, and
+stable UUIDs, inline notes and descriptions follow their task. `reorder`
+re-renders the refreshed space listing after the summary; `move` and `swap`
+keep a single-line confirmation. In a daily journal the lazy rollover runs
+first, exactly as it does for every other `ck today *` command.
 
 ---
 
@@ -1535,6 +1566,8 @@ Logs go **exclusively** to `stderr` and `.sandbox/dev.log` — `stdout` stays co
 - [ ] Interactive Plan: manage PLAN.md tasks directly from the CLI / TUI
 
 ### Completed
+- [x] Task reordering inside spaces and daily/period journals: `ck <space> move|swap|reorder` works for `local` / `remote` / custom spaces and `today` / `week` / `month` / `year`, accepts positional IDs or stable UUIDs, refuses completed `[x]` tasks (exit 1), keeps UUIDs/notes/descriptions bound to their tasks, and re-indexes IDs 1..N (`v0.14.1`)
+- [x] Space reorder completion + docs: bash/zsh actions and help usage lines include `move` / `swap` / `reorder`; README (EN+RU) documents space/journal reordering and the refreshed-listing behavior of `reorder` (`v0.14.1`)
 - [x] Basic project structure (`.ck/`) initialization
 - [x] Object-oriented task parser model (CommonMark + legacy `- []`)
 - [x] Three task statuses: `- [ ]`, `- [x]`, `- [>]` (Focus)
@@ -2052,6 +2085,34 @@ $ echo $?
 Коды выхода: `0` успех · `1` попытка переставить завершённую задачу · `2` ошибка
 использования (неизвестный ID, позиция вне диапазона, нечисловой ID, недостаточно
 аргументов).
+
+### Перестановка внутри пространств и журналов
+
+Те же три команды работают внутри любого пространства и журнала — `ck local`,
+`ck remote`, кастомных пространств и ежедневных/периодических журналов
+`today`, `week`, `month`, `year`:
+
+```text
+$ ck local move 3 1
+[ok] Moved task #3 -> position 1
+
+$ ck today swap 1 2
+[ok] Swapped task #1 <-> task #2
+
+$ ck week reorder 2 1
+[ok] Reordered active tasks: 2, 1
+     New order:
+       1. write the migration
+       2. review the PR
+```
+
+Семантика идентична проектным командам: перемещаются только активные задачи,
+завершённые (`[x]`) отклоняются с кодом 1, позиционные ID перенумеровываются,
+а стабильные UUID, инлайновые заметки и описания следуют за своей задачей.
+`reorder` после сводки перерисовывает обновлённый список пространства;
+`move` и `swap` оставляют однострочное подтверждение. В ежедневном журнале
+сначала выполняется ленивый перекат — как и для любой другой команды
+`ck today *`.
 
 ---
 
@@ -2589,6 +2650,8 @@ CK_DEBUG=1 ./ck-dev add "traced"    # или: ./ck-dev -v add "traced"
 - [ ] Interactive Plan: управление задачами в PLAN.md прямо из CLI / TUI
 
 ### Завершённые
+- [x] Перестановка задач внутри пространств и ежедневных/периодических журналов: `ck <space> move|swap|reorder` для `local` / `remote` / кастомных пространств и `today` / `week` / `month` / `year`, позиционные ID или стабильные UUID, отказ для завершённых `[x]` (код 1), UUID/заметки/описания остаются при своих задачах, ID перенумеровываются 1..N (`v0.14.1`)
+- [x] Completion и документация перестановки пространств: действия `move` / `swap` / `reorder` в bash/zsh и help, README (EN+RU) описывает перестановку в пространствах/журналах и перерисовку списка после `reorder` (`v0.14.1`)
 - [x] Инициализировать базовую структуру проекта (.ck/)
 - [x] Реализовать объектную модель парсера задач (CommonMark + legacy `- []`)
 - [x] Поддержка трех статусов: `- [ ]`, `- [x]`, `- [>]` (Focus)

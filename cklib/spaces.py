@@ -57,7 +57,7 @@ from typing import Optional
 from . import config, sequence
 from . import notes as note_store
 from .config import file_lock
-from .models import Notes, TaskList, TaskStatus
+from .models import CompletedTaskError, Notes, TaskList, TaskStatus
 from .parser import (
     _atomic_write_text,
     normalize_plan,
@@ -1840,6 +1840,166 @@ class SpaceManager:
         self._commit(tl)
         _remap_today_notes(self, kept_ids, transitioned)
         return transitioned
+
+    # ------------------------------------------------------------------ #
+    # Reordering (active / pending tasks only)
+    # ------------------------------------------------------------------ #
+
+    def _reorder_guard(self, tl: TaskList, task_ids: list[int]) -> None:
+        """Refuse the whole operation if ANY target is completed.
+
+        Checked up front over every supplied id so a list mixing
+        pending and completed work aborts before a single line moves —
+        the same all-or-nothing contract as the project reorder.
+        """
+        for tid in task_ids:
+            task = tl.by_id(tid)
+            if task is None:
+                raise KeyError(f"No task with id {tid}")
+            if task.status == TaskStatus.DONE:
+                raise CompletedTaskError(tid)
+
+    def _reorder_note_mapping(self, tl: TaskList) -> dict[int, int]:
+        """Map pre-reorder task IDs to their post-reorder positions.
+
+        Task IDs are positional and a fresh parse assigns them 1..N in
+        DOCUMENT order. ``TaskList`` permutes the source-line slots
+        (stable UUIDs, notes and descriptions travel on the nodes), so
+        sorting by ``line_number`` yields exactly the IDs the written
+        file will expose on the next load.
+        """
+        ordered = sorted(tl.tasks, key=lambda t: t.line_number)
+        return {task.id: new_id
+                for new_id, task in enumerate(ordered, start=1)}
+
+    def _remap_notes_after_reorder(self, tl: TaskList) -> None:
+        """Move sidecar note keys from old IDs to post-reorder IDs.
+
+        Inline ``* Note`` entries are owned by their task nodes and are
+        re-emitted beneath the task automatically. The JSON sidecar
+        (``<space>.json``) is keyed by POSITIONAL id, so a reorder must
+        translate every key through the same permutation or notes would
+        silently attach to the wrong tasks. Orphan/non-numeric keys are
+        preserved untouched; the sidecar is only written when a key
+        actually changes.
+        """
+        mapping = self._reorder_note_mapping(tl)
+        if all(old == new for old, new in mapping.items()):
+            return
+        state = self._read_state()
+        notes = state.get("notes")
+        if not isinstance(notes, dict):
+            return
+
+        updated: dict = {}
+        changed = False
+        for key, value in notes.items():
+            try:
+                tid = int(key)
+            except (TypeError, ValueError):
+                updated[key] = value
+                continue
+            new_id = mapping.get(tid)
+            if new_id is None:
+                updated[key] = value
+                continue
+            new_key = str(new_id)
+            if new_key != key:
+                changed = True
+            updated[new_key] = value
+
+        if not changed:
+            return
+        if updated:
+            state["notes"] = updated
+        else:
+            state.pop("notes", None)
+        state["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        self._write_state(state)
+
+    def move_task(self, task_id: int, target) -> str:
+        """Move an ACTIVE space task to ``target``; return the message.
+
+        ``target`` is a 1-based position among the reorderable tasks
+        (``[ ]`` / ``[>]`` / ``[~]``) or the literal ``top`` / ``bottom``
+        (aliases ``first`` / ``last``). The same :class:`TaskList` slot
+        engine as ``ck move`` is used, so the other active tasks shift
+        stably and completed rows keep their source lines.
+
+        Raises ``KeyError`` (unknown id), ``CompletedTaskError``
+        (completed target) and ``ValueError`` (invalid/out-of-range
+        target). The file and the note sidecar are only written after
+        every validation passed.
+        """
+        tl = self.load()
+        self._reorder_guard(tl, [task_id])
+        active = tl.reorderable_tasks()
+        if not active:
+            raise ValueError("No pending tasks to reorder")
+        key = str(target).strip().lower()
+        if key in ("top", "first"):
+            position = tl.move_task_to_edge(task_id, top=True)
+        elif key in ("bottom", "last"):
+            position = tl.move_task_to_edge(task_id, top=False)
+        else:
+            try:
+                wanted = int(key)
+            except ValueError:
+                raise ValueError(
+                    f"Invalid target position: {target!r}. "
+                    "Use a number, 'top', or 'bottom'.") from None
+            position = tl.move_task(task_id, wanted)
+        self._commit(tl)
+        self._remap_notes_after_reorder(tl)
+        return f"Moved task #{task_id} -> position {position}"
+
+    def swap_tasks(self, id_a: int, id_b: int) -> str:
+        """Exchange the positions of two ACTIVE space tasks.
+
+        Swapping a task with itself is a no-op. Raises ``KeyError`` for
+        an unknown id and ``CompletedTaskError`` when either target is
+        completed — before anything is written.
+        """
+        tl = self.load()
+        self._reorder_guard(tl, [id_a, id_b])
+        tl.swap_tasks(id_a, id_b)
+        self._commit(tl)
+        self._remap_notes_after_reorder(tl)
+        return f"Swapped task #{id_a} <-> task #{id_b}"
+
+    def reorder_tasks(self, ordered_ids: list[int]) -> str:
+        """Apply ``ordered_ids`` as the new relative order of the tasks.
+
+        STABLE PARTIAL semantics (shared with ``ck reorder``): listed
+        IDs move ahead of the unlisted ones in the caller's order, and
+        unlisted active tasks keep their relative order after them.
+        Returns the multi-line confirmation used by the CLI.
+
+        Raises ``KeyError`` for an unknown id, ``CompletedTaskError``
+        when ANY listed task is completed, and ``ValueError`` for an
+        empty or duplicate list. Validation happens before mutation, so
+        a rejected list leaves the space byte-identical.
+        """
+        tl = self.load()
+        self._reorder_guard(tl, ordered_ids)
+        tl.reorder_tasks(ordered_ids)
+        self._commit(tl)
+        self._remap_notes_after_reorder(tl)
+        return self._reorder_summary(ordered_ids)
+
+    def _reorder_summary(self, requested: list[int]) -> str:
+        """Build the multi-line ``ck <space> reorder`` confirmation.
+
+        The resulting sequence is re-read from disk AFTER the commit:
+        positional IDs are renumbered by the reorder, so the in-memory
+        IDs still name the pre-reorder rows. Only active tasks are
+        listed, because they are the only ones a reorder may touch.
+        """
+        active = self.load().reorderable_tasks()
+        applied = ", ".join(str(tid) for tid in requested)
+        lines = [f"Reordered active tasks: {applied}", "     New order:"]
+        lines += [f"       {t.id}. {t.title}" for t in active]
+        return "\n".join(lines)
 
     def focus(self, task_id: int) -> dict:
         """Focus a task (parking any other focused task as ``[~]``).

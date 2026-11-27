@@ -4,6 +4,35 @@ All notable changes to Context Keeper are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 uses [Semantic Versioning](https://semver.org/).
 
+## [0.14.1] - 2026-11-27
+
+### Added
+
+- Task reordering inside global spaces and daily/period journals:
+  `ck <space> move <ID> <pos|top|bottom>`, `ck <space> swap <ID1>
+  <ID2>` and `ck <space> reorder <ID...>` now work for `local`,
+  `remote`, custom spaces and the `today` / `week` / `month` / `year`
+  journals. Operands accept positional IDs or stable task UUIDs.
+- Reordering uses the shared `TaskList` slot engine: only active tasks
+  move, completed `[x]` tasks are refused with exit 1, IDs re-index
+  1..N, and stable UUIDs, inline notes and descriptions stay bound to
+  their task. The `<space>.json` note sidecar is remapped to the
+  post-reorder positions; writes remain atomic under the file lock.
+- `reorder` prints the multi-line summary and then re-renders the
+  refreshed space listing; `move` / `swap` keep a single-line
+  confirmation. A daily journal rolls over lazily before the command,
+  exactly like every other `ck today *` action.
+- Bash/Zsh completion and help now advertise `move` / `swap` /
+  `reorder` for spaces; README (EN+RU), ROADMAP and CHANGELOG are
+  updated.
+
+### Tests
+
+- `tests/test_space_reorder.py`: unit and CLI coverage for non-daily
+  and daily spaces, top/bottom targets, completed-task refusal,
+  invalid/out-of-range IDs, note/UUID preservation and
+  `ck today move 5 6`.
+
 ## [0.14.0] - 2026-11-25
 
 ### Added

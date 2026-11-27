@@ -17,3 +17,5 @@
 - [ ] BUG: ck st shows the same task in both [>] Next and [~] Paused when it has a note (duplicate title) <!-- id: hz1h95a0 -->
 - [ ] FEAT: ck <space> move/swap/reorder — task reordering inside spaces (parity with project commands) <!-- id: aq96ndsg -->
 - [ ] Push backlog: 37 непушенных коммитов в 8 репо по ~/projects (grand-mebel 9 — сначала проверить содержимое); без remote: ck_test(6), cfs_next(5), avto-calculator(2) — решить, заводить ли remote <!-- id: 1xkwlvw4 -->
+- [ ] BUG: не работает move в пространствах(остальные swap, reorder не тестировал) <!-- id: gxdtcgse -->
+- [ ] BUG: ck space list - выводит первым еще и какой-то из проектов <!-- id: q7yo9ffj -->

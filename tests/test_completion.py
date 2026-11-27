@@ -603,8 +603,8 @@ class TestZshCompletionBehaviour(_ShellHarness):
     """
 
     SPACE_ACTIONS = [
-        "add", "list", "st", "status", "done", "focus", "start",
-        "note", "notes", "edit", "dashboard",
+        "add", "list", "st", "status", "done", "move", "swap", "reorder",
+        "focus", "start", "note", "notes", "edit", "dashboard",
     ]
 
     def _offer(self, *words, prefix="", env_extra=None):

@@ -93,6 +93,8 @@ _HELP_GROUPS: List[tuple] = [
         ("space swap <a> <b>", "Swap two spaces"),
         ("space reorder", "Normalize space order"),
         ("space delete <n>", "Delete a space and its notes"),
+        ("<space> move|swap|reorder",
+         "Reorder tasks inside a space or daily journal"),
         ("today [<command>]", "Daily journal (default: list)"),
         ("today init", "Initialize the daily journal"),
         ("today migrate [--name]",
@@ -617,8 +619,8 @@ _LEGACY_CHOICES = (
 # (local / remote) or any file discovered in
 # ~/.config/ck/spaces/ (dynamic spaces).
 _SPACE_ACTIONS = frozenset({
-    "add", "list", "done", "focus", "start", "note", "notes",
-    "st", "status", "edit", "dashboard",
+    "add", "list", "done", "focus", "start", "move", "swap", "reorder",
+    "note", "notes", "st", "status", "edit", "dashboard",
 })
 
 # Flags each SPACE ACTION accepts (keyed by the action, not by the
@@ -636,6 +638,9 @@ _SPACE_ACTION_FLAGS: dict[str, frozenset] = {
                          "-g", "--global"}),
     "note": frozenset({"--clear", "--list"}),
     "dashboard": frozenset({"-v", "--verbose"}),
+    "move": frozenset(),
+    "swap": frozenset(),
+    "reorder": frozenset(),
 }
 
 # Flags each SPACE MANAGEMENT action accepts (``ck space …``).
@@ -845,7 +850,8 @@ def _space_routed_command(raw: List[str]) -> Optional[str]:
     space's Markdown file whenever the head token is NOT a known
     command (or is a built-in space name) and the second token is a
     space action (``add`` / ``list`` / ``done`` / ``focus`` /
-    ``note``). The space itself must be a built-in default
+    ``move`` / ``swap`` / ``reorder`` / ``note``). The space itself
+    must be a built-in default
     (``local`` / ``remote`` / ``today``) or an EXISTING file in
     ``~/.config/ck/spaces/``. STRICT routing (v0.9.3) validates the
     target in :func:`_dispatch_space`: a registered project or an
@@ -1666,6 +1672,91 @@ def _run_reorder(ck, action: str, tokens: List[str]) -> int:
         # project. Deliberately NOT done for single-task `move` /
         # `swap`, whose confirmation stays a single line.
         _render_sprint_after_reorder(ck)
+    return 0
+
+
+def _space_reorder_usage(space: str, action: str) -> str:
+    """Usage line for ``ck <space> move|swap|reorder``."""
+    return {
+        "move": f"ck {space} move <ID> <position|top|bottom>",
+        "swap": f"ck {space} swap <ID1> <ID2>",
+        "reorder": f"ck {space} reorder <ID1> <ID2> [<ID3> ...]",
+    }[action]
+
+
+def _run_space_reorder(mgr, space: str, action: str,
+                       args: List[str]) -> int:
+    """Run ``ck <space> move|swap|reorder`` against one space file.
+
+    Mirrors :func:`_run_reorder` (same messages, exit codes and
+    completed-task refusal) but resolves operands through
+    :func:`_resolve_task_id`, so positional IDs and stable task UUIDs
+    are both accepted — including inside daily/period journals.
+    ``reorder`` re-renders the space listing after the summary, exactly
+    like the project command.
+    """
+    usage = _space_reorder_usage(space, action)
+    if action == "move":
+        if len(args) < 2:
+            print(f"Usage: {usage}")
+            return 2
+        if len(args) > 2:
+            _print_error(f"ERROR: Too many arguments.\n   Usage: {usage}")
+            return 2
+        task_id = _resolve_task_id(mgr, args[0])
+        if task_id is None:
+            _print_error(f"ERROR: Invalid task ID: {args[0]!r}\n"
+                         f"   Usage: {usage}")
+            return 2
+        ids = [task_id]
+    else:
+        if action == "swap" and len(args) < 2:
+            print(f"Usage: {usage}")
+            return 2
+        if action == "reorder" and not args:
+            print(f"Usage: {usage}")
+            return 2
+        if action == "swap" and len(args) > 2:
+            _print_error(f"ERROR: Too many arguments.\n   Usage: {usage}")
+            return 2
+        ids = []
+        for token in args:
+            task_id = _resolve_task_id(mgr, token)
+            if task_id is None:
+                _print_error(f"ERROR: Invalid task ID: {token!r}\n"
+                             f"   Usage: {usage}")
+                return 2
+            ids.append(task_id)
+
+    try:
+        if action == "move":
+            message = mgr.move_task(ids[0], args[1])
+        elif action == "swap":
+            message = mgr.swap_tasks(ids[0], ids[1])
+        else:
+            message = mgr.reorder_tasks(ids)
+    except CompletedTaskError as e:
+        # The STRICT rule: completed work is never reordered.
+        _notice(ui.ERR,
+                f"Cannot move completed task #{e.task_id}. "
+                "Only pending/active tasks can be reordered.")
+        return 1
+    except KeyError as e:
+        _print_error(f"ERROR: {e.args[0] if e.args else e}\n"
+                     f"   Usage: {usage}")
+        return 2
+    except ValueError as e:
+        _print_error(f"ERROR: {e}\n   Usage: {usage}")
+        return 2
+    _notice(ui.OK, message)
+    if action == "reorder":
+        try:
+            listing = mgr.list_tasks()
+        except Exception:
+            return 0
+        if listing:
+            print()
+            print(listing)
     return 0
 
 
@@ -2833,8 +2924,8 @@ def _run_daily_command(space: str, rest: List[str]) -> int:
     if action not in _SPACE_ACTIONS:
         _print_error(
             f"ERROR: Unknown `ck {space}` action: {action!r}\n"
-            f"   Usage: ck {space} [st|list|add|start|done|note|notes|"
-            f"edit|dashboard|init"
+            f"   Usage: ck {space} [st|list|add|start|done|move|swap|"
+            f"reorder|note|notes|edit|dashboard|init"
             + ("|migrate]" if space == "today" else "]"))
         return 2
 
@@ -2882,6 +2973,11 @@ def _run_space_command(space: str, rest: List[str]) -> int:
     - ``done <ID|range>``     — mark task(s) done (bare form
                                  completes the space's CURRENT
                                  FOCUS, mirroring ``ck done``);
+    - ``move <ID> <pos>``     — move an active task to a 1-based
+                                 position (``top`` / ``bottom``);
+    - ``swap <ID1> <ID2>``    — exchange two active tasks;
+    - ``reorder <ID...>``     — set the relative order of active
+                                 tasks (listed IDs first);
     - ``focus <ID>``          — focus a task, demoting any other
                                  focus (``0`` resets focus);
     - ``start <ID>``          — alias for ``focus <ID>``;
@@ -2922,8 +3018,9 @@ def _run_space_command(space: str, rest: List[str]) -> int:
     usage = (
         f"Usage: ck {space} "
         "<add <text>|list|st|status [-l|-e|-g]|done <ID|range>|"
-        "focus <ID>|start <ID>|note <ID> <text>|notes|edit|"
-        "dashboard [-v]>"
+        "move <ID> <pos|top|bottom>|swap <ID1> <ID2>|"
+        "reorder <ID...>|focus <ID>|start <ID>|note <ID> <text>|notes|"
+        "edit|dashboard [-v]>"
     )
     if not rest:
         # Daily spaces are flat journals: a bare invocation means
@@ -3046,6 +3143,9 @@ def _run_space_command(space: str, rest: List[str]) -> int:
         ids = mgr.done(spec)
         _notice(ui.OK, f"Marked done: {', '.join(map(str, ids))}")
         return 0
+
+    if action in ("move", "swap", "reorder"):
+        return _run_space_reorder(mgr, space, action, args)
 
     if action in ("focus", "start"):
         # `start` is an exact alias of `focus` (command parity
