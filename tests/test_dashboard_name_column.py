@@ -178,8 +178,8 @@ class TestNameStyling(unittest.TestCase):
         """ONE name colour across ALL three tables.
 
         ``GLOBAL DASHBOARD``, ``SPACES (GLOBAL CONTEXTS)`` and
-        ``ck space list`` — including the active-project row — render
-        their primary entity name in bold magenta. Cyan is reserved
+        ``ck space list`` render their primary entity name in bold
+        magenta. Cyan is reserved
         for ``[i]`` badges, hints and active-context markers, and must
         never appear on a name.
         """
@@ -192,11 +192,9 @@ class TestNameStyling(unittest.TestCase):
             ("SPACES table", _render_spaces_table(
                 palette=ui.Palette(True)), "REMOTE"),
             ("space list spaces", _render_space_manager_list(
-                None, None, palette=ui.Palette(True)), "LOCAL"),
+                palette=ui.Palette(True)), "LOCAL"),
             ("space list spaces", _render_space_manager_list(
-                None, None, palette=ui.Palette(True)), "REMOTE"),
-            ("space list active project", _render_space_manager_list(
-                "myproj", "/w/myproj", palette=ui.Palette(True)), "myproj"),
+                palette=ui.Palette(True)), "REMOTE"),
         )
         for label, out, name in cases:
             with self.subTest(view=label, name=name):
@@ -207,8 +205,7 @@ class TestNameStyling(unittest.TestCase):
     def test_cyan_is_absent_from_every_name_cell(self):
         """No view may put cyan on the first column at all."""
         for out in (_render_spaces_table(palette=ui.Palette(True)),
-                    _render_space_manager_list("myproj", "/w/myproj",
-                                               palette=ui.Palette(True))):
+                    _render_space_manager_list(palette=ui.Palette(True))):
             for line in out.splitlines():
                 first = ui.strip_ansi(line).split("│")[1] if "│" in line else ""
                 if not first.strip() or first.strip() == "Space":

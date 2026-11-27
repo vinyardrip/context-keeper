@@ -167,10 +167,16 @@ class TestBadgesAreColoredThroughAPipe(_ColorHarness):
         self.assertEqual(code, 0, out)
         self.assertIn(STYLED["[!]"], out, out)
 
-    def test_space_list_hint_is_cyan(self):
+    def test_space_list_has_no_hint_badge(self):
+        """v0.14.2: the project-specific footer (and its ``[i]``) is gone.
+
+        ``ck space list`` is project-independent, so it carries no
+        cyan hint under the table — only the spaces themselves.
+        """
         code, out = self.run_cli(["space", "list"])
         self.assertEqual(code, 0, out)
-        self.assertIn(STYLED["[i]"], out, out)
+        self.assertNotIn(STYLED["[i]"], out, out)
+        self.assertNotIn("[i]", ui.strip_ansi(out), out)
 
     def test_reorder_badge_is_bold_red_on_refusal(self):
         # v0.13.0: `done` moves the task to HISTORY.md, so a completed

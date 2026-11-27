@@ -460,12 +460,13 @@ class TestSpaceDelete(_IsolatedHome):
 
 class TestSpaceDisplayOrder(_IsolatedHome):
 
-    def test_space_list_follows_moved_project(self):
+    def test_space_list_follows_order_without_project_row(self):
         self.make_spaces("work")
-        spaces.move_space("local", 1)  # before project
+        spaces.move_space("remote", 1)  # before project: remote, project, local
         out = self.ck.space_manager_list()
-        self.assertLess(out.index("LOCAL"), out.index("myproj"))
-        self.assertLess(out.index("myproj"), out.index("REMOTE"))
+        self.assertLess(out.index("REMOTE"), out.index("LOCAL"))
+        self.assertLess(out.index("LOCAL"), out.index("WORK"))
+        self.assertNotIn("myproj", out)
 
     def test_dashboard_spaces_table_follows_order(self):
         from cklib.core import _render_spaces_table, _space_order

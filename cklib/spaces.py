@@ -338,11 +338,12 @@ def cleanup_stale_space_locks() -> list[Path]:
     return removed
 
 
-# The DEFAULT, directory-based project space. It is not a file: it
-# stands for the active project row that ``ck space list`` renders, so
-# the ordering sequence can position it like any other space. It is
-# never creatable, renamable or deletable — the ``project`` sentinel
-# always resolves to the current project.
+# The legacy, directory-based project sentinel. It is not a file and
+# NOT a space: ``ck space list`` and the dashboards never render it.
+# It survives only so persisted ``spaces_order`` data that mentions
+# ``project`` keeps loading, and so the space-bound commands can keep
+# tolerating it without rewriting the stored sequence. It is never
+# creatable, renamable or deletable.
 PROJECT_SPACE = "project"
 
 # Daily/period journal spaces (v0.12.0, extended v0.14.0). The
@@ -366,8 +367,8 @@ DAILY_SPACES = {
 # - ``today`` / ``week`` / ``month`` / ``year`` — reserved for the
 #   DAILY/period journals; only ``ck <name> init`` (and the legacy
 #   ``today`` migration flow) may create them;
-# - ``project`` — the sentinel the management list uses for the
-#   active project row;
+# - ``project`` — the legacy ordering sentinel (never rendered as a
+#   space by ``ck space list``);
 # - ``list`` / ``create`` / ``rename`` / ``delete`` — the
 #   ``ck space …`` management verbs, and ``list`` additionally a
 #   top-level command. A space named after one of them makes
@@ -908,10 +909,11 @@ def available_space_names() -> list[str]:
 def space_order(*, include_project: bool = False) -> list[str]:
     """The current display/mutation sequence for spaces.
 
-    ``include_project=True`` prepends the default, directory-based
-    ``project`` space: the sentinel for the active project row in
-    ``ck space list`` (which therefore participates in move/swap/
-    reorder like any other space). The dashboard omits it.
+    ``include_project=True`` prepends the legacy, directory-based
+    ``project`` sentinel, which the move/swap/reorder mutations
+    understand for backward compatibility with persisted orders.
+    ``ck space list`` and the dashboards always pass ``False``: the
+    project is a context, not a space, and is never rendered as a row.
 
     The result reconciles the PERSISTED ``spaces_order`` with what
     actually exists: stale entries are dropped, safe unknown names

@@ -2,7 +2,7 @@
 Minimalist Unix-way "external memory" for developers
 Минималистичная «внешняя память» разработчика в стиле Unix
 
-[![version](https://img.shields.io/badge/version-0.14.1-blue)]()
+[![version](https://img.shields.io/badge/version-0.14.2-blue)]()
 [![python](https://img.shields.io/badge/python-3.8%2B-blue)]()
 [![platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey)]()
 [![license](https://img.shields.io/badge/license-MIT-green)]()
@@ -110,7 +110,7 @@ ln -sf "$(pwd)/ROADMAP.md" "$(pwd)/.ck/PLAN.md"
 
 ### Verify
 ```bash
-ck -v    # → ck version 0.14.1
+ck -v    # → ck version 0.14.2
 ```
 
 ---
@@ -181,10 +181,10 @@ ck -v    # → ck version 0.14.1
 | ck register [-n NAME] [--path PATH] | Add a project to the global registry |
 | ck unregister [--path PATH \| NAME] | Remove a project from the registry |
 | ck prune | Purge registry entries whose folders no longer exist; reports each purged path and a summary count |
-| ck space list / ls | Space management view: every discovered global space (dynamically scanned from `~/.config/ck/spaces/*.md`, including empty ones) plus the active project — the virtual `project` space, highlighted with bold accent on its name (no text tag), i.e. the context un-prefixed commands (`ck st`, `ck list`) resolve against. Rows follow the persisted `spaces_order` sequence (default: `project` first). Rendered as a thin box-drawing table (`┌─┬┐ │ ├─┼┤ └─┴┘`) with quiet hairline borders |
+| ck space list / ls | Space management view: every discovered global space (dynamically scanned from `~/.config/ck/spaces/*.md`, including empty ones), and nothing else — the active project is a directory context, not a space, so no project row is injected. Rows follow the persisted `spaces_order` sequence; a legacy `project` entry is skipped when rendering and left untouched on disk. Rendered as a thin box-drawing table (`┌─┬┐ │ ├─┼┤ └─┴┘`) with quiet hairline borders |
 | ck space create \<name\> / new | Create a new space from the default template (`## Current Sprint` / `## Completed`); rejects unsafe, reserved (`list`/`create`/`rename`/`delete`/`project`/`local`/`remote`/`today`) and taken names |
 | ck space rename \<old\> \<new\> / mv | Rename a space, carrying its `.json` note sidecar and `.HISTORY.md` archive along so no process notes or audit history are lost; a persisted position is carried over to the new name |
-| ck space move \<name\> \<position\> | Move a space to a 1-based position in the persisted `spaces_order` sequence (the virtual `project` space is a valid target). The order is stored in `~/.config/ck/state.json` and drives both `ck space list` and the dashboard's `SPACES` table |
+| ck space move \<name\> \<position\> | Move a space to a 1-based position in the persisted `spaces_order` sequence. The legacy `project` sentinel is still a valid target so pre-v0.14.2 orders keep working. The order is stored in `~/.config/ck/state.json` and drives both `ck space list` and the dashboard's `SPACES` table |
 | ck space swap \<name1\> \<name2\> | Exchange the positions of two spaces (any two entries of the sequence, including `project`) |
 | ck space reorder | Normalize/re-index the persisted sequence against the spaces that currently exist: stale names are dropped, new spaces appended, duplicates collapsed, and the `project` sentinel keeps its slot. Prints the numbered result |
 | ck space delete \<name\> [-f] | Permanently delete a space **and** its note sidecar / `.HISTORY.md`, then drop it from the persisted order. The target is validated **first** (a missing space reports `ERROR:` with exit 1 immediately — no stdin read, no prompt; invalid input exits 2), and an existing space asks `Permanently delete …? [y/N]` on a terminal and refuses without confirmation when non-interactive; `-f` / `--force` (or `-y` / `--yes`) skips the prompt. The virtual `project` space and the built-in `local` / `remote` can never be deleted; the daily `today` journal is deletable (`ck space delete today` also clears `today_date`). No `rm` alias — the verb is spelled out, and task deletion stays the separate top-level `ck delete <ID>` |
@@ -255,7 +255,7 @@ name**, with the contracted path beneath it as a secondary line — a
 label passed to `ck register -n` never replaces the folder name, so a
 generic container entry such as `.../.sandbox/projects` cannot be
 mistaken for a project called `projects`. Names render bold for visual
-hierarchy; the active project in `ck space list` is bold cyan. With
+hierarchy; every space name is bold magenta. With
 `ck dashboard -v` every space additionally gets its own bordered card
 (`MY SPACES`) with the progress line and the full `<< PREV` / `[>] FOCUS`
 / `>> NEXT` context triad plus its process notes — the same verbose
@@ -284,10 +284,11 @@ persisted in `~/.config/ck/state.json` under `spaces_order` (atomic write under
 a fail-closed lock). It drives both `ck space list` and the dashboard's
 `SPACES (GLOBAL CONTEXTS)` table, so the two can never disagree.
 
-The sequence always contains the virtual **`project`** space: the active
-project row ("the default directory-based space"), which un-prefixed commands
-resolve against. It is listed first by default, can be moved/swapped like any
-other entry, and can never be created, renamed or deleted.
+Persisted orders may still contain the legacy **`project`** sentinel from
+earlier releases. It remains a valid `ck space move` / `swap` target so old
+state files keep working, but it is **not a space** and is therefore never
+rendered: `ck space list` and both dashboards skip it, showing only real
+spaces. It can never be created, renamed or deleted.
 
 ```text
 $ ck space move work 1
@@ -433,8 +434,8 @@ dynamically: `local`, `remote` and every custom space share one action
 vocabulary, so a space added with `ck space create` completes immediately.
 
 Space completion follows the **persisted `spaces_order`** from
-`~/.config/ck/state.json`, so suggestions match `ck space list` exactly. The
-virtual `project` row is surfaced for `move` / `swap` but filtered from
+`~/.config/ck/state.json`. The legacy `project` sentinel is surfaced only for
+`move` / `swap` (it is never rendered by `ck space list`) and filtered from
 `rename` / `delete`; `delete` also hides the protected built-ins
 (`local` / `remote`). A missing, empty or unreadable state file or registry
 degrades to plain command completion — no traceback, no noise in the prompt.
@@ -1242,7 +1243,7 @@ state on some terminals.
 
 Project names use bold magenta precisely so they can never be mistaken for a cyan
 `[i]` hint. Space names in `SPACES` keep their own styling, and the active project
-in `ck space list` is accented without a literal `[PROJECT]` tag.
+row was removed from `ck space list`; every listed name is bold magenta.
 
 The sandbox banner is drawn by the same framing primitive as every other banner:
 
@@ -1566,6 +1567,7 @@ Logs go **exclusively** to `stderr` and `.sandbox/dev.log` — `stdout` stays co
 - [ ] Interactive Plan: manage PLAN.md tasks directly from the CLI / TUI
 
 ### Completed
+- [x] `ck space list` renders ONLY real spaces: the injected active-project row and its project-specific footer are gone, so the table is independent of the cwd; legacy `spaces_order` entries mentioning the `project` sentinel are skipped (never rewritten) and space `move`/`swap`/`reorder`/`rename`/`delete` keep working (`v0.14.2`)
 - [x] Task reordering inside spaces and daily/period journals: `ck <space> move|swap|reorder` works for `local` / `remote` / custom spaces and `today` / `week` / `month` / `year`, accepts positional IDs or stable UUIDs, refuses completed `[x]` tasks (exit 1), keeps UUIDs/notes/descriptions bound to their tasks, and re-indexes IDs 1..N (`v0.14.1`)
 - [x] Space reorder completion + docs: bash/zsh actions and help usage lines include `move` / `swap` / `reorder`; README (EN+RU) documents space/journal reordering and the refreshed-listing behavior of `reorder` (`v0.14.1`)
 - [x] Basic project structure (`.ck/`) initialization
@@ -2650,6 +2652,7 @@ CK_DEBUG=1 ./ck-dev add "traced"    # или: ./ck-dev -v add "traced"
 - [ ] Interactive Plan: управление задачами в PLAN.md прямо из CLI / TUI
 
 ### Завершённые
+- [x] `ck space list` показывает ТОЛЬКО реальные пространства: вставленная строка активного проекта и связанный с ней футер удалены, таблица больше не зависит от текущего каталога; legacy-записи `spaces_order` с sentinel-ом `project` пропускаются при рендере (и не перезаписываются), а `move`/`swap`/`reorder`/`rename`/`delete` продолжают работать (`v0.14.2`)
 - [x] Перестановка задач внутри пространств и ежедневных/периодических журналов: `ck <space> move|swap|reorder` для `local` / `remote` / кастомных пространств и `today` / `week` / `month` / `year`, позиционные ID или стабильные UUID, отказ для завершённых `[x]` (код 1), UUID/заметки/описания остаются при своих задачах, ID перенумеровываются 1..N (`v0.14.1`)
 - [x] Completion и документация перестановки пространств: действия `move` / `swap` / `reorder` в bash/zsh и help, README (EN+RU) описывает перестановку в пространствах/журналах и перерисовку списка после `reorder` (`v0.14.1`)
 - [x] Инициализировать базовую структуру проекта (.ck/)

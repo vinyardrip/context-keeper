@@ -217,10 +217,11 @@ class TestProjectNameColorIsMagenta(unittest.TestCase):
         self.assertEqual(core._paint_name("X", "cyan", ui.Palette(True)),
                          f"{ui.BOLD}X{ui.RESET}")
 
-    def test_active_project_row_is_not_plain_bold(self):
-        out = _render_space_manager_list("myproj", "/w/myproj",
-                                         palette=ui.Palette(True))
-        self.assertNotIn(f"{ui.BOLD}myproj{ui.RESET}", out)
+    def test_space_list_has_no_project_row(self):
+        """The view is project-independent: there is no row to style."""
+        out = _render_space_manager_list(palette=ui.Palette(True))
+        self.assertNotIn("myproj", out)
+        self.assertIn(f"{PROJECT_COLOR}LOCAL{ui.RESET}", out)
 
 
 if __name__ == "__main__":

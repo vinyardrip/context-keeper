@@ -2810,27 +2810,13 @@ class ContextKeeper:
     def space_manager_list(self) -> str:
         """Render the ``ck space list`` management view.
 
-        Every global space plus the ACTIVE PROJECT row tagged
-        ``[PROJECT]`` — the context un-prefixed commands resolve
-        against. The row is resolved through the FULL hierarchy
-        (:meth:`resolve_context`: local → ancestors → global
-        registry), so it always names exactly where ``ck st`` /
-        ``ck list`` really operate; with no context at all the row is
-        simply absent and the footer says so. ROOT-INDEPENDENT: a
-        dangling cwd degrades to the registry tier, never a crash.
+        Every REAL space — built-ins, discovered space files and
+        initialized journals — and nothing else. The active project is
+        a directory context, not a global space, so it no longer gets
+        an injected row here; the view is independent of the cwd and
+        of whether a project resolves at all.
         """
-        name = path = None
-        try:
-            ctx = self.resolve_context()
-        except Exception:
-            ctx = None
-        if ctx is not None and ctx.root is not None:
-            try:
-                path = str(Path(ctx.root).resolve())
-                name = Path(ctx.root).name
-            except (OSError, ValueError):
-                name = path = None
-        return _render_space_manager_list(name, path, _chrome_palette(self))
+        return _render_space_manager_list(_chrome_palette(self))
 
     def dashboard(self, *, verbose: bool = False) -> str:
         """Return the cross-project dashboard as a string.
@@ -5585,57 +5571,31 @@ def _render_grid(title: str, headers: tuple, keys: tuple, rows: list, *,
     return "\n".join(out)
 
 
-def _render_space_manager_list(project_name: Optional[str],
-                              project_path: Optional[str],
-                              palette: Optional[ui.Palette] = None
-                              ) -> str:
-    """``ck space list`` — spaces plus the active PROJECT context row.
+def _render_space_manager_list(
+        palette: Optional[ui.Palette] = None) -> str:
+    """``ck space list`` — every REAL space, and nothing else.
 
-    The PROJECT row is rendered FIRST and marked by ACCENT ONLY — a
-    bold/cyan name, no text tag — so the resolution order is explicit
-    (un-prefixed commands ``ck st`` / ``ck list`` always apply to that
-    project, while every global space is reached by prefixing its name,
-    ``ck local st``) WITHOUT the literal ``[PROJECT]`` prefix widening
-    the Space column and wrapping long project names. When no project
-    resolves, a note says so explicitly instead of faking a row.
+    Only managed spaces render here: the built-in defaults, discovered
+    space files and initialized journals. The active project is a
+    directory context rather than a global space, so it is deliberately
+    NOT injected as a row — a project row mixed a directory into a
+    file-backed table and made the list disagree with the space
+    mutations (``move`` / ``swap`` / ``reorder``).
+
+    ``spaces_order`` still accepts and preserves the legacy ``project``
+    sentinel so existing persisted order data and the space mutation
+    commands keep working; the renderer simply skips it.
 
     Reuses the SAME engine, the SAME width policy and the SAME cell
     builder as the dashboard's ``SPACES (GLOBAL CONTEXTS)`` table, so
-    the three views can never disagree about a space's focus, progress
-    or last-active stamp — nor about column widths.
+    the views can never disagree about a space's focus, progress or
+    last-active stamp — nor about column widths.
     """
     p = palette if palette is not None else ui.get_chrome_palette()
     rows: list[dict] = []
-    # The sequence INCLUDES the virtual ``project`` space, so a user
-    # can move/swap the active project row like any other space
-    # (``spaces_order`` is the single persisted source of truth).
-    for entry in spaces.space_order(include_project=True):
-        if entry == spaces.PROJECT_SPACE:
-            if project_name is None or project_path is None:
-                # No resolvable project: the sentinel stays in the
-                # ordering sequence but has no row to render.
-                continue
-            # The active project is marked by ACCENT ONLY — a bold
-            # magenta name and nothing else. A literal `[PROJECT]` tag
-            # used to widen the Space column and wrap long project
-            # names; colour costs no columns, so the grid keeps its
-            # layout.
-            #
-            # It is painted through the SHARED ``_grid_row`` /
-            # ``_paint_name`` dispatch — the same path every other name
-            # cell takes — rather than by wrapping the finished cell in
-            # a local escape sequence, which is how the views drifted
-            # apart in the first place.
-            active = _grid_row(
-                project_name, project_path, "n/a", "",
-                (p.muted("n/a"),), p.muted("n/a"),
-                palette=p, name_style=_NAME_STYLE_MAGENTA)
-            rows.append({
-                k: (v[0], p.muted(v[1])) if k == "name" else v
-                for k, v in active.items()
-            })
-            continue
-        space = entry
+    # ``include_project=False``: the project sentinel is an ordering
+    # artefact, not a space, and must never appear in this table.
+    for space in spaces.space_order(include_project=False):
         snap = spaces.space_snapshot(space)
         if snap["focus_id"] is not None:
             focus_head = f"[{snap['focus_id']}] [>]"
@@ -5649,23 +5609,12 @@ def _render_space_manager_list(project_name: Optional[str],
             _progress_cell(snap["done"], snap["total"], snap["pct"]),
             last,
             palette=p, name_style=_NAME_STYLE_MAGENTA))
-    out = _render_standard_grid(
+    return _render_standard_grid(
         "SPACES (GLOBAL CONTEXTS)",
         _SPACES_FIRST_HEADER,
         rows,
         palette=p,
     )
-    if project_name is None or project_path is None:
-        out += "\n" + notice(
-            INFO, "No project in this directory: un-prefixed commands "
-                  "have no local context. Use `ck <space> <cmd>` for a "
-                  "space.", p)
-    else:
-        out += "\n" + notice(
-            INFO, "Un-prefixed commands (`ck st`, `ck list`, …) apply "
-                  f"to the highlighted project ({project_name}). Use "
-                  "`ck <space> <cmd>` for a space.", p)
-    return out
 
 
 def _space_order() -> list[str]:

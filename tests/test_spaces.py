@@ -2404,12 +2404,11 @@ class TestSpaceManagement(_IsolatedHome):
         self.assertEqual(
             cells, ["Space", "Focus Task", "Progress", "Last Active"])
 
-    def test_space_list_shows_current_project_marker(self):
-        """The active PROJECT row is explicit — marked by ACCENT ONLY.
+    def test_space_list_omits_active_project_row(self):
+        """v0.14.2: the active project is a context, not a space.
 
-        The row is identified by bold/cyan highlighting of the name
-        itself, never by a literal ``[PROJECT]`` prefix: a text tag
-        widened the Space column and wrapped long project names.
+        ``ck space list`` renders only real spaces; the cwd project
+        must not be injected as an extra row or footer.
         """
         project = Path(tempfile.gettempdir()) / "mgmt-proj"
         project.mkdir(exist_ok=True)
@@ -2425,55 +2424,56 @@ class TestSpaceManagement(_IsolatedHome):
         code, out = self._run(["space", "list"])
 
         self.assertEqual(code, 0)
-        # NO text tag anywhere in the view.
+        self.assertNotIn("mgmt-proj", out)
         self.assertNotIn("[PROJECT]", out)
-        # The project row comes FIRST — it is what un-prefixed
-        # commands resolve against.
-        self.assertLess(out.index("mgmt-proj"), out.index("LOCAL"))
-        self.assertIn(
-            "Un-prefixed commands (`ck st`, `ck list`, …) apply to "
-            "the highlighted project (mgmt-proj)", out)
+        self.assertNotIn("highlighted project", out)
+        self.assertIn("LOCAL", out)
+        self.assertIn("SPACES (GLOBAL CONTEXTS)", out)
 
-    def test_project_row_is_accented_not_labelled(self):
-        """With colors on, the project name itself carries the accent."""
-        project = Path(tempfile.gettempdir()) / "accent-proj"
+    def test_space_list_ignores_project_sentinel_in_spaces_order(self):
+        """A persisted ``project`` entry is skipped, not rendered.
+
+        Legacy ``spaces_order`` data may still mention the sentinel;
+        it must neither leak a project row nor be rewritten by the
+        read-only listing.
+        """
+        project = Path(tempfile.gettempdir()) / "order-proj"
         project.mkdir(exist_ok=True)
         (project / ".ck").mkdir(exist_ok=True)
         (project / ".ck" / "PLAN.md").write_text(
-            "# accent-proj\n## Current Sprint\n- [ ] a task\n",
+            "# order-proj\n## Current Sprint\n- [ ] a task\n",
             encoding="utf-8")
         spaces.add_space_task("local", "a local task")
+        spaces.add_space_task("remote", "an infra task")
+        state_file = spaces.global_state_path()
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        stored = {"spaces_order": ["remote", "project", "local"]}
+        state_file.write_text(json.dumps(stored), encoding="utf-8")
         cwd = os.getcwd()
         os.chdir(project)
         self.addCleanup(os.chdir, cwd)
 
-        with mock.patch.dict(os.environ,
-                             {"NO_COLOR": "", "FORCE_COLOR": "1"}):
-            _, out = self._run(["space", "list"])
+        code, out = self._run(["space", "list"])
 
-        from cklib.ui import strip_ansi, BOLD_MAGENTA
-        row = next(l for l in out.splitlines()
-                   if "accent-proj" in strip_ansi(l) and "│" in strip_ansi(l))
-        # bold magenta wraps the name only — no tag, and the border
-        # paint never leaks onto the content. This is the SAME colour
-        # the dashboard tables use, so every view agrees.
-        self.assertIn(f"{BOLD_MAGENTA}accent-proj\033[0m", row)
-        self.assertNotIn("[PROJECT]", strip_ansi(row))
-        self.assertNotIn("\033[36m", row)
+        self.assertEqual(code, 0)
+        self.assertNotIn("order-proj", out)
+        # Real spaces still follow the persisted relative order.
+        self.assertLess(out.index("REMOTE"), out.index("LOCAL"))
+        self.assertEqual(json.loads(state_file.read_text(encoding="utf-8")),
+                         stored)
 
-    def test_space_list_without_project_notes_the_absence(self):
+    def test_space_list_renderer_needs_no_project_context(self):
         spaces.add_space_task("local", "a local task")
 
-        # A rootless keeper with no resolvable project context.
         from cklib.core import _render_space_manager_list
-        out = _render_space_manager_list(None, None)
+        out = _render_space_manager_list()
 
-        self.assertNotIn("[PROJECT]", out)
-        self.assertIn("No project in this directory", out)
         self.assertIn("LOCAL", out)
+        self.assertIn("REMOTE", out)
+        self.assertNotIn("[PROJECT]", out)
 
-    def test_space_list_hides_project_row_when_unresolvable(self):
-        """An uninitialized directory is NOT shown as a project."""
+    def test_space_list_outside_project_has_no_project_noise(self):
+        """Outside any project the table is identical — no absence note."""
         empty = self._tmpdir()
         cwd = os.getcwd()
         os.chdir(empty)
@@ -2483,9 +2483,10 @@ class TestSpaceManagement(_IsolatedHome):
         code, out = self._run(["space", "list"])
 
         self.assertEqual(code, 0)
-        self.assertNotIn("[PROJECT]", out)
-        self.assertIn("No project in this directory", out)
         self.assertIn("LOCAL", out)
+        self.assertNotIn("[PROJECT]", out)
+        self.assertNotIn("No project in this directory", out)
+        self.assertNotIn("Un-prefixed commands", out)
 
     def test_space_list_alias_ls(self):
         code_list, out_list = self._run(["space", "list"])

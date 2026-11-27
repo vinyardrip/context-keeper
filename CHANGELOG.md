@@ -4,6 +4,26 @@ All notable changes to Context Keeper are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/) and the project
 uses [Semantic Versioning](https://semver.org/).
 
+## [0.14.2] - 2026-11-27
+
+### Fixed
+
+- `ck space list` no longer injects the active project as an extra row:
+  the view now renders only real spaces (built-ins, discovered space
+  files and initialized journals), independent of the current
+  directory. The project-specific footer (“highlighted project” /
+  “No project in this directory”) is gone with the row.
+- Legacy `spaces_order` data that still contains the `project` sentinel
+  keeps loading: the renderer skips it and leaves the stored sequence
+  byte-identical, while `ck space move` / `swap` / `reorder` / `rename`
+  / `delete` continue to accept and preserve existing orders.
+
+### Tests
+
+- Regression coverage for `ck space list` inside and outside a
+  project, with and without persisted `spaces_order` entries, plus the
+  updated table/rendering and space-mutation expectations.
+
 ## [0.14.1] - 2026-11-27
 
 ### Added
